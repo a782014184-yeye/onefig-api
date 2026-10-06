@@ -1,0 +1,769 @@
+// OneFig 管理后台控制台（四页：数据看板 / 素材管理 / 账号管理 / 素材请求）
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const PLANS = { basic: '青果会员', pro: '红果会员', team: '金果会员' };
+const PLAN_PRICE = { basic: 29.9, pro: 99.9, team: 299.9 };
+
+module.exports = function registerConsole(app, deps) {
+  const { consoleAuth, esc, DATA_DIR } = deps;
+  const DIR = path.join(DATA_DIR, 'console');
+  fs.mkdirSync(DIR, { recursive: true });
+  const file = n => path.join(DIR, n);
+  const load = (n, d) => { try { return JSON.parse(fs.readFileSync(file(n), 'utf8')); } catch { return d; } };
+  const save = (n, rows) => { const t = file(n) + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, file(n)); };
+
+  // ---------- API ----------
+  app.get('/console/api/stats', consoleAuth, (req, res) => {
+    const users = load('users.json', []);
+    const orders = load('orders.json', []).filter(o => o.status === 'paid');
+    const totalRevenue = orders.reduce((s, o) => s + o.amount, 0);
+    const levelCount = { basic: 0, pro: 0, team: 0 };
+    users.forEach(u => { if (levelCount[u.level] !== undefined) levelCount[u.level]++; });
+    const monthly = {};
+    orders.forEach(o => {
+      const m = (o.paidAt || '').slice(0, 7) || '未知';
+      monthly[m] = monthly[m] || { basic: { n: 0, amt: 0 }, pro: { n: 0, amt: 0 }, team: { n: 0, amt: 0 } };
+      if (monthly[m][o.plan]) { monthly[m][o.plan].n++; monthly[m][o.plan].amt += o.amount; }
+    });
+    const days = [];
+    const now = new Date();
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(now); d.setDate(d.getDate() - i);
+      const key = d.toISOString().slice(0, 10);
+      days.push({
+        date: key.slice(5),
+        users: users.filter(u => (u.joinedAt || '').slice(0, 10) === key).length,
+        revenue: orders.filter(o => (o.paidAt || '').slice(0, 10) === key).reduce((s, o) => s + o.amount, 0),
+      });
+    }
+    res.json({ ok: true, totalUsers: users.length, levelCount, totalRevenue, monthly, days });
+  });
+
+  // 每日走势：新增用户 + 收入（可选 7/30/180/365 天）
+  app.get('/console/api/trend', consoleAuth, (req, res) => {
+    const days = Math.min(366, Math.max(1, parseInt(req.query.range, 10) || 30));
+    const users = load('users.json', []);
+    const orders = load('orders.json', []).filter(o => o.status === 'paid');
+    const key = iso => {
+      const d = new Date(iso);
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    };
+    const out = [];
+    const now = new Date();
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(now); d.setDate(d.getDate() - i);
+      const k = key(d.toISOString());
+      out.push({
+        date: k.slice(5),
+        users: users.filter(u => u.joinedAt && key(u.joinedAt) === k).length,
+        revenue: orders.filter(o => o.paidAt && key(o.paidAt) === k).reduce((s, o) => s + o.amount, 0),
+      });
+    }
+    res.json({ ok: true, days: out });
+  });
+
+  // 积分统计：总收入 + 各套餐收入 + 每日购买积分数（近 N 天柱状图）
+  app.get('/console/api/credit-stats', consoleAuth, (req, res) => {
+    const days = Math.min(366, Math.max(7, parseInt(req.query.range, 10) || 30));
+    const all = load(path.join('..', 'ai', 'credit-orders.json'), []);
+    const paid = all.filter(o => o.status === 'paid');
+    const PKG_NAMES = { p10: '10积分', p30: '30积分', p100: '100积分' };
+    const byPkg = {};
+    paid.forEach(o => {
+      byPkg[o.pkg] = byPkg[o.pkg] || { pkg: o.pkg, name: PKG_NAMES[o.pkg] || o.pkg, count: 0, credits: 0, revenue: 0 };
+      byPkg[o.pkg].count++; byPkg[o.pkg].credits += o.credits; byPkg[o.pkg].revenue += o.amount;
+    });
+    const key = iso => {
+      const d = new Date(iso);
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    };
+    const out = [];
+    const now = new Date();
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(now); d.setDate(d.getDate() - i);
+      const k = key(d.toISOString());
+      const todays = paid.filter(o => o.paidAt && key(o.paidAt) === k);
+      out.push({ date: k.slice(5), credits: todays.reduce((s, o) => s + o.credits, 0), revenue: todays.reduce((s, o) => s + o.amount, 0), orders: todays.length });
+    }
+    res.json({
+      ok: true,
+      totalRevenue: paid.reduce((s, o) => s + o.amount, 0),
+      totalCredits: paid.reduce((s, o) => s + o.credits, 0),
+      totalOrders: paid.length,
+      pending: all.filter(o => o.status === 'pending' || o.status === 'notified').length,
+      byPkg: Object.values(byPkg),
+      days: out,
+    });
+  });
+
+  // 积分流水（全部调整与赠送记录）
+  app.get('/console/api/credit-log', consoleAuth, (req, res) => {
+    const log = loadLog().slice().reverse().slice(0, 200);
+    res.json({ ok: true, list: log });
+  });
+
+  app.get('/console/api/users', consoleAuth, (req, res) => {
+    const users = load('users.json', []);
+    const orders = load('orders.json', []).filter(o => o.status === 'paid');
+    const q = (req.query.q || '').trim().toLowerCase();
+    let list = users.map(u => ({
+      ...u,
+      totalPaid: orders.filter(o => o.userId === u.id).reduce((s, o) => s + o.amount, 0),
+      orderCount: orders.filter(o => o.userId === u.id).length,
+    }));
+    if (q) list = list.filter(u => ((u.name || '') + (u.contact || '') + (u.email || '')).toLowerCase().includes(q));
+    res.json({ ok: true, list });
+  });
+
+  app.get('/console/api/users/:id', consoleAuth, (req, res) => {
+    const users = load('users.json', []);
+    const orders = load('orders.json', []).filter(o => o.userId === req.params.id);
+    const u = users.find(x => x.id === req.params.id);
+    if (!u) return res.status(404).json({ ok: false });
+    const my = orders.sort((a, b) => (a.createdAt || a.paidAt) < (b.createdAt || b.paidAt) ? 1 : -1);
+    const levelLog = loadLevelLog().filter(l => l.userId === u.id).reverse();
+    let creditOrders = [];
+    try {
+      creditOrders = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'ai', 'credit-orders.json'), 'utf8'))
+        .filter(o => o.userId === u.id).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    } catch {}
+    let creditLog = [];
+    try {
+      creditLog = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'ai', 'credit-log.json'), 'utf8'))
+        .filter(l => l.userId === u.id).reverse();
+    } catch {}
+    res.json({ ok: true, user: u, orders: my, totalPaid: my.reduce((s, o) => s + o.amount, 0), levelLog, creditOrders, creditLog });
+  });
+
+  const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制开通一次性赠送积分
+  const CREDIT_LOG = path.join(DATA_DIR, 'ai', 'credit-log.json');
+  const loadLog = () => { try { return JSON.parse(fs.readFileSync(CREDIT_LOG, 'utf8')); } catch { return []; } };
+  const saveLog = rows => { fs.mkdirSync(path.dirname(CREDIT_LOG), { recursive: true }); const t = CREDIT_LOG + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, CREDIT_LOG); };
+  const logCredit = (u, delta, reason, by) => saveLog([...loadLog(), { userId: u.id, name: u.name, delta, reason, time: new Date().toISOString(), by: by || 'system' }]);
+
+  // 会员等级变更流水（2026-09-22）：后台手动改等级时记录 时间/原等级/新等级/操作者
+  const loadLevelLog = () => load('level-log.json', []);
+  const logLevel = (u, from, to, by) => save('level-log.json', [...loadLevelLog(), { userId: u.id, name: u.name, from, to, time: new Date().toISOString(), by: by || 'admin' }]);
+
+  // 开通会员时按等级一次性赠送 AI 积分（每个等级只送一次，重复改等级不重复送）
+  function grantMemberCredits(u, level) {
+    if (!MEMBER_GIFT[level]) return 0;
+    if (u.creditsGrantedFor === level) return 0;
+    u.creditsGrantedFor = level;
+    u.credits = (u.credits || 0) + MEMBER_GIFT[level];
+    return MEMBER_GIFT[level];
+  }
+
+  app.patch('/console/api/users/:id', consoleAuth, (req, res) => {
+    const users = load('users.json', []);
+    const u = users.find(x => x.id === req.params.id);
+    if (!u) return res.status(404).json({ ok: false });
+    const { level, notes } = req.body || {};
+    if (level !== undefined) {
+      if (level !== 'none' && !PLANS[level]) return res.status(400).json({ ok: false, error: '无效的会员等级' });
+      const from = u.level || 'none';
+      if (level !== from) logLevel(u, from, level, 'admin');
+      u.level = level;
+      if (level !== 'none' && !u.memberSince) u.memberSince = new Date().toISOString();
+      if (level === 'none') u.memberSince = null;
+      const granted = grantMemberCredits(u, level);
+      if (granted) logCredit(u, granted, '开通' + PLANS[level] + '赠送');
+    }
+    if (notes !== undefined) u.notes = String(notes).slice(0, 500);
+    save('users.json', users);
+    res.json({ ok: true });
+  });
+
+  app.post('/console/api/orders', consoleAuth, (req, res) => {
+    const { userName, contact, plan, amount, paidAt } = req.body || {};
+    if (!userName || !PLANS[plan]) return res.status(400).json({ ok: false, error: '请填写用户昵称和会员类型' });
+    const amt = Math.max(0, Number(amount) || PLAN_PRICE[plan]);
+    const users = load('users.json', []);
+    const orders = load('orders.json', []);
+    let u = users.find(x => x.name === String(userName).trim() && (contact ? x.contact === String(contact).trim() : true));
+    if (!u) {
+      u = { id: crypto.randomUUID(), name: String(userName).trim(), contact: String(contact || '').trim(), level: 'none', joinedAt: new Date().toISOString(), memberSince: null, notes: '' };
+      users.push(u);
+    }
+    u.level = plan;
+    if (!u.memberSince) u.memberSince = new Date().toISOString();
+    const granted = grantMemberCredits(u, plan);
+    if (granted) logCredit(u, granted, '开通' + PLANS[plan] + '赠送');
+    const order = { id: crypto.randomUUID(), userId: u.id, userName: u.name, plan, amount: amt, status: 'paid', paidAt: paidAt ? new Date(paidAt).toISOString() : new Date().toISOString(), channel: '手动记录' };
+    orders.push(order);
+    save('users.json', users); save('orders.json', orders);
+    res.json({ ok: true, order });
+  });
+
+  // 在线订单：待确认列表 + 一键确认收款（自动升级会员）
+  app.get('/console/api/orders', consoleAuth, (req, res) => {
+    let orders = load('orders.json', []);
+    if (req.query.status) orders = orders.filter(o => req.query.status.split(',').includes(o.status));
+    orders.sort((a, b) => (a.createdAt || '') < (b.createdAt || '') ? 1 : -1);
+    res.json({ ok: true, list: orders });
+  });
+
+  app.post('/console/api/orders/:id/confirm', consoleAuth, (req, res) => {
+    const users = load('users.json', []);
+    const orders = load('orders.json', []);
+    const o = orders.find(x => x.id === req.params.id);
+    if (!o) return res.status(404).json({ ok: false });
+    if (o.status === 'paid') return res.json({ ok: true, order: o });
+    o.status = 'paid';
+    o.paidAt = new Date().toISOString();
+    const u = users.find(x => x.id === o.userId);
+    if (u) {
+      u.level = o.plan;
+      if (!u.memberSince) u.memberSince = o.paidAt;
+      if (!u.name && o.userName) u.name = o.userName;
+      const granted = grantMemberCredits(u, o.plan);
+      if (granted) logCredit(u, granted, '开通' + PLANS[o.plan] + '赠送');
+    }
+    save('users.json', users); save('orders.json', orders);
+    res.json({ ok: true, order: o });
+  });
+
+  // 收款信息设置（网站付款页展示）
+  app.get('/console/api/payinfo', consoleAuth, (req, res) => {
+    res.json({ ok: true, ...load('payinfo.json', { wechat: '', alipay: '', note: '转账时备注你的注册邮箱，方便确认' }) });
+  });
+  app.put('/console/api/payinfo', consoleAuth, (req, res) => {
+    const { wechat, alipay, note } = req.body || {};
+    save('payinfo.json', { wechat: String(wechat || '').slice(0, 100), alipay: String(alipay || '').slice(0, 100), note: String(note || '').slice(0, 200) });
+    res.json({ ok: true });
+  });
+
+  app.delete('/console/api/orders/:id', consoleAuth, (req, res) => {
+    save('orders.json', load('orders.json', []).filter(o => o.id !== req.params.id));
+    res.json({ ok: true });
+  });
+
+  app.get('/console/api/materials', consoleAuth, (req, res) => {
+    const data = load('materials.json', []);
+    const flat = data.flatMap(s => s.materials);
+    if (req.query.hot) { flat.sort((a, b) => b.downloads - a.downloads); return res.json({ ok: true, list: flat.slice(0, 50) }); }
+    res.json({ ok: true, series: data, total: flat.length, totalDownloads: flat.reduce((s, m) => s + m.downloads, 0) });
+  });
+
+  app.post('/console/api/materials', consoleAuth, (req, res) => {
+    const { series, title } = req.body || {};
+    if (!series) return res.status(400).json({ ok: false, error: '请填写文件夹名称' });
+    const data = load('materials.json', []);
+    let s = data.find(x => x.folder === series);
+    if (!s) { s = { folder: series, materials: [] }; data.push(s); }
+    if (title) {
+      if (s.materials.some(m => m.title === title)) return res.status(400).json({ ok: false, error: '该系列下已存在同名素材' });
+      s.materials.push({ id: `${series}/${title}`, series, file: `${title}.png`, title, downloads: 0, createdAt: new Date().toISOString() });
+    }
+    save('materials.json', data);
+    res.json({ ok: true });
+  });
+
+  app.delete('/console/api/series/:folder', consoleAuth, (req, res) => {
+    save('materials.json', load('materials.json', []).filter(x => x.folder !== req.params.folder));
+    res.json({ ok: true });
+  });
+
+  app.delete('/console/api/materials/:series/:title', consoleAuth, (req, res) => {
+    const data = load('materials.json', []);
+    const s = data.find(x => x.folder === req.params.series);
+    if (s) s.materials = s.materials.filter(m => m.title !== req.params.title);
+    save('materials.json', data);
+    res.json({ ok: true });
+  });
+
+  // 排序保存：整体文件夹顺序 或 某文件夹内素材顺序（materials.json 数组顺序即前台展示顺序）
+  app.post('/console/api/materials/reorder', consoleAuth, (req, res) => {
+    const { series, folder, materials } = req.body || {};
+    const data = load('materials.json', []);
+    if (Array.isArray(series)) {
+      if (series.length !== data.length || !series.every(f => data.some(x => x.folder === f))) {
+        return res.status(400).json({ ok: false, error: '顺序和现有数据对不上，请刷新后重试' });
+      }
+      const map = {}; data.forEach(x => { map[x.folder] = x; });
+      save('materials.json', series.map(f => map[f]));
+      return res.json({ ok: true });
+    }
+    if (folder && Array.isArray(materials)) {
+      const s = data.find(x => x.folder === folder);
+      if (!s) return res.status(404).json({ ok: false, error: '文件夹不存在' });
+      if (materials.length !== s.materials.length || !materials.every(t => s.materials.some(m => m.title === t))) {
+        return res.status(400).json({ ok: false, error: '顺序和现有数据对不上，请刷新后重试' });
+      }
+      const map = {}; s.materials.forEach(m => { map[m.title] = m; });
+      s.materials = materials.map(t => map[t]);
+      save('materials.json', data);
+      return res.json({ ok: true });
+    }
+    res.status(400).json({ ok: false, error: '参数不对' });
+  });
+
+  // ---- 重命名：文件夹 / 素材（同步改 materials.json + 服务器文件目录 + OSS 预览图）----
+  const { execFile } = require('child_process');
+  const FILES_DIR = path.join(DATA_DIR, 'files');
+  const ORIG_DIR = path.join(DATA_DIR, 'originals');
+  const cleanName = s => String(s || '').trim().replace(/[\\/:*?"<>|]/g, '');
+  const mvIfExists = (a, b) => { try { if (fs.existsSync(a) && !fs.existsSync(b)) fs.renameSync(a, b); } catch {} };
+  // OSS 改名 = 复制新名 + 删旧名；OSS 上没有对应对象时静默跳过（如本地上传的素材没有 OSS 预览图）
+  const ossMv = (src, dst, isDir) => new Promise(resolve => {
+    execFile('ossutil64', isDir ? ['cp', '-r', '-f', src, dst] : ['cp', '-f', src, dst], { timeout: 120000 }, e => {
+      if (e) return resolve(false);
+      execFile('ossutil64', isDir ? ['rm', '-r', '-f', src] : ['rm', '-f', src], { timeout: 60000 }, () => resolve(true));
+    });
+  });
+
+  app.post('/console/api/series/rename', consoleAuth, async (req, res) => {
+    const oldN = String((req.body || {}).old || '');
+    const newN = cleanName((req.body || {}).new);
+    if (!oldN || !newN) return res.status(400).json({ ok: false, error: '请填写新名称' });
+    if (newN === oldN) return res.json({ ok: true });
+    const data = load('materials.json', []);
+    const s = data.find(x => x.folder === oldN);
+    if (!s) return res.status(404).json({ ok: false, error: '文件夹不存在' });
+    if (data.some(x => x.folder === newN)) return res.status(400).json({ ok: false, error: '已存在同名文件夹' });
+    s.folder = newN;
+    s.materials.forEach(m => { m.series = newN; m.id = newN + '/' + m.title; });
+    save('materials.json', data);
+    mvIfExists(path.join(ORIG_DIR, oldN), path.join(ORIG_DIR, newN));
+    mvIfExists(path.join(FILES_DIR, oldN), path.join(FILES_DIR, newN));
+    await ossMv('oss://onefig/previews/' + oldN + '/', 'oss://onefig/previews/' + newN + '/', true);
+    res.json({ ok: true });
+  });
+
+  app.post('/console/api/materials/rename', consoleAuth, async (req, res) => {
+    const series = String((req.body || {}).series || '');
+    const oldT = String((req.body || {}).oldTitle || '');
+    const newT = cleanName((req.body || {}).newTitle);
+    if (!series || !oldT || !newT) return res.status(400).json({ ok: false, error: '请填写新名称' });
+    if (newT === oldT) return res.json({ ok: true });
+    const data = load('materials.json', []);
+    const s = data.find(x => x.folder === series);
+    if (!s) return res.status(404).json({ ok: false, error: '文件夹不存在' });
+    const m = s.materials.find(x => x.title === oldT);
+    if (!m) return res.status(404).json({ ok: false, error: '素材不存在' });
+    if (s.materials.some(x => x.title === newT)) return res.status(400).json({ ok: false, error: '已存在同名素材' });
+    const oldFile = m.file || oldT + '.png';
+    const ext = oldFile.includes('.') ? oldFile.slice(oldFile.lastIndexOf('.')) : '.png';
+    const newFile = newT + ext;
+    if (m.local) mvIfExists(path.join(FILES_DIR, series, oldFile), path.join(FILES_DIR, series, newFile));
+    mvIfExists(path.join(ORIG_DIR, series, oldFile), path.join(ORIG_DIR, series, newFile));
+    m.title = newT; m.id = series + '/' + newT; m.file = newFile;
+    save('materials.json', data);
+    await ossMv('oss://onefig/previews/' + series + '/' + oldT + '.webp', 'oss://onefig/previews/' + series + '/' + newT + '.webp', false);
+    res.json({ ok: true });
+  });
+
+  app.get('/console/api/submissions', consoleAuth, (req, res) => {
+    res.json({ ok: true, list: deps.readSubmissions() });
+  });
+
+  // ---------- 页面（公开访问，内含登录界面；数据接口均有 consoleAuth 保护） ----------
+  app.get(deps.ADMIN_PATH_FULL, (req, res) => res.send(PAGE));
+  app.get('/', (req, res) => res.redirect(deps.ADMIN_PATH_FULL));
+};
+
+const OSS = 'http://onefig.oss-cn-hangzhou.aliyuncs.com/previews/';
+
+const PAGE = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>无花有果 · 管理后台</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#f6f4fb;color:#3d3a4b;display:flex;min-height:100vh}
+.side{width:220px;background:linear-gradient(180deg,#6d4fb0,#8f73d6);color:#fff;padding:22px 14px;position:sticky;top:0;height:100vh;flex-shrink:0;display:flex;flex-direction:column;gap:4px}
+.side .brand{font-size:18px;font-weight:700;text-align:center;padding:6px 0 22px}
+.side a{display:flex;align-items:center;gap:10px;color:rgba(255,255,255,.82);text-decoration:none;padding:11px 14px;border-radius:10px;font-size:14px;transition:.15s}
+.side a:hover{background:rgba(255,255,255,.12);color:#fff}
+.side a.active{background:rgba(255,255,255,.92);color:#6d4fb0;font-weight:600}
+.main{flex:1;padding:26px 40px 60px;max-width:1600px;width:100%;margin:0 auto}
+h2{font-size:20px;margin-bottom:4px}
+.sub{color:#8b84a3;font-size:13px;margin-bottom:20px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:22px}
+.kpi{background:#fff;border-radius:14px;padding:18px;box-shadow:0 2px 10px rgba(124,92,191,.07)}
+.kpi .num{font-size:26px;font-weight:700;color:#6d4fb0;margin-top:6px}
+.kpi .lbl{font-size:12px;color:#8b84a3}
+.kpi .chips{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.chip{font-size:11px;background:#f3f0fa;color:#6d4fb0;border-radius:999px;padding:2px 9px;font-weight:600}
+.panel{background:#fff;border-radius:14px;padding:20px;box-shadow:0 2px 10px rgba(124,92,191,.07);margin-bottom:20px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{color:#8b84a3;font-weight:600;text-align:left;padding:8px 10px;border-bottom:1px solid #efeafb;font-size:12px}
+td{padding:10px;border-bottom:1px solid #f6f4fb;vertical-align:middle}
+select,input,textarea{font-family:inherit;font-size:13px;padding:7px 10px;border:1px solid #e3dcf2;border-radius:8px;background:#fff;color:#3d3a4b;outline:none}
+select:focus,input:focus{border-color:#a78bfa}
+.btn{border:none;border-radius:9px;padding:8px 16px;font-size:13px;cursor:pointer;font-weight:600;transition:.15s;white-space:nowrap}
+.btn-p{background:linear-gradient(135deg,#7c5cbf,#a78bfa);color:#fff}
+.btn-p:hover{transform:translateY(-1px);box-shadow:0 4px 10px rgba(124,92,191,.35)}
+.btn-g{background:#f3f0fa;color:#6d4fb0}
+.btn-d{background:#fdeef0;color:#d6336c}
+.btn-xs{padding:4px 10px;font-size:12px}
+.bar-row{display:flex;align-items:center;gap:10px;margin:5px 0;font-size:12px}
+.bar-row .d{width:44px;color:#8b84a3;text-align:right}
+.bar-row .track{flex:1;height:14px;background:#f3f0fa;border-radius:4px;overflow:hidden;display:flex}
+.bar-row .ub{height:100%;background:linear-gradient(90deg,#a78bfa,#c4b5fd)}
+.bar-row .rb{height:100%;background:linear-gradient(90deg,#f0abfc,#f5d0fe)}
+.bar-row .v{width:70px;color:#6d4fb0;font-weight:600}
+.legend{display:flex;gap:16px;font-size:12px;color:#8b84a3;margin:4px 0 10px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
+.chart{display:flex;align-items:flex-end;gap:3px;height:170px;padding-top:18px}
+.chart .ccol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;min-width:0;position:relative;height:100%}
+.chart .cbar{width:70%;max-width:26px;border-radius:4px 4px 0 0;min-height:2px;transition:.2s}
+.chart .ccol:hover .cbar{filter:brightness(1.12)}
+.chart .cval{position:absolute;top:0;font-size:10px;color:#6d4fb0;font-weight:600;white-space:nowrap}
+.clabels{display:flex;gap:3px;margin-top:6px}
+.clabels span{flex:1;font-size:10px;color:#b0aac4;text-align:center;min-width:0;overflow:hidden}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:14px}
+.mat{background:#fff;border-radius:12px;padding:10px;box-shadow:0 2px 8px rgba(124,92,191,.07);text-align:center}
+.mat img{width:100%;height:96px;object-fit:contain;background:#faf9fd;border-radius:8px;border:1px solid #efeafb}
+.mat .t{font-size:12px;margin-top:6px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mat .mat-del{display:none}
+.mat:hover .mat-del{display:inline-block}
+.mat .dl{font-size:11px;color:#a78bfa;margin:3px 0 6px}
+.folder{background:#fff;border-radius:14px;padding:16px;box-shadow:0 2px 8px rgba(124,92,191,.07);cursor:pointer;transition:.15s;text-align:center;position:relative}
+.folder:hover{transform:translateY(-2px);box-shadow:0 6px 14px rgba(124,92,191,.15)}
+.folder .ic{font-size:34px}
+.folder .n{font-size:13px;font-weight:600;margin-top:6px}
+.folder .c{font-size:11px;color:#8b84a3}
+.folder.sorting,.mat.sorting{cursor:grab;outline:2px dashed #c4b5fd;outline-offset:-2px}
+.folder.sorting:hover,.mat.sorting:hover{outline-color:#7c5cbf;transform:none}
+.f-edit{position:absolute;top:8px;right:8px;display:none;padding:3px 9px;font-size:12px}
+.folder:hover .f-edit{display:inline-block}
+.vnav{position:absolute;top:44%;transform:translateY(-50%);width:38px;height:38px;border-radius:50%;border:none;background:rgba(255,255,255,.88);color:#6d4fb0;font-size:22px;line-height:1;cursor:pointer;box-shadow:0 2px 8px rgba(40,25,70,.25);font-weight:700}
+.vnav:hover{background:#fff}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.toolbar .sp{flex:1}
+.card{background:#fff;border-radius:14px;box-shadow:0 2px 10px rgba(124,92,191,.07);padding:16px;margin-bottom:12px;display:flex;gap:14px}
+.card.done{opacity:.55}
+.thumb{display:flex;flex-wrap:nowrap;gap:8px;max-width:356px;flex:none;overflow-x:auto}
+.thumb img{width:110px;height:110px;object-fit:contain;border-radius:10px;background:#faf9fd;border:1px solid #efeafb}
+.noimg{width:110px;height:110px;border-radius:10px;background:#f3f0fa;color:#b3a6d4;display:flex;align-items:center;justify-content:center;font-size:11px;text-align:center;line-height:1.5}
+.cbody{flex:1;min-width:0}
+.tags{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px;font-size:11px}
+.tag{background:#f3f0fa;color:#6d4fb0;border-radius:999px;padding:2px 9px;font-weight:600}
+.tag.new{background:linear-gradient(135deg,#7c5cbf,#a78bfa);color:#fff}
+.tag.done2{background:#e8f7ee;color:#2f9e5f}
+.time{margin-left:auto;color:#b0aac4}
+.desc{font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.contact{font-size:12px;color:#8b84a3;margin-top:6px;background:#faf9fd;border-radius:6px;padding:4px 9px;display:inline-block}
+.ops{display:flex;flex-direction:column;justify-content:center;gap:10px;flex:none}
+.ops .btn{padding:10px 16px;font-size:13px;white-space:nowrap}
+.btn-del{opacity:0;transition:opacity .15s}
+.card:hover .btn-del{opacity:1}
+.modal-mask{position:fixed;inset:0;background:rgba(40,25,70,.4);display:none;align-items:center;justify-content:center;z-index:10}
+.modal{background:#fff;border-radius:16px;padding:22px;width:380px;max-width:92vw}
+.modal h3{font-size:16px;margin-bottom:14px}
+.modal .row{margin-bottom:12px}
+.modal .row label{display:block;font-size:12px;color:#8b84a3;margin-bottom:4px}
+.modal input,.modal select{width:100%}
+.modal .btns{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);background:rgba(61,58,75,.82);backdrop-filter:blur(6px);color:#fff;padding:10px 20px;border-radius:999px;font-size:13px;display:none;z-index:60;pointer-events:none;box-shadow:0 4px 16px rgba(61,58,75,.25)}
+.login-mask{position:fixed;inset:0;background:linear-gradient(135deg,#f6f4fb,#e9dffb);display:none;align-items:center;justify-content:center;z-index:50}
+.login-card{background:#fff;border-radius:18px;padding:36px 34px;width:340px;max-width:92vw;box-shadow:0 14px 44px rgba(124,92,191,.2);text-align:center}
+.login-card h1{font-size:19px;margin:12px 0 4px}
+.login-card .sub{margin-bottom:20px}
+.login-card input{width:100%;margin-bottom:12px;padding:10px 12px}
+.login-card .btn{width:100%;padding:11px;font-size:14px}
+.login-err{color:#d6336c;font-size:12px;min-height:18px;margin-bottom:6px}
+.acct{margin-top:auto;background:rgba(255,255,255,.14);border-radius:12px;padding:9px 12px;font-size:12px;color:rgba(255,255,255,.88);display:flex;align-items:center;gap:6px}
+.acct button{margin-left:auto;padding:4px 10px;font-size:11px;background:rgba(255,255,255,.22);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600}
+.acct button:hover{background:rgba(255,255,255,.34)}
+@media(max-width:760px){.side{width:60px;padding:14px 6px}.side .brand{font-size:0}.side a{font-size:0;justify-content:center}.side a .ic{font-size:18px}.main{padding:16px}}
+</style></head><body>
+<div class="side">
+  <div class="brand" style="display:flex;align-items:center;justify-content:center;gap:8px"><img src="http://onefig.oss-cn-hangzhou.aliyuncs.com/brand/icon.png" style="width:30px;height:30px;object-fit:contain;border-radius:8px;background:#fff;padding:2px">无花有果 后台</div>
+  <a href="#/dashboard" data-r="dashboard"><span class="ic">📊</span>数据看板</a>
+  <a href="#/materials" data-r="materials"><span class="ic">🎨</span>素材管理</a>
+  <a href="#/users" data-r="users"><span class="ic">👥</span>账号管理</a>
+  <a href="#/requests" data-r="requests"><span class="ic">💌</span>素材请求</a>
+  <div class="acct"><span>👤</span><span id="acct-name" style="overflow:hidden;text-overflow:ellipsis">管理员</span><button onclick="logout()">退出</button></div>
+</div>
+<div class="main" id="view">加载中…</div>
+<div class="modal-mask" id="mask"><div class="modal" id="modal"></div></div>
+<div class="toast" id="toast"></div>
+<div class="login-mask" id="loginMask"><div class="login-card">
+  <img src="http://onefig.oss-cn-hangzhou.aliyuncs.com/brand/icon.png" style="width:48px;height:48px;border-radius:12px;background:#f6f4fb;padding:4px;object-fit:contain">
+  <h1>无花有果 · 管理后台</h1>
+  <div class="sub">请登录后使用</div>
+  <div class="login-err" id="loginErr"></div>
+  <input id="loginUser" placeholder="账号" autocomplete="username" onkeydown="if(event.key==='Enter')doLogin()">
+  <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+  <button class="btn btn-p" onclick="doLogin()">登 录</button>
+</div></div>
+<script>
+const H={};let SUBS=[],CACHE={};
+const PLANS={basic:'青果会员',pro:'红果会员',team:'金果会员'};
+/* ---------- 登录态 ---------- */
+const TK_KEY='onefig_console_token',NM_KEY='onefig_console_name';
+function getTK(){return localStorage.getItem(TK_KEY)||''}
+function setTK(t,n){if(t){localStorage.setItem(TK_KEY,t);localStorage.setItem(NM_KEY,n||'')}else{localStorage.removeItem(TK_KEY);localStorage.removeItem(NM_KEY)}}
+window.logout=()=>{setTK('');document.getElementById('loginMask').style.display='flex'};
+window.doLogin=async()=>{
+  const u=document.getElementById('loginUser').value.trim(),p=document.getElementById('loginPass').value;
+  const err=document.getElementById('loginErr');err.textContent='';
+  if(!u||!p){err.textContent='请输入账号和密码';return}
+  try{
+    const r=await fetch('/console/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
+    const j=await r.json();
+    if(!j.ok){err.textContent=j.error||'登录失败';return}
+    setTK(j.token,j.name||u);document.getElementById('acct-name').textContent=j.name||u;
+    document.getElementById('loginPass').value='';
+    document.getElementById('loginMask').style.display='none';route();
+  }catch(e){err.textContent='网络错误，稍后再试'}
+};
+window.confirmCreditOrder=async(id)=>{if(!confirm('确认已收到这笔积分转账吗？确认后积分将自动到账。'))return;try{await api('/console/api/credit-orders/'+id+'/confirm',{method:'POST'});toast('已确认，积分已到账 ✅');route()}catch(e){toast(e.message)}};
+window.confirmOrder=async(id)=>{if(!confirm('确认已收到这笔转账吗？确认后会员将自动升级。'))return;try{await api('/console/api/orders/'+id+'/confirm',{method:'POST'});toast('已确认，会员已升级 ✅');route()}catch(e){toast(e.message)}};
+window.payModal=async()=>{const p=await api('/console/api/payinfo').catch(()=>({wechat:'',alipay:'',note:''}));
+  showModal('<h3>收款设置</h3>\
+  <div class="row"><label>微信号（显示给付款粉丝）</label><input id="m-wx" value="'+esc(p.wechat||'')+'" placeholder="你的微信号"></div>\
+  <div class="row"><label>支付宝账号</label><input id="m-zfb" value="'+esc(p.alipay||'')+'" placeholder="你的支付宝"></div>\
+  <div class="row"><label>转账提示语</label><input id="m-note" value="'+esc(p.note||'')+'" placeholder="例如：转账请备注注册邮箱"></div>\
+  <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="savePay()">保存</button></div>')};
+window.savePay=async()=>{try{await api('/console/api/payinfo',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({wechat:document.getElementById('m-wx').value.trim(),alipay:document.getElementById('m-zfb').value.trim(),note:document.getElementById('m-note').value.trim()})});closeModal();toast('已保存 ✅')}catch(e){toast(e.message)}};
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2200)}
+async function api(u,opt){
+  opt=opt||{};opt.headers=Object.assign({},opt.headers,{Authorization:'Bearer '+getTK()});
+  const r=await fetch(u,opt);
+  if(r.status===401){logout();throw new Error('登录已过期，请重新登录')}
+  const j=await r.json();if(!j.ok)throw new Error(j.error||'操作失败');return j;
+}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function yuan(n){return '¥'+Number(n).toLocaleString()}
+function fmtSize(b){b=Number(b)||0;if(!b)return '—';return b>=1048576?(b/1048576).toFixed(1)+' MB':Math.max(1,Math.round(b/1024))+' KB'}
+function fmtT(t){if(!t)return '—';if(/^\d{4}-\d{2}-\d{2}$/.test(t))return t;const d=new Date(t);if(isNaN(d))return t;const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())}
+const OSS_P='${OSS}';
+function matImg(m){return m.local?'/files/'+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.file||(m.title+'.png')):OSS_P+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.title)+'.webp'}
+function showModal(html){const m=document.getElementById('modal');m.style.width='';delete m.dataset.nav;m.innerHTML=html;document.getElementById('mask').style.display='flex'}
+/* 大图浏览：支持左右箭头 + 键盘 ← →，Escape 关闭；条目可为 {src,t} 带标题 */
+let VIEW_LIST=[],VIEW_I=0,CUR_IMGS=[],REQ_IMGS=[];
+window.viewMat=src=>viewMatList([{src}],0);
+window.viewMatList=(list,i)=>{VIEW_LIST=list;VIEW_I=i;renderView()};
+window.viewNav=d=>{if(document.getElementById('modal').dataset.nav!=='1')return;const n=VIEW_LIST.length;if(!n)return;VIEW_I=(VIEW_I+d+n)%n;renderView()};
+function renderView(){
+  const it=VIEW_LIST[VIEW_I],src=it.src||it,t=it.t||'',multi=VIEW_LIST.length>1;
+  showModal('<div style="background:#c9cad1;border-radius:12px;padding:12px;position:relative">'
+    +(t?'<div style="text-align:center;font-weight:700;color:#3d3a4b;font-size:14px;margin-bottom:8px">'+esc(t)+'</div>':'')
+    +'<img src="'+src+'" style="max-width:76vw;max-height:72vh;object-fit:contain;display:block;margin:0 auto">'
+    +(multi?'<button class="vnav" style="left:20px" onclick="viewNav(-1)">‹</button><button class="vnav" style="right:20px" onclick="viewNav(1)">›</button>':'')
+    +(multi?'<div style="text-align:center;font-size:12px;color:#6d4fb0;margin-top:8px;font-weight:600">'+(VIEW_I+1)+' / '+VIEW_LIST.length+'</div>':'')
+    +'</div>');
+  const m=document.getElementById('modal');m.style.width='auto';m.dataset.nav='1';
+}
+document.addEventListener('keydown',e=>{
+  if(document.getElementById('mask').style.display!=='flex')return;
+  if(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;
+  if(e.key==='ArrowLeft')viewNav(-1);
+  else if(e.key==='ArrowRight')viewNav(1);
+  else if(e.key==='Escape')closeModal();
+});
+/* 复制：http 环境下 navigator.clipboard 不可用，自动降级 execCommand */
+window.cpTxt=t=>{
+  t=t.trim();if(!t||t==='—')return;
+  const done=()=>toast('已复制：'+t);
+  const fallback=()=>{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch(e){toast('复制失败，请手动选择')}document.body.removeChild(ta)};
+  if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done).catch(fallback)}else fallback();
+};
+function closeModal(){document.getElementById('mask').style.display='none'}
+document.getElementById('mask').onclick=e=>{if(e.target.id==='mask')closeModal()};
+
+/* ---------- 1. 数据看板 ---------- */
+H.dashboard=async()=>{
+  const s=await api('/console/api/stats');
+  const pend=(await api('/console/api/orders?status=pending,notified').catch(()=>({list:[]}))).list;
+  const cPend=(await api('/console/api/credit-orders?status=pending,notified').catch(()=>({list:[]}))).list;
+  const cPendHtml=cPend.length
+    ? '<div class="panel"><h3 style="font-size:15px;margin-bottom:12px">⚡ 待确认积分订单（'+cPend.length+' 笔）</h3><table><tr><th>下单时间</th><th>用户</th><th>积分</th><th>金额</th><th>状态</th><th></th></tr>'+
+      cPend.map(o=>{const st=o.status==='pending'?'<span class="tag">待转账</span>':'<span class="tag new">已通知转账</span>';
+        return '<tr><td>'+fmtT(o.createdAt)+'</td><td><b>'+esc(o.userName||'')+'</b></td><td>'+o.credits+' 积分</td><td><b>'+yuan(o.amount)+'</b></td><td>'+st+'</td><td><button class="btn btn-p btn-xs" onclick="confirmCreditOrder(\\''+o.id+'\\')">✅ 确认收款</button></td></tr>'}).join('')+'</table></div>'
+    : '';
+  const pendHtml=pend.length
+    ? '<div class="panel"><h3 style="font-size:15px;margin-bottom:12px">💰 待确认收款（'+pend.length+' 笔）</h3><table><tr><th>下单时间</th><th>用户</th><th>会员类型</th><th>金额</th><th>状态</th><th></th></tr>'+
+      pend.map(o=>{const st=o.status==='pending'?'<span class="tag">待转账</span>':'<span class="tag new">已通知转账</span>';
+        return '<tr><td>'+fmtT(o.createdAt)+'</td><td><b>'+esc(o.userName||'')+'</b></td><td>'+PLANS[o.plan]+'</td><td><b>'+yuan(o.amount)+'</b></td><td>'+st+'</td><td><button class="btn btn-p btn-xs" onclick="confirmOrder(\\''+o.id+'\\')">✅ 确认收款</button></td></tr>'}).join('')+'</table></div>'
+    : '';
+  const trend=await api('/console/api/trend?range='+(window._range||30));
+  const RANGES=[[7,'一周'],[30,'一月'],[180,'半年'],[365,'一年']];
+  const tabBtns=RANGES.map(r=>'<button class="btn btn-xs '+( (window._range||30)===r[0]?'btn-p':'btn-g')+'" onclick="setRange('+r[0]+')">'+r[1]+'</button>').join('');
+  const chart=(days,key,color,fmt)=>{
+    const max=Math.max(1,...days.map(d=>d[key]));
+    const cols=days.map(d=>{
+      const h=Math.max(d[key]>0?4:1.5, d[key]/max*100);
+      return '<div class="ccol" title="'+d.date+' · '+fmt(d[key])+'"><div class="cval">'+(d[key]>0?fmt(d[key]):'')+'</div><div class="cbar" style="height:'+h+'%;background:'+color+'"></div></div>';
+    }).join('');
+    const step=Math.ceil(days.length/8);
+    const labels=days.map((d,i)=>(i%step===0||i===days.length-1)?'<span>'+d.date+'</span>':'<span></span>').join('');
+    return '<div class="chart">'+cols+'</div><div class="clabels">'+labels+'</div>';
+  };
+  const cs=await api('/console/api/credit-stats?range='+(window._crange||30)).catch(()=>null);
+  const crange=window._crange||30;
+  const crBtns=RANGES.map(r=>'<button class="btn btn-xs '+(crange===r[0]?'btn-p':'btn-g')+'" onclick="setCRange('+r[0]+')">'+r[1]+'</button>').join('');
+  const creditPanel=cs?('<div class="cards">\
+    <div class="kpi"><div class="lbl">⚡ 积分总收入</div><div class="num">'+yuan(cs.totalRevenue)+'</div><div class="chips"><span class="chip">共售出 '+cs.totalCredits+' 积分</span><span class="chip">'+cs.totalOrders+' 笔</span></div></div>\
+    '+cs.byPkg.map(p=>'<div class="kpi"><div class="lbl">💠 '+p.name+' 套餐</div><div class="num">'+yuan(p.revenue)+'</div><div class="chips"><span class="chip">'+p.count+' 笔</span><span class="chip">'+p.credits+' 积分</span></div></div>').join('')+'\
+  </div>\
+  <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">⚡ 每日购买积分数</h3><div class="sp"></div>'+crBtns+'</div>'+chart(cs.days,'credits','linear-gradient(180deg,#fbbf24,#f59e0b)',v=>v+'分')+'</div>'):'';
+  return '<div class="toolbar"><h2>📊 数据看板</h2><div class="sp"></div><button class="btn btn-g" onclick="payModal()">💳 收款设置</button><button class="btn btn-p" onclick="orderModal()">＋ 记一笔订单</button></div>'+pendHtml+cPendHtml+'\
+  <div class="cards">\
+    <div class="kpi"><div class="lbl">总用户</div><div class="num">'+s.totalUsers+'</div></div>\
+    <div class="kpi"><div class="lbl">🟢 青果会员</div><div class="num">'+s.levelCount.basic+'</div></div>\
+    <div class="kpi"><div class="lbl">🔴 红果会员</div><div class="num">'+s.levelCount.pro+'</div></div>\
+    <div class="kpi"><div class="lbl">🟡 金果会员</div><div class="num">'+s.levelCount.team+'</div></div>\
+    <div class="kpi"><div class="lbl">总支付金额</div><div class="num">'+yuan(s.totalRevenue)+'</div></div>\
+  </div>\
+  <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">💰 每日收入走势</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'revenue','linear-gradient(180deg,#a78bfa,#7c5cbf)',v=>'¥'+v)+'</div>\
+  <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🌱 每日新增用户</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'users','linear-gradient(180deg,#6ee7b7,#34d399)',v=>v+'人')+'</div>'+creditPanel;
+};
+window.setRange=r=>{window._range=r;route()};
+window.setCRange=r=>{window._crange=r;route()};
+
+window.orderModal=()=>showModal('<h3>记一笔订单</h3>\
+  <div class="row"><label>用户昵称 *</label><input id="m-name" placeholder="粉丝昵称"></div>\
+  <div class="row"><label>联系方式</label><input id="m-contact" placeholder="微信/邮箱（选填）"></div>\
+  <div class="row"><label>会员类型 *</label><select id="m-plan"><option value="basic">青果会员 ¥29</option><option value="pro">红果会员 ¥99</option><option value="team">金果会员 ¥299</option></select></div>\
+  <div class="row"><label>实收金额（元）</label><input id="m-amt" type="number" placeholder="留空按标价"></div>\
+  <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="saveOrder()">保存</button></div>');
+window.saveOrder=async()=>{
+  const body={userName:document.getElementById('m-name').value.trim(),contact:document.getElementById('m-contact').value.trim(),plan:document.getElementById('m-plan').value,amount:document.getElementById('m-amt').value};
+  try{await api('/console/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});closeModal();toast('已记录 ✅');route()}catch(e){toast(e.message)}
+};
+
+/* ---------- 2. 素材管理 ---------- */
+let matView={series:null,hot:false},sortMode=false,MAT_DATA=null,dragI=-1;
+window.toggleSort=()=>{sortMode=!sortMode;dragI=-1;route()};
+window.fDrag=(e,i)=>{dragI=i;e.dataTransfer.effectAllowed='move'};
+window.fDrop=async(e,i)=>{e.preventDefault();if(dragI<0||dragI===i){dragI=-1;return}
+  const arr=MAT_DATA.series;const[mv]=arr.splice(dragI,1);arr.splice(i,0,mv);dragI=-1;
+  try{await api('/console/api/materials/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series:arr.map(x=>x.folder)})});toast('顺序已保存 ✅')}catch(err){toast(err.message)}
+  route()};
+window.mDrag=(e,i)=>{dragI=i;e.dataTransfer.effectAllowed='move';e.stopPropagation()};
+window.mDrop=async(e,i)=>{e.preventDefault();e.stopPropagation();if(dragI<0||dragI===i){dragI=-1;return}
+  const sd=MAT_DATA.series.find(x=>x.folder===matView.series);const arr=sd.materials;const[mv]=arr.splice(dragI,1);arr.splice(i,0,mv);dragI=-1;
+  try{await api('/console/api/materials/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:matView.series,materials:arr.map(m=>m.title)})});toast('顺序已保存 ✅')}catch(err){toast(err.message)}
+  route()};
+const sortBtn=()=>'<button class="btn '+(sortMode?'btn-p':'btn-g')+'" onclick="toggleSort()">'+(sortMode?'✅ 完成排序':'⇅ 调整顺序')+'</button>';
+H.materials=async()=>{
+  const s=await api('/console/api/materials');MAT_DATA=s;
+  if(matView.hot){
+    const hot=await api('/console/api/materials?hot=1');CUR_IMGS=hot.list.map(m=>({src:matImg(m),t:m.title}));
+    return '<div class="toolbar"><button class="btn btn-g" onclick="matView.hot=false;route()">← 返回</button><h2>🎨 热门排行</h2><div class="sp"></div></div>\
+    <div class="panel" style="font-size:13px;color:#8b84a3;margin-bottom:16px">🏆 热门素材 TOP（按下载量）· 全库共 '+s.total+' 个素材，总下载 '+s.totalDownloads+' 次</div>\
+    <div class="grid">'+hot.list.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' 次 · '+fmtSize(m.size)+' · '+esc(m.series.split('-')[1]||m.series)+'</div></div>').join('')+'</div>';
+  }
+  if(matView.series){
+    const sd=s.series.find(x=>x.folder===matView.series);CUR_IMGS=sd.materials.map(m=>({src:matImg(m),t:m.title}));
+    return '<div class="toolbar"><button class="btn btn-g" onclick="matView.series=null;route()">← 返回</button><h2>🎨 '+esc(matView.series)+'</h2><div class="sp"></div>'+sortBtn()+'<button class="btn btn-p" onclick="addMatModal()">＋ 添加素材</button></div>\
+    '+(sortMode?'<div class="sub" style="color:#7c5cbf;font-weight:600">⇅ 排序模式：拖动素材卡片换位，松手即保存，前台同步生效。点「✅ 完成排序」退出</div>':'')+'\
+    <div class="grid">'+sd.materials.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'"'+(sortMode?' draggable="true" ondragstart="mDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="mDrop(event,'+i+')"':'')+'><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+(sortMode?'':' onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"')+'><div class="t">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" onclick="renameMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">✏️ 改名</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>';
+  }
+  return '<div class="toolbar"><h2>🎨 素材管理</h2><div class="sp"></div>'+sortBtn()+'<button class="btn btn-g" onclick="matView.hot=true;route()">🏆 热门排行</button><button class="btn btn-p" onclick="addSeriesModal()">＋ 新建文件夹</button></div>\
+  <div class="sub">'+(sortMode?'⇅ 排序模式：拖动文件夹换位，松手即保存，前台网站同步生效。点「✅ 完成排序」退出':'共 '+s.total+' 个素材 · 点击文件夹查看和管理')+'</div>\
+  <div class="grid">'+s.series.map((x,i)=>'<div class="folder'+(sortMode?' sorting':'')+'" '+(sortMode?'draggable="true" ondragstart="fDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="fDrop(event,'+i+')"':'onclick="matView.series=\\''+x.folder+'\\';route()"')+'>'+(sortMode?'':'<button class="btn btn-g f-edit" onclick="event.stopPropagation();renameSeriesModal(\\''+x.folder+'\\')">✏️</button>')+'<div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.length+' 个素材</div></div>').join('')+'</div>';
+};
+window.delMat=async(series,title)=>{if(!confirm('确定从清单删除「'+title+'」吗？'))return;await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title),{method:'DELETE'});toast('已删除');route()};
+window.renameSeriesModal=f=>showModal('<h3>✏️ 重命名文件夹</h3>\
+  <div class="row"><label>新名称</label><input id="m-rn" value="'+esc(f)+'"></div>\
+  <div class="sub">会同步修改服务器文件目录和 OSS 预览图目录，前台立即生效</div>\
+  <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="doRenameSeries(\\''+f+'\\')">保存</button></div>');
+window.doRenameSeries=async(old)=>{const n=document.getElementById('m-rn').value.trim();if(!n)return toast('请填写名称');try{await api('/console/api/series/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old,new:n})});closeModal();toast('已改名 ✅');route()}catch(e){toast(e.message)}};
+window.renameMatModal=(s2,t)=>showModal('<h3>✏️ 重命名素材</h3>\
+  <div class="row"><label>新名称</label><input id="m-rn" value="'+esc(t)+'"></div>\
+  <div class="sub">会同步修改服务器上的图片文件名和 OSS 预览图名，前台立即生效</div>\
+  <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="doRenameMat(\\''+s2+'\\',\\''+t+'\\')">保存</button></div>');
+window.doRenameMat=async(s2,old)=>{const n=document.getElementById('m-rn').value.trim();if(!n)return toast('请填写名称');try{await api('/console/api/materials/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series:s2,oldTitle:old,newTitle:n})});closeModal();toast('已改名 ✅');route()}catch(e){toast(e.message)}};
+window.addMatModal=()=>showModal('<h3>添加素材（'+esc(matView.series)+'）</h3>\
+  <div class="row"><label>素材名称 *</label><input id="m-title" placeholder="例如：线粒体-粉色版"></div>\
+  <div class="row"><label>素材图片（PNG 透明底最佳）</label><input id="m-img" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:6px"><div class="sub" style="margin-top:4px">选图上传后网站立即可见；不传图则只登记名称</div></div>\
+  <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="saveMat()">保存</button></div>');
+window.saveMat=async()=>{
+  const title=document.getElementById('m-title').value.trim();
+  const file=document.getElementById('m-img').files[0];
+  try{
+    if(file){
+      const fd=new FormData();
+      fd.append('series',matView.series);fd.append('title',title);fd.append('image',file);
+      await api('/console/api/materials/upload',{method:'POST',body:fd});
+    }else{
+      await api('/console/api/materials',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series:matView.series,title})});
+    }
+    closeModal();toast('已添加 ✅');route();
+  }catch(e){toast(e.message)}
+};
+window.addSeriesModal=()=>showModal('<h3>新建文件夹</h3>\
+  <div class="row"><label>文件夹名称 *（建议带编号，如 25-组织与器官系列）</label><input id="m-folder" placeholder="25-组织与器官系列"></div>\
+  <div class="sub">提示：文件夹用于归类素材，之后可在文件夹里添加素材</div>\
+  <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="saveSeries()">创建</button></div>');
+window.saveSeries=async()=>{const f=document.getElementById('m-folder').value.trim();if(!f)return toast('请填写文件夹名称');try{await api('/console/api/materials',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series:f})});closeModal();toast('文件夹已创建 ✅');matView.series=f;route()}catch(e){toast(e.message)}};
+
+/* ---------- 3. 账号管理 ---------- */
+let userQ='';
+H.users=async()=>{
+  const s=await api('/console/api/users?q='+encodeURIComponent(userQ));
+  const lvName={none:'—',basic:'青果会员',pro:'红果会员',team:'金果会员'};
+  const rows=s.list.map(u=>'<tr><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制"><b>'+esc(u.name)+'</b></td><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+esc(u.email||u.contact||'—')+'</td>\
+    <td><select onchange="setLevel(\\''+u.id+'\\',this.value)">'+Object.keys(lvName).map(k=>'<option value="'+k+'" '+(u.level===k?'selected':'')+'>'+lvName[k]+'</option>').join('')+'</select></td>\
+    <td>'+(u.credits||0)+' ⚡</td>\
+    <td>'+(u.memberSince?esc(u.memberSince.slice(0,10)):'—')+'</td><td>'+u.orderCount+' 笔</td><td><b>'+yuan(u.totalPaid)+'</b></td>\
+    <td><button class="btn btn-g btn-xs" onclick="userDetail(\\''+u.id+'\\')">详情</button></td></tr>').join('')
+    ||'<tr><td colspan="8" style="color:#b0aac4;text-align:center;padding:24px">暂无用户，点「记一笔订单」会自动创建</td></tr>';
+  return '<div class="toolbar"><h2>👥 账号管理</h2><div class="sp"></div><input placeholder="搜索昵称/邮箱" value="'+esc(userQ)+'" onchange="userQ=this.value;route()" style="width:200px"><button class="btn btn-g" onclick="creditLogModal()">⚡ 积分流水</button><button class="btn btn-p" onclick="orderModal()">＋ 记一笔订单</button></div>\
+  <div class="panel"><table><tr><th>昵称</th><th>邮箱</th><th>会员等级</th><th>AI积分</th><th>开通时间</th><th>订单</th><th>累计付款</th><th></th></tr>'+rows+'</table></div>';
+};
+window.creditLogModal=async()=>{const d=await api('/console/api/credit-log').catch(()=>({list:[]}));const rows=d.list.map(l=>'<tr><td>'+fmtT(l.time)+'</td><td><b>'+esc(l.name||'')+'</b></td><td style="color:'+(l.delta>0?'#2f9e5f':'#d6336c')+';font-weight:600">'+(l.delta>0?'+':'')+l.delta+'</td><td>'+esc(l.reason||'')+'</td><td>'+esc(l.by||'')+'</td></tr>').join('')||'<tr><td colspan="5" style="text-align:center;color:#b0aac4;padding:20px">暂无流水</td></tr>';
+  showModal('<h3>⚡ 积分流水（最近 200 条）</h3><div style="max-height:320px;overflow:auto"><table><tr><th>时间</th><th>用户</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+rows+'</table></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>')};
+window.setLevel=async(id,level)=>{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({level})});toast('已修改 ✅')};
+window.adjCredits=async(id)=>{const delta=parseInt(document.getElementById('m-delta').value,10);if(!delta)return toast('填写调整数量');try{await api('/console/api/users/'+id+'/credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({delta,reason:document.getElementById('m-reason').value.trim()})});toast('已调整 ✅');userDetail(id)}catch(e){toast(e.message)}};
+window.dtShow=n=>{[1,2].forEach(i=>{document.getElementById('dt-p'+i).style.display=i===n?'block':'none';document.getElementById('dt-b'+i).className='btn btn-xs '+(i===n?'btn-p':'btn-g')})};
+window.userDetail=async(id)=>{
+  const d=await api('/console/api/users/'+id);
+  const lvName={none:'非会员',basic:'青果会员',pro:'红果会员',team:'金果会员'};
+  const coRows=(d.creditLog&&d.creditLog.length)
+    ?d.creditLog.map(l=>'<tr><td>'+fmtT(l.time)+'</td><td style="color:'+(l.delta>0?'#2f9e5f':'#d6336c')+';font-weight:600">'+(l.delta>0?'+':'')+l.delta+'</td><td>'+esc(l.reason||'—')+'</td><td>'+esc(l.by||'')+'</td></tr>').join('')
+    :'<tr><td colspan="4" style="text-align:center;color:#b0aac4;padding:14px">暂无积分记录</td></tr>';
+  const lvRows=(d.levelLog&&d.levelLog.length)
+    ?d.levelLog.map(l=>'<tr><td>'+fmtT(l.time)+'</td><td>'+(lvName[l.from]||l.from)+' → <b style="color:#6d4fb0">'+(lvName[l.to]||l.to)+'</b></td><td>'+esc(l.by||'')+'</td></tr>').join('')
+    :'<tr><td colspan="3" style="text-align:center;color:#b0aac4;padding:14px">暂无变更记录（此功能上线前的修改不追溯）</td></tr>';
+  showModal('<h3>👤 '+esc(d.user.name)+'</h3>\
+  <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\
+  <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center"><input id="m-delta" type="number" placeholder="积分调整，如 5 或 -3" style="flex:1"><input id="m-reason" placeholder="原因（选填）" style="flex:2"><button class="btn btn-g btn-xs" onclick="adjCredits(\\''+d.user.id+'\\')">调整</button></div>\
+  <div style="display:flex;gap:8px;margin-bottom:8px"><button class="btn btn-xs btn-p" id="dt-b1" onclick="dtShow(1)">⚡ 积分变动记录</button><button class="btn btn-xs btn-g" id="dt-b2" onclick="dtShow(2)">📜 会员变更记录</button></div>\
+  <div id="dt-p1" style="max-height:200px;overflow:auto"><table><tr><th>时间</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+coRows+'</table></div>\
+  <div id="dt-p2" style="display:none;max-height:200px;overflow:auto"><table><tr><th>时间</th><th>变更</th><th>操作者</th></tr>'+lvRows+'</table></div>\
+  <div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
+  document.getElementById('modal').style.width='560px';
+};
+
+/* ---------- 4. 素材请求 ---------- */
+let reqQ='',reqFilter='all';
+H.requests=async()=>{
+  const s=await api('/console/api/submissions');
+  SUBS=s.list;REQ_IMGS=[];
+  const q=reqQ.trim().toLowerCase();
+  const flt=s.list.map((r,ci)=>({r,ci})).filter(({r})=>{
+    if(reqFilter==='new'&&r.status==='done')return false;
+    if(reqFilter==='done'&&r.status!=='done')return false;
+    if(q&&((r.desc||'')+(r.contact||'')+(r.series||'')).toLowerCase().indexOf(q)<0)return false;
+    return true});
+  const cards=flt.map(({r,ci})=>{const d=new Date(r.createdAt);const when=(d.getMonth()+1)+'月'+d.getDate()+'日 '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+    const imgs=(r.images&&r.images.length?r.images:(r.image?[r.image]:[]));
+    const rimgs=imgs.map(im=>'/uploads/'+encodeURIComponent(im)+'?t='+getTK());REQ_IMGS[ci]=rimgs;
+    return '<div class="card '+(r.status==='done'?'done':'')+'"><div class="thumb">'+(rimgs.length?rimgs.map((u,j)=>'<img src="'+u+'" onclick="viewMatList(REQ_IMGS['+ci+'],'+j+')" style="cursor:zoom-in">').join(''):'<div class="noimg">🎨<br>无参考图</div>')+'</div>\
+    <div class="cbody"><div class="tags">'+(r.type==='custom'?'<span class="tag" style="background:#fdf0f6;color:#c2418e">🖌️ 定制单</span>':'')+(r.status==='done'?'<span class="tag done2">✅ 已上新</span>':'<span class="tag new">🆕 新需求</span>')+(r.series?'<span class="tag">'+esc(r.series)+'</span>':'')+'<span class="time">'+when+'</span></div>\
+    <div class="desc">'+esc(r.desc).replace(/\\n/g,'<br>')+'</div>'+(r.contact?'<div class="contact">📮 '+esc(r.contact)+'</div>':'')+'</div>\
+    <div class="ops"><button class="btn btn-p" onclick="subAct(\\''+r.id+'\\',\\'toggle\\')">'+(r.status==='done'?'↩️ 标为未完成':'✨ 标为已上新')+'</button><button class="btn btn-g btn-del" onclick="subAct(\\''+r.id+'\\',\\'delete\\')">🗑 删除</button></div></div>'}).join('')
+    ||'<div class="panel" style="text-align:center;color:#b0aac4;padding:50px">'+(s.list.length?'🔍<br>没有匹配的请求':'🌷<br>还没有粉丝提交素材需求～')+'</div>';
+  const fBtn=(k,t)=>'<button class="btn btn-xs '+(reqFilter===k?'btn-p':'btn-g')+'" onclick="reqFilter=\\''+k+'\\';route()">'+t+'</button>';
+  return '<div class="toolbar"><h2>💌 粉丝的素材请求</h2><div class="sp"></div>'+fBtn('all','全部')+fBtn('new','🆕 未上新')+fBtn('done','✅ 已上新')+'<input placeholder="搜索请求内容/邮箱" value="'+esc(reqQ)+'" onchange="reqQ=this.value;route()" style="width:180px"></div>\
+  <div class="sub">共 '+s.list.length+' 条'+((reqFilter!=='all'||q)?'，筛出 '+flt.length+' 条':'')+'</div>'+cards;
+};
+window.subAct=async(id,action)=>{if(action==='delete'&&!confirm('确定删除这条吗？'))return;try{await api(location.pathname+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});route()}catch(e){toast(e.message)}};
+
+/* ---------- 路由 ---------- */
+async function route(){
+  if(!getTK()){document.getElementById('loginMask').style.display='flex';return}
+  const h=(location.hash||'#/dashboard').slice(2);
+  document.querySelectorAll('.side a').forEach(a=>a.classList.toggle('active',a.dataset.r===h));
+  const v=document.getElementById('view');
+  try{v.innerHTML=await (H[h]||H.dashboard)()}catch(e){v.innerHTML='<div class="panel">加载失败：'+esc(e.message)+'</div>'}
+}
+window.addEventListener('hashchange',route);
+if(getTK()){document.getElementById('acct-name').textContent=localStorage.getItem(NM_KEY)||'管理员';route()}
+else{document.getElementById('loginMask').style.display='flex'}
+</script></body></html>`;
