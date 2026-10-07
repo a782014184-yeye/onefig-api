@@ -22,3 +22,10 @@ curl -sf -m 5 http://127.0.0.1:8080/healthz >/dev/null || alert "onefig-api 健�
 
 # 4. rembg 服务存活（根路径无路由返回 404 属正常，探测 /docs）
 curl -sf -m 5 -o /dev/null http://127.0.0.1:9000/docs || alert "rembg 服务无响应"
+
+# 5. 近 26 小时内备份日志出现 OSS 上传失败记录
+CUTOFF=$(date -d '26 hours ago' '+%F %T' 2>/dev/null)
+if [ -n "$CUTOFF" ] && grep -h "OSS-UPLOAD-FAIL" /var/log/onefig-backup.log 2>/dev/null \
+  | awk -v c="$CUTOFF" '{ts=substr($0,2,19)} ts>c {f=1} END{exit !f}'; then
+  alert "近26小时内存在 OSS 备份上传失败"
+fi

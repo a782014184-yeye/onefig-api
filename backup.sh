@@ -17,9 +17,10 @@ if [ "$(date +%u)" = "7" ]; then
   tar -czf "$DEST/onefig-full-$TS.tar.gz" -C /opt/onefig-api data
 fi
 
-# 上传 OSS 异地备份（失败不阻断本机备份）
+# 上传 OSS 异地备份（失败不阻断本机备份，但记日志供看门狗发现）
 for f in "$DEST"/*"$TS"*.tar.gz; do
-  [ -f "$f" ] && ossutil64 cp -f "$f" "oss://onefig/backups/$(basename "$f")" >/dev/null 2>&1 || true
+  [ -f "$f" ] && ossutil64 cp -f "$f" "oss://onefig/backups/$(basename "$f")" >/dev/null 2>&1 \
+    || echo "[$(date '+%F %T')] OSS-UPLOAD-FAIL: $f" >> /var/log/onefig-backup.log
 done
 
 find "$DEST" -name 'onefig-json-*.tar.gz' -mtime +14 -delete
