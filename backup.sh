@@ -4,6 +4,8 @@
 #   每周日：全量数据（含 465MB 原图），本机保留 60 天
 #   所有备份同时上传 OSS oss://onefig/backups/（异地容灾）
 set -e
+# cron 环境 PATH 不含 /usr/local/bin，ossutil64 在那里，必须显式声明
+export PATH=/usr/local/bin:/usr/bin:/bin
 DEST=/opt/backups/onefig
 mkdir -p "$DEST"
 TS=$(date +%Y%m%d-%H%M)
