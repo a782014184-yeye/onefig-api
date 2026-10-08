@@ -99,7 +99,35 @@ function ok(name) { passed++; console.log('  ✅', name); }
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-// ---- 5. 未配置时优雅降级 ----
+// ---- 5. 支付宝 RSA2 签名/验签（模拟：应用私钥签名 → 支付宝公钥验签）----
+{
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const priPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const pubPem = publicKey.export({ type: 'spki', format: 'pem' });
+  const params = {
+    app_id: '2021000000000000',
+    out_trade_no: 'abc123def456',
+    total_amount: '99.90',
+    trade_status: 'TRADE_SUCCESS',
+    trade_no: '2026100822001400000000000000',
+  };
+  const sign = pay._internal.alipaySign(params, priPem);
+  assert.ok(pay._internal.alipayVerify(params, sign, pubPem));
+  ok('支付宝 RSA2 签名验签回环正确');
+  assert.ok(!pay._internal.alipayVerify({ ...params, total_amount: '0.01' }, sign, pubPem));
+  ok('篡改金额验签拒绝');
+  assert.ok(!pay._internal.alipayVerify(params, sign.slice(0, -4) + 'AAAA', pubPem));
+  ok('伪造签名验签拒绝');
+  assert.ok(!pay._internal.alipayVerify(params, undefined, pubPem));
+  ok('缺失签名验签拒绝');
+  // 签名串顺序无关性：参数乱序不影响验签
+  const shuffled = {};
+  Object.keys(params).reverse().forEach(k => { shuffled[k] = params[k]; });
+  assert.ok(pay._internal.alipayVerify(shuffled, sign, pubPem));
+  ok('参数乱序验签仍正确（按 key 排序）');
+}
+
+// ---- 6. 未配置时优雅降级 ----
 {
   delete process.env.ONEFIG_PAY_CONFIG;
   const cfg = pay._internal.loadConfig();

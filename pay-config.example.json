@@ -1,11 +1,19 @@
 {
   "wechat": {
-    "enabled": true,
-    "appid": "wx开头的小程序/公众号AppID（需与商户号绑定）",
+    "enabled": false,
+    "appid": "wx开头的小程序/公众号AppID（需已认证并与商户号绑定）",
     "mchid": "1001100963",
     "apiV3Key": "32位APIv3密钥",
     "certFile": "secrets/apiclient_cert.pem",
     "keyFile": "secrets/apiclient_key.pem",
     "notifyUrl": "https://onefig.cn/api/pay/wechat/notify"
+  },
+  "alipay": {
+    "enabled": false,
+    "appid": "支付宝开放平台应用的AppID",
+    "privateKeyFile": "secrets/alipay-app-private.pem",
+    "alipayPublicKeyFile": "secrets/alipay-public.pem",
+    "notifyUrl": "https://onefig.cn/api/pay/alipay/notify",
+    "returnUrl": "https://onefig.cn/pricing"
   }
 }

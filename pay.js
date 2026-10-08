@@ -1,9 +1,11 @@
 // OneFig 在线支付模块（2026-10-08）
-// 第一阶段：微信支付 Native 扫码支付（APIv3，零第三方依赖，只用 Node 内置 crypto/https）
+// 微信支付 Native 扫码 + 支付宝电脑网站支付（均为官方接口、零第三方依赖，只用 Node 内置 crypto/https）
 //
-// 链路：前端下单 → 后端调微信 Native 下单拿 code_url → 前端展示二维码 →
-//       微信服务器回调 /api/pay/wechat/notify（验签+解密）→ 自动升级会员
-//       兜底：前端轮询 /api/orders/:id 时，后端主动向微信查单（防回调丢失）
+// 微信链路：前端下单 → 后端调 Native 下单拿 code_url → 前端展示二维码 →
+//           微信回调 /api/pay/wechat/notify（验签+解密）→ 自动升级会员
+// 支付宝链路：前端下单 → 后端返回收银台 URL（alipay.trade.page.pay，RSA2 签名）→
+//            用户跳转支付宝付款 → 支付宝回调 /api/pay/alipay/notify（验签）→ 自动升级会员
+// 共同兜底：前端轮询 /api/orders/:id/status 时，后端主动向微信/支付宝查单（防回调丢失）
 //
 // 配置：pay-config.local.json（不进 git，模板见 pay-config.example.json）
 // ⚠️ APIv3 密钥、商户私钥只放服务器，绝不提交到代码仓库。
@@ -21,24 +23,46 @@ function loadConfig() {
   const file = process.env.ONEFIG_PAY_CONFIG || path.join(__dirname, 'pay-config.local.json');
   try {
     const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const out = { wechat: null, alipay: null };
+
     const w = cfg.wechat || {};
-    if (!w.enabled) return { wechat: null };
-    const certFile = path.resolve(__dirname, w.certFile || 'secrets/apiclient_cert.pem');
-    const keyFile = path.resolve(__dirname, w.keyFile || 'secrets/apiclient_key.pem');
-    if (!w.appid || !w.mchid || !w.apiV3Key || !fs.existsSync(certFile) || !fs.existsSync(keyFile)) {
-      console.warn('[pay] 微信支付配置不完整（缺 appid/mchid/apiV3Key/证书文件），扫码支付暂不开放');
-      return { wechat: null };
+    if (w.enabled) {
+      const certFile = path.resolve(__dirname, w.certFile || 'secrets/apiclient_cert.pem');
+      const keyFile = path.resolve(__dirname, w.keyFile || 'secrets/apiclient_key.pem');
+      if (!w.appid || !w.mchid || !w.apiV3Key || !fs.existsSync(certFile) || !fs.existsSync(keyFile)) {
+        console.warn('[pay] 微信支付配置不完整（缺 appid/mchid/apiV3Key/证书文件），扫码支付暂不开放');
+      } else {
+        const certPem = fs.readFileSync(certFile, 'utf8');
+        const keyPem = fs.readFileSync(keyFile, 'utf8');
+        let serialNo = w.serialNo || '';
+        if (!serialNo) {
+          try { serialNo = new crypto.X509Certificate(certPem).serialNumber.replace(/:/g, '').toUpperCase(); }
+          catch (e) { console.warn('[pay] 读取证书序列号失败：' + e.message); }
+        }
+        out.wechat = { appid: w.appid, mchid: w.mchid, apiV3Key: w.apiV3Key, notifyUrl: w.notifyUrl, certPem, keyPem, serialNo };
+      }
     }
-    const certPem = fs.readFileSync(certFile, 'utf8');
-    const keyPem = fs.readFileSync(keyFile, 'utf8');
-    let serialNo = w.serialNo || '';
-    if (!serialNo) {
-      try { serialNo = new crypto.X509Certificate(certPem).serialNumber.replace(/:/g, '').toUpperCase(); }
-      catch (e) { console.warn('[pay] 读取证书序列号失败：' + e.message); }
+
+    const a = cfg.alipay || {};
+    if (a.enabled) {
+      const priFile = path.resolve(__dirname, a.privateKeyFile || 'secrets/alipay-app-private.pem');
+      const pubFile = path.resolve(__dirname, a.alipayPublicKeyFile || 'secrets/alipay-public.pem');
+      if (!a.appid || !a.notifyUrl || !fs.existsSync(priFile) || !fs.existsSync(pubFile)) {
+        console.warn('[pay] 支付宝配置不完整（缺 appid/notifyUrl/密钥文件），支付宝支付暂不开放');
+      } else {
+        out.alipay = {
+          appid: a.appid,
+          notifyUrl: a.notifyUrl,
+          returnUrl: a.returnUrl || 'https://onefig.cn/pricing',
+          gateway: a.gateway || 'https://openapi.alipay.com/gateway.do',
+          privateKey: fs.readFileSync(priFile, 'utf8'),
+          alipayPublicKey: fs.readFileSync(pubFile, 'utf8'),
+        };
+      }
     }
-    return { wechat: { appid: w.appid, mchid: w.mchid, apiV3Key: w.apiV3Key, notifyUrl: w.notifyUrl, certPem, keyPem, serialNo } };
+    return out;
   } catch {
-    return { wechat: null }; // 配置文件不存在 = 未开通在线支付，走原人工转账流程
+    return { wechat: null, alipay: null }; // 配置文件不存在 = 未开通在线支付，走原人工转账流程
   }
 }
 
@@ -108,6 +132,63 @@ async function getPlatformCerts(w, cacheFile) {
   fs.writeFileSync(tmp, JSON.stringify({ fetchedAt: Date.now(), certs }));
   fs.renameSync(tmp, cacheFile);
   return certs;
+}
+
+// ---------- 支付宝：RSA2 签名/验签（电脑网站支付，alipay.trade.page.pay）----------
+// 签名串规则：所有非空参数按 key ASCII 升序，key=value 用 & 连接（值不编码），RSA2(SHA256withRSA) 签名
+function alipaySignStr(params) {
+  return Object.keys(params)
+    .filter(k => params[k] !== undefined && params[k] !== null && params[k] !== '' && k !== 'sign')
+    .sort()
+    .map(k => `${k}=${params[k]}`)
+    .join('&');
+}
+function alipaySign(params, privateKeyPem) {
+  return crypto.sign('RSA-SHA256', Buffer.from(alipaySignStr(params)), privateKeyPem).toString('base64');
+}
+function alipayVerify(params, sign, publicKeyPem) {
+  try {
+    return crypto.verify('RSA-SHA256', Buffer.from(alipaySignStr(params)), publicKeyPem, Buffer.from(String(sign || ''), 'base64'));
+  } catch { return false; }
+}
+function alipayTimestamp(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+// 组装支付宝网关 URL（下单跳转发给用户浏览器）
+function alipayPageUrl(a, method, bizContent, extra) {
+  const params = {
+    app_id: a.appid, method, charset: 'utf-8', sign_type: 'RSA2',
+    timestamp: alipayTimestamp(new Date()), version: '1.0',
+    ...(extra || {}), biz_content: JSON.stringify(bizContent),
+  };
+  params.sign = alipaySign(params, a.privateKey);
+  return a.gateway + '?' + Object.keys(params).map(k => `${k}=${encodeURIComponent(params[k])}`).join('&');
+}
+// 服务端直调支付宝 API（查单兜底用）
+function alipayApiCall(a, method, bizContent) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(alipayPageUrl(a, method, bizContent));
+    const body = url.search.slice(1);
+    const req = https.request({
+      host: url.host, path: url.pathname, method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 15000,
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch {}
+        resolve({ status: res.statusCode, json, text });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('支付宝接口请求超时')));
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 // ---------- 回调验签：Wechatpay-Signature = RSA-SHA256(timestamp\nnonce\nbody\n) ----------
@@ -181,10 +262,27 @@ module.exports = function registerPay(app, deps) {
   let cfg = loadConfig();
   const wxEnabled = () => !!cfg.wechat;
 
-  // 支付能力探测：前端据此决定显示"扫码支付"还是"人工转账"
+  // 支付能力探测：前端据此决定显示哪些扫码通道 / 人工转账
   app.get('/api/pay/config', (req, res) => {
-    res.json({ ok: true, wechatNative: wxEnabled(), alipay: false });
+    cfg = loadConfig();
+    res.json({ ok: true, wechatNative: !!cfg.wechat, alipay: !!cfg.alipay });
   });
+
+  // 下单辅助：复用同档位待支付订单；有"人工确认中"的订单则拒绝重复下单
+  function findOrCreateOrder(req, plan, channel) {
+    const orders = loadJSON(ORDERS_FILE, []);
+    let order = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'pending');
+    if (!order) {
+      const notified = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'notified');
+      if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
+      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: PLANS[plan].price, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null };
+      orders.push(order);
+    }
+    order.outTradeNo = order.id.replace(/-/g, ''); // 微信要求 ≤32 位：UUID 去横线正好 32 位；支付宝同样兼容
+    order.payChannel = channel;
+    saveJSON(ORDERS_FILE, orders);
+    return { order };
+  }
 
   // 微信 Native 下单：返回 code_url 供前端生成二维码
   app.post('/api/pay/wechat/native', authUser, async (req, res) => {
@@ -194,24 +292,15 @@ module.exports = function registerPay(app, deps) {
     const plan = String((req.body || {}).plan || '');
     if (!PLANS[plan]) return res.status(400).json({ ok: false, error: '无效的会员类型' });
 
-    const orders = loadJSON(ORDERS_FILE, []);
-    let order = orders.find(o => o.userId === req.user.id && o.plan === plan && (o.status === 'pending'));
-    if (!order) {
-      const notified = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'notified');
-      if (notified) return res.status(409).json({ ok: false, error: '这笔订单正在人工确认中，请稍等或联系客服' });
-      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: PLANS[plan].price, status: 'pending', channel: '微信支付', createdAt: new Date().toISOString(), paidAt: null };
-      orders.push(order);
-    }
-    const outTradeNo = order.id.replace(/-/g, ''); // 微信要求 6-32 位：UUID 去横线正好 32 位
-    order.outTradeNo = outTradeNo;
-    saveJSON(ORDERS_FILE, orders);
+    const { order, error } = findOrCreateOrder(req, plan, '微信支付');
+    if (error) return res.status(409).json({ ok: false, error });
 
     try {
       const r = await wxRequest(w, 'POST', '/v3/pay/transactions/native', {
         appid: w.appid,
         mchid: w.mchid,
         description: '无花有果-' + PLANS[plan].name,
-        out_trade_no: outTradeNo,
+        out_trade_no: order.outTradeNo,
         notify_url: w.notifyUrl,
         attach: order.id,
         amount: { total: Math.round(order.amount * 100), currency: 'CNY' },
@@ -284,22 +373,86 @@ module.exports = function registerPay(app, deps) {
     }
   });
 
-  // 订单状态查询（前端轮询）。超过 20 秒未收到回调时，主动向微信查单兜底（每 15 秒最多查一次）
+  // 支付宝电脑网站支付下单：返回收银台 URL，前端新窗口打开（支付宝页内自带扫码/登录支付）
+  app.post('/api/pay/alipay/pagepay', authUser, async (req, res) => {
+    cfg = loadConfig();
+    const a = cfg.alipay;
+    if (!a) return res.status(503).json({ ok: false, error: '支付宝支付暂未开通，请使用其他方式' });
+    const plan = String((req.body || {}).plan || '');
+    if (!PLANS[plan]) return res.status(400).json({ ok: false, error: '无效的会员类型' });
+
+    const { order, error } = findOrCreateOrder(req, plan, '支付宝');
+    if (error) return res.status(409).json({ ok: false, error });
+
+    const payUrl = alipayPageUrl(a, 'alipay.trade.page.pay', {
+      out_trade_no: order.outTradeNo,
+      total_amount: order.amount.toFixed(2),
+      subject: '无花有果-' + PLANS[plan].name,
+      product_code: 'FAST_INSTANT_TRADE_PAY',
+    }, { notify_url: a.notifyUrl, return_url: a.returnUrl });
+    log(`支付宝下单 order=${order.id} plan=${plan} amount=${order.amount}`);
+    res.json({ ok: true, order, payUrl });
+  });
+
+  // 支付宝异步通知（application/x-www-form-urlencoded；server.js 已挂载 urlencoded 解析）
+  app.post('/api/pay/alipay/notify', (req, res) => {
+    try {
+      cfg = loadConfig();
+      const a = cfg.alipay;
+      if (!a) return res.status(503).send('failure');
+      const params = req.body || {};
+      const { sign, sign_type: _st, ...rest } = params; // 验签时排除 sign 与 sign_type
+      if (!alipayVerify(rest, sign, a.alipayPublicKey)) {
+        log(`支付宝回调验签失败 ip=${req.ip} out_trade_no=${params.out_trade_no}`);
+        return res.status(400).send('failure');
+      }
+      if (params.app_id !== a.appid) { log('支付宝回调 app_id 不符'); return res.status(400).send('failure'); }
+      if (params.trade_status !== 'TRADE_SUCCESS' && params.trade_status !== 'TRADE_FINISHED') {
+        return res.send('success'); // 等待付款等非终态直接确认
+      }
+      const orders = loadJSON(ORDERS_FILE, []);
+      const order = orders.find(o => o.outTradeNo === params.out_trade_no);
+      if (!order) { log(`支付宝回调找不到订单 out_trade_no=${params.out_trade_no}`); return res.status(404).send('failure'); }
+      if (Number(params.total_amount) !== Math.round(order.amount * 100) / 100) {
+        log(`支付宝回调金额不符 order=${order.id} expect=${order.amount} got=${params.total_amount}`);
+        return res.status(400).send('failure');
+      }
+      const result = markOrderPaid(DATA_DIR, order.id, { channel: '支付宝', transactionId: params.trade_no, paidAt: params.gmt_payment });
+      log(`支付宝支付成功 order=${order.id} trade_no=${params.trade_no}${result && result.already ? '（重复通知，幂等忽略）' : ''}`);
+      res.send('success');
+    } catch (e) {
+      log('支付宝回调处理异常：' + (e && e.stack || e));
+      res.status(500).send('failure');
+    }
+  });
+
+  // 订单状态查询（前端轮询）。超过 20 秒未收到回调时，主动向微信/支付宝查单兜底（每 15 秒最多查一次）
   app.get('/api/orders/:id/status', authUser, async (req, res) => {
+    cfg = loadConfig();
     const orders = loadJSON(ORDERS_FILE, []);
     const o = orders.find(x => x.id === req.params.id && x.userId === req.user.id);
     if (!o) return res.status(404).json({ ok: false, error: '订单不存在' });
-    if (o.status !== 'paid' && o.outTradeNo && cfg.wechat) {
-      const last = o.lastWxQueryAt ? Date.parse(o.lastWxQueryAt) : 0;
+    if (o.status !== 'paid' && o.outTradeNo) {
+      const last = o.lastPayQueryAt ? Date.parse(o.lastPayQueryAt) : 0;
       if (Date.now() - last > 15000 && Date.now() - Date.parse(o.createdAt) > 20000) {
-        o.lastWxQueryAt = new Date().toISOString();
+        o.lastPayQueryAt = new Date().toISOString();
         saveJSON(ORDERS_FILE, orders);
         try {
-          const r = await wxRequest(cfg.wechat, 'GET', `/v3/pay/transactions/out-trade-no/${o.outTradeNo}?mchid=${cfg.wechat.mchid}`, null);
-          if (r.status === 200 && r.json && r.json.trade_state === 'SUCCESS') {
-            markOrderPaid(DATA_DIR, o.id, { channel: '微信支付', transactionId: r.json.transaction_id, paidAt: r.json.success_time });
-            o.status = 'paid';
-            log(`查单补单成功 order=${o.id}（回调可能丢失）`);
+          if (o.payChannel === 'alipay' && cfg.alipay) {
+            const r = await alipayApiCall(cfg.alipay, 'alipay.trade.query', { out_trade_no: o.outTradeNo });
+            const resp = r.json && r.json.alipay_trade_query_response;
+            if (resp && resp.code === '10000' && (resp.trade_status === 'TRADE_SUCCESS' || resp.trade_status === 'TRADE_FINISHED')) {
+              markOrderPaid(DATA_DIR, o.id, { channel: '支付宝', transactionId: resp.trade_no });
+              o.status = 'paid';
+              log(`支付宝查单补单成功 order=${o.id}（回调可能丢失）`);
+            }
+          } else if (o.payChannel !== 'alipay' && cfg.wechat) {
+            const r = await wxRequest(cfg.wechat, 'GET', `/v3/pay/transactions/out-trade-no/${o.outTradeNo}?mchid=${cfg.wechat.mchid}`, null);
+            if (r.status === 200 && r.json && r.json.trade_state === 'SUCCESS') {
+              markOrderPaid(DATA_DIR, o.id, { channel: '微信支付', transactionId: r.json.transaction_id, paidAt: r.json.success_time });
+              o.status = 'paid';
+              log(`微信查单补单成功 order=${o.id}（回调可能丢失）`);
+            }
           }
         } catch (e) { log(`查单异常 order=${o.id} err=${e.message}`); }
       }
@@ -310,4 +463,4 @@ module.exports = function registerPay(app, deps) {
 
 module.exports.markOrderPaid = markOrderPaid;
 // 仅供测试脚本使用
-module.exports._internal = { aes256gcmDecrypt, verifyNotifySignature, loadConfig, wxSign };
+module.exports._internal = { aes256gcmDecrypt, verifyNotifySignature, loadConfig, wxSign, alipaySign, alipayVerify, alipaySignStr };

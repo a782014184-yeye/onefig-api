@@ -97,6 +97,8 @@ app.use('/api/boards', express.json({ limit: '12mb' }));
 app.use('/api/shared', express.json({ limit: '12mb' }));   // 可编辑分享的保存通道同样要走大 payload
 // 微信支付回调需要原始报文验签（2026-10-08）：必须在全局 json 解析器之前挂载 raw
 app.use('/api/pay/wechat/notify', express.raw({ type: '*/*' }));
+// 支付宝回调是表单格式（application/x-www-form-urlencoded）
+app.use('/api/pay/alipay/notify', express.urlencoded({ extended: false, limit: '64kb' }));
 app.use(express.json({ limit: '256kb' }));
 
 // CORS: 公开接口（无 cookie 会话）开放 *；后台路由（/console 与 ADMIN_PATH）同源访问，
