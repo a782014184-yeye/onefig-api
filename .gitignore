@@ -1,3 +1,7 @@
 node_modules/
 *.log
 .DS_Store
+
+# 支付密钥与证书：绝不入库（2026-10-08）
+pay-config.local.json
+secrets/

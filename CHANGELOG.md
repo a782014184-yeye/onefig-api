@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### Added
+- 微信支付 Native 扫码支付（`pay.js`，APIv3 零第三方依赖）：`POST /api/pay/wechat/native` 下单返回 code_url、`POST /api/pay/wechat/notify` 支付回调（平台证书验签 + AES-256-GCM 解密 + 金额/商户号校验，幂等）、`GET /api/orders/:id/status` 订单轮询（超 20 秒未回调时主动向微信查单兜底）、`GET /api/pay/config` 支付能力探测
+- 支付成功自动升级会员并赠送积分，与后台人工确认共用 `markOrderPaid`（单一事实来源）
+- 配置经 `pay-config.local.json`（已 gitignore，模板 `pay-config.example.json`），未配置时优雅降级为原人工转账流程
+- 新增 `test-pay.cjs`：12 项单元测试（签名/验签/防重放/解密/幂等升级）
+
+### Changed
+- 后台订单确认 `POST /console/api/orders/:id/confirm` 改为调用 `pay.js` 的 `markOrderPaid`
+
 ## [1.3.0] - 2026-10-08
 
 ### Added

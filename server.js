@@ -95,6 +95,8 @@ const app = express();
 // body-parser 解析过后会置 req._body，全局解析器自动跳过）
 app.use('/api/boards', express.json({ limit: '12mb' }));
 app.use('/api/shared', express.json({ limit: '12mb' }));   // 可编辑分享的保存通道同样要走大 payload
+// 微信支付回调需要原始报文验签（2026-10-08）：必须在全局 json 解析器之前挂载 raw
+app.use('/api/pay/wechat/notify', express.raw({ type: '*/*' }));
 app.use(express.json({ limit: '256kb' }));
 
 // CORS: 公开接口（无 cookie 会话）开放 *；后台路由（/console 与 ADMIN_PATH）同源访问，
@@ -653,6 +655,9 @@ require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + A
 
 // AI 工坊：积分体系 + 生图流水线
 require('./ai')(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta });
+
+// 在线支付：微信 Native 扫码支付（2026-10-08）
+require('./pay')(app, { authUser, DATA_DIR, PLANS, logLine });
 
 // SEO 公开页：sitemap.xml + 素材详情页 /m/ + 系列页 /s/（服务端直出）
 require('./seo')(app, { esc, DATA_DIR });

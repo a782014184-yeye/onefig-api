@@ -1,0 +1,11 @@
+{
+  "wechat": {
+    "enabled": true,
+    "appid": "wx开头的小程序/公众号AppID（需与商户号绑定）",
+    "mchid": "1001100963",
+    "apiV3Key": "32位APIv3密钥",
+    "certFile": "secrets/apiclient_cert.pem",
+    "keyFile": "secrets/apiclient_key.pem",
+    "notifyUrl": "https://onefig.cn/api/pay/wechat/notify"
+  }
+}

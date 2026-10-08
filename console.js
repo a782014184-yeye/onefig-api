@@ -207,23 +207,10 @@ module.exports = function registerConsole(app, deps) {
   });
 
   app.post('/console/api/orders/:id/confirm', consoleAuth, (req, res) => {
-    const users = load('users.json', []);
-    const orders = load('orders.json', []);
-    const o = orders.find(x => x.id === req.params.id);
-    if (!o) return res.status(404).json({ ok: false });
-    if (o.status === 'paid') return res.json({ ok: true, order: o });
-    o.status = 'paid';
-    o.paidAt = new Date().toISOString();
-    const u = users.find(x => x.id === o.userId);
-    if (u) {
-      u.level = o.plan;
-      if (!u.memberSince) u.memberSince = o.paidAt;
-      if (!u.name && o.userName) u.name = o.userName;
-      const granted = grantMemberCredits(u, o.plan);
-      if (granted) logCredit(u, granted, '开通' + PLANS[o.plan] + '赠送');
-    }
-    save('users.json', users); save('orders.json', orders);
-    res.json({ ok: true, order: o });
+    // 升级逻辑与在线支付回调共用（pay.js markOrderPaid，幂等）：2026-10-08 起不再各自实现
+    const result = require('./pay').markOrderPaid(DATA_DIR, req.params.id);
+    if (!result) return res.status(404).json({ ok: false });
+    res.json({ ok: true, order: result.order });
   });
 
   // 收款信息设置（网站付款页展示）
