@@ -1,7 +1,8 @@
-// OneFig 管理后台控制台（四页：数据看板 / 素材管理 / 账号管理 / 素材请求）
+// OneFig 管理后台控制台（五页：数据看板 / 素材管理 / 账号管理 / 素材请求 / 网站体检）
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { execSync } = require('child_process');
 
 const PLANS = { basic: '青果会员', pro: '红果会员', team: '金果会员' };
 const PLAN_PRICE = { basic: 29.9, pro: 99.9, team: 299.9 };
@@ -359,6 +360,78 @@ module.exports = function registerConsole(app, deps) {
     res.json({ ok: true, list: deps.readSubmissions() });
   });
 
+  // ---------- 网站体检（服务器实时健康状态，供后台体检页可视化展示；全部为固定命令，无用户输入拼接） ----------
+  const sh = (cmd, timeout) => { try { return execSync(cmd, { timeout: timeout || 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
+  app.get('/console/api/health', consoleAuth, (req, res) => {
+    const items = [];
+    const add = (key, name, status, value, hint) => items.push({ key, name, status, value, hint });
+
+    // 1. 网站主服务
+    const apiActive = sh('systemctl is-active onefig-api') === 'active';
+    add('api', '网站主服务', apiActive ? 'ok' : 'bad', apiActive ? '运行中' : '已停止',
+      apiActive ? '处理所有访问请求的核心服务' : '网站现在打不开！请截图本页联系 Kimi 处理');
+
+    // 2. AI 抠图服务
+    const rembgActive = sh('systemctl is-active onefig-rembg') === 'active';
+    add('rembg', 'AI 抠图服务', rembgActive ? 'ok' : 'warn', rembgActive ? '运行中' : '未运行',
+      rembgActive ? '负责 AI 抠图功能' : 'AI 抠图暂不可用，其他功能不受影响，可联系 Kimi 恢复');
+
+    // 3. 磁盘
+    const diskPct = parseInt(sh('df / --output=pcent | tail -1') || '0', 10) || 0;
+    const diskAvail = sh('df -h / --output=avail | tail -1') || '?';
+    add('disk', '服务器磁盘', diskPct >= 90 ? 'bad' : diskPct >= 80 ? 'warn' : 'ok',
+      diskPct + '% 已用（剩余 ' + diskAvail + '）',
+      diskPct >= 80 ? '空间偏紧，请联系 Kimi 清理或扩容' : '存素材原图和备份用的空间');
+
+    // 4. 内存
+    const mem = sh("free -m | awk 'NR==2{print $3, $2}'");
+    let memPct = 0;
+    if (mem) { const p = mem.split(/\s+/).map(Number); if (p[1]) memPct = Math.round(p[0] / p[1] * 100); }
+    add('mem', '服务器内存', memPct >= 95 ? 'bad' : memPct >= 85 ? 'warn' : 'ok', memPct + '% 已用',
+      memPct >= 85 ? '内存偏紧，若网站变慢请联系 Kimi' : '运行程序的临时空间');
+
+    // 5. 每日自动备份
+    const lastBackup = sh("grep 'backup done' /var/log/onefig-backup.log 2>/dev/null | tail -1");
+    let backupHours = null, backupTime = '';
+    if (lastBackup) {
+      const m = lastBackup.match(/\[([\d-]+ [\d:]+)\]/);
+      if (m) { backupTime = m[1]; backupHours = Math.round((Date.now() - new Date(m[1].replace(' ', 'T') + '+08:00').getTime()) / 3600000); }
+    }
+    const upFail = sh("grep -c 'OSS-UPLOAD-FAIL' /var/log/onefig-backup.log 2>/dev/null") || '0';
+    add('backup', '每日自动备份',
+      backupHours === null ? 'bad' : backupHours <= 26 ? (upFail === '0' ? 'ok' : 'warn') : 'bad',
+      backupHours === null ? '无记录' : '上次备份：' + backupTime,
+      backupHours === null ? '备份从未运行过，请联系 Kimi'
+        : backupHours > 26 ? '备份超过一天没跑了，请联系 Kimi'
+        : upFail === '0' ? '每天凌晨 3:40 自动备份网站数据' : '备份已运行但上传云端有失败记录，建议联系 Kimi 查看');
+
+    // 6. 云端异地备份
+    const ossLast = sh("ossutil64 ls oss://onefig/backups/ 2>/dev/null | grep -oE 'onefig-json-[0-9]{8}-[0-9]{4}' | sort | tail -1", 15000);
+    let ossTime = '', ossHours = null;
+    if (ossLast) {
+      const m = ossLast.match(/(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/);
+      if (m) { ossTime = m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5]; ossHours = Math.round((Date.now() - new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':00+08:00').getTime()) / 3600000); }
+    }
+    add('oss', '云端异地备份', ossHours === null ? 'warn' : ossHours <= 26 ? 'ok' : 'warn',
+      ossHours === null ? '暂时查询不到' : '云端最新：' + ossTime,
+      ossHours !== null && ossHours <= 26 ? '备份同时存了一份在阿里云，防服务器损坏' : '云端备份可能有延迟，持续多天请联系 Kimi');
+
+    // 7. 自动巡检（看门狗）
+    const alerts = sh("grep -c 'ALERT' /var/log/onefig-watchdog.log 2>/dev/null") || '0';
+    add('watchdog', '自动巡检', alerts === '0' ? 'ok' : 'warn',
+      alerts === '0' ? '无待处理告警' : '有 ' + alerts + ' 条告警待处理',
+      alerts === '0' ? '每 30 分钟自动检查备份、磁盘和服务' : '巡检发现了问题，请截图本页联系 Kimi 查看');
+
+    // 8. 当前版本
+    let ver = '';
+    try { ver = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version || ''; } catch {}
+    add('version', '系统版本', 'ok', ver ? 'v' + ver : '—', '反馈问题时把这个版本号一并发给 Kimi');
+
+    const bad = items.filter(i => i.status === 'bad').length;
+    const warn = items.filter(i => i.status === 'warn').length;
+    res.json({ ok: true, overall: bad ? 'bad' : warn ? 'warn' : 'ok', bad, warn, items, checkedAt: new Date().toISOString() });
+  });
+
   // ---------- 页面（公开访问，内含登录界面；数据接口均有 consoleAuth 保护） ----------
   app.get(deps.ADMIN_PATH_FULL, (req, res) => res.send(PAGE));
   app.get('/', (req, res) => res.redirect(deps.ADMIN_PATH_FULL));
@@ -466,6 +539,18 @@ select:focus,input:focus{border-color:#a78bfa}
 .acct{margin-top:auto;background:rgba(255,255,255,.14);border-radius:12px;padding:9px 12px;font-size:12px;color:rgba(255,255,255,.88);display:flex;align-items:center;gap:6px}
 .acct button{margin-left:auto;padding:4px 10px;font-size:11px;background:rgba(255,255,255,.22);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600}
 .acct button:hover{background:rgba(255,255,255,.34)}
+.hl{display:flex;gap:12px;align-items:flex-start}
+.hl .dot{width:12px;height:12px;border-radius:50%;margin-top:5px;flex-shrink:0}
+.hl .dot.ok{background:#34d399;box-shadow:0 0 0 4px rgba(52,211,153,.16)}
+.hl .dot.warn{background:#fbbf24;box-shadow:0 0 0 4px rgba(251,191,36,.16)}
+.hl .dot.bad{background:#f87171;box-shadow:0 0 0 4px rgba(248,113,113,.16)}
+.hl .t{font-weight:600;font-size:14px}
+.hl .v{font-size:13px;color:#6d4fb0;font-weight:600;margin-top:3px}
+.hl .h{font-size:12px;color:#8b84a3;margin-top:2px}
+.banner{border-radius:14px;padding:22px 24px;color:#fff;margin-bottom:18px;box-shadow:0 4px 14px rgba(124,92,191,.12)}
+.banner.ok{background:linear-gradient(135deg,#34d399,#10b981)}
+.banner.warn{background:linear-gradient(135deg,#fbbf24,#f59e0b)}
+.banner.bad{background:linear-gradient(135deg,#f87171,#ef4444)}
 @media(max-width:760px){.side{width:60px;padding:14px 6px}.side .brand{font-size:0}.side a{font-size:0;justify-content:center}.side a .ic{font-size:18px}.main{padding:16px}}
 </style></head><body>
 <div class="side">
@@ -474,6 +559,7 @@ select:focus,input:focus{border-color:#a78bfa}
   <a href="#/materials" data-r="materials"><span class="ic">🎨</span>素材管理</a>
   <a href="#/users" data-r="users"><span class="ic">👥</span>账号管理</a>
   <a href="#/requests" data-r="requests"><span class="ic">💌</span>素材请求</a>
+  <a href="#/health" data-r="health"><span class="ic">🩺</span>网站体检</a>
   <div class="acct"><span>👤</span><span id="acct-name" style="overflow:hidden;text-overflow:ellipsis">管理员</span><button onclick="logout()">退出</button></div>
 </div>
 <div class="main" id="view">加载中…</div>
@@ -754,6 +840,19 @@ H.requests=async()=>{
   <div class="sub">共 '+s.list.length+' 条'+((reqFilter!=='all'||q)?'，筛出 '+flt.length+' 条':'')+'</div>'+cards;
 };
 window.subAct=async(id,action)=>{if(action==='delete'&&!confirm('确定删除这条吗？'))return;try{await api(location.pathname+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});route()}catch(e){toast(e.message)}};
+
+/* ---------- 5. 网站体检（可视化健康状态，无需懂技术） ---------- */
+H.health=async()=>{
+  const d=await api('/console/api/health');
+  const ovMap={ok:['🎉 网站一切正常','所有检查项都健康，放心使用'],warn:['⚠️ 有 '+d.warn+' 项需要注意','暂不影响使用，建议抽空处理或联系 Kimi'],bad:['🚨 有 '+d.bad+' 项异常','请截图本页联系 Kimi 处理']};
+  const ov=ovMap[d.overall]||ovMap.ok;
+  const stTxt=s=>s==='ok'?'<span style="color:#10b981">● 正常</span>':s==='warn'?'<span style="color:#f59e0b">● 注意</span>':'<span style="color:#ef4444">● 异常</span>';
+  const rows=d.items.map(it=>'<div class="panel" style="margin-bottom:12px;padding:16px 20px"><div class="hl"><span class="dot '+it.status+'"></span><div style="flex:1"><div class="t">'+esc(it.name)+'<span style="float:right;font-size:12px">'+stTxt(it.status)+'</span></div><div class="v">'+esc(it.value)+'</div><div class="h">'+esc(it.hint)+'</div></div></div></div>').join('');
+  return '<div class="toolbar"><h2>🩺 网站体检</h2><div class="sp"></div><button class="btn btn-g" onclick="route()">🔄 刷新</button></div>'
+    +'<div class="banner '+d.overall+'"><div style="font-size:19px;font-weight:700">'+ov[0]+'</div><div style="font-size:13px;opacity:.92;margin-top:4px">'+ov[1]+'</div></div>'
+    +rows
+    +'<div class="sub" style="text-align:center;margin-top:10px">体检时间：'+fmtT(d.checkedAt)+' · 本页数据来自服务器实时检查，打开自动更新，无需任何操作</div>';
+};
 
 /* ---------- 路由 ---------- */
 async function route(){
