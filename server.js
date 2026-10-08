@@ -654,6 +654,9 @@ require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + A
 // AI 工坊：积分体系 + 生图流水线
 require('./ai')(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta });
 
+// SEO 公开页：sitemap.xml + 素材详情页 /m/ + 系列页 /s/（服务端直出）
+require('./seo')(app, { esc, DATA_DIR });
+
 app.post('/' + ADMIN_PATH + '/toggle', consoleAuth, (req, res) => {
   const rows = readDB();
   const r = rows.find(x => x.id === req.body.id);

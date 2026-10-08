@@ -4,9 +4,15 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-08
+
+### Added
+- SEO 公开页服务端直出（`seo.js`）：`GET /sitemap.xml`（596 个 URL，随素材数据实时生成）、素材详情落地页 `/m/:series/:title`、系列页 `/s/:series`，均含完整 meta/og/JSON-LD 结构化数据，404 有友好页
+
 ### Ops
 - nginx 开启 gzip（主 JS 608KB→180KB，-70%）；带哈希构建产物长缓存一年、index.html 与画板入口 no-cache、静态图一周缓存
 - 补齐安全响应头（HSTS / X-Frame-Options / nosniff / Referrer-Policy / Permissions-Policy），配置入库 `ops/onefig.nginx.conf`
+- nginx 新增 /sitemap.xml、/m/、/s/ 反代路由
 
 ## [1.2.0] - 2026-10-08
 
