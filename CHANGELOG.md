@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Ops
+- nginx 开启 gzip（主 JS 608KB→180KB，-70%）；带哈希构建产物长缓存一年、index.html 与画板入口 no-cache、静态图一周缓存
+- 补齐安全响应头（HSTS / X-Frame-Options / nosniff / Referrer-Policy / Permissions-Policy），配置入库 `ops/onefig.nginx.conf`
+
 ## [1.2.0] - 2026-10-08
 
 ### Added
