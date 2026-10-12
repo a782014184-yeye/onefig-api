@@ -8,13 +8,16 @@
 2. **部署前比对线上版本**：`ssh root@47.98.165.254 'md5sum /opt/onefig-api/server.js'`，与本文件不一致时先查原因（多半是没部署的新改动，或有会话部署了旧版），确认后再发。
 3. **部署步骤**：
    ```bash
+   # ① 先在服务器上备份线上版本（<标签> 换成本次改动说明，如 pay-fix）
+   ssh root@47.98.165.254 'cp /opt/onefig-api/server.js /opt/onefig-api/server.js.bak-$(date +%Y%m%d)-<标签>'
+   # ② 上传新文件
    scp server.js root@47.98.165.254:/opt/onefig-api/server.js
-   ssh root@47.98.165.254 'cp /opt/onefig-api/server.js /opt/onefig-api/server.js.bak-$(date +%Y%m%d)-<标签>  # 注意：先备份再传
-   systemctl restart onefig-api'
+   # ③ 核验线上 md5 与本地一致后再重启
+   ssh root@47.98.165.254 'md5sum /opt/onefig-api/server.js && systemctl restart onefig-api'
    ```
-   顺序：先备份线上 → scp → 核验 md5 → 重启。
+   顺序：先备份线上 → scp → 核验 md5 → 重启。**切勿颠倒**——先传文件再备份，备份出来的就是新文件，回滚件直接丢失。
 4. **部署后立即提交 git**：线上版本必须等于 git 最新 commit。
-5. 测试用隔离实例：`PORT=8090 DATA_DIR=$(mktemp -d) node server.js`（在服务器 /opt/onefig-api 里跑，脚本名别叫 server.js，杀进程用 `fuser -k 8090/tcp`，千万别 pkill node）。
+5. 测试用隔离实例：在服务器 `/opt/onefig-api` 里跑 `PORT=8090 DATA_DIR=$(mktemp -d) node server.js`——用本目录的 server.js 本体，靠端口 8090 + 独立数据目录与 8080 生产实例隔离；停止用 `fuser -k 8090/tcp`，千万别 pkill node（会误杀生产）。
 
 ## 联调脚本
 
