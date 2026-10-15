@@ -94,6 +94,9 @@ function writeDB(rows) {
 }
 
 const app = express();
+// nginx 反代（X-Forwarded-Proto: https），信任代理头，req.protocol 才是 https——
+// 否则生成的资源链接是 http://，浏览器拦截混合内容且 <a download> 失效（2026-10-15）
+app.set('trust proxy', true);
 // 画板内容最大 10MB：画板路由单独用大解析器（需在全局 256kb 解析器之前注册，
 // body-parser 解析过后会置 req._body，全局解析器自动跳过）
 app.use('/api/boards', express.json({ limit: '12mb' }));
