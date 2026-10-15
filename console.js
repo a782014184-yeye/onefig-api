@@ -105,6 +105,21 @@ module.exports = function registerConsole(app, deps) {
     res.json({ ok: true, list: log });
   });
 
+  // 操作日志（2026-10-15）：读 data/logs/<type>-日期.log（今天 + 昨天），返回最新 N 行（新→旧）
+  // type 白名单：ai-op（AI 工坊语义操作）/ access / auth / error / mail / pay
+  app.get('/console/api/logs', consoleAuth, (req, res) => {
+    const type = String(req.query.type || 'ai-op');
+    if (!/^[a-z-]+$/.test(type)) return res.status(400).json({ ok: false, error: '无效的日志类型' });
+    const lines = Math.min(500, Math.max(20, parseInt(req.query.lines, 10) || 200));
+    const days = [0, 1].map(d => {
+      const dt = new Date(Date.now() - d * 864e5);
+      const p = path.join(DATA_DIR, 'logs', `${type}-${dt.toISOString().slice(0, 10)}.log`);
+      try { return fs.readFileSync(p, 'utf8') } catch { return '' }
+    });
+    const all = days.join('').trim().split('\n').filter(Boolean);
+    res.json({ ok: true, list: all.slice(-lines).reverse(), total: all.length, type });
+  });
+
   app.get('/console/api/users', consoleAuth, (req, res) => {
     const users = load('users.json', []);
     const orders = load('orders.json', []).filter(o => o.status === 'paid');
@@ -546,6 +561,7 @@ select:focus,input:focus{border-color:#a78bfa}
   <a href="#/materials" data-r="materials"><span class="ic">🎨</span>素材管理</a>
   <a href="#/users" data-r="users"><span class="ic">👥</span>账号管理</a>
   <a href="#/requests" data-r="requests"><span class="ic">💌</span>素材请求</a>
+  <a href="#/logs" data-r="logs"><span class="ic">📝</span>操作日志</a>
   <a href="#/health" data-r="health"><span class="ic">🩺</span>网站体检</a>
   <div class="acct"><span>👤</span><span id="acct-name" style="overflow:hidden;text-overflow:ellipsis">管理员</span><button onclick="logout()">退出</button></div>
 </div>
@@ -828,7 +844,20 @@ H.requests=async()=>{
 };
 window.subAct=async(id,action)=>{if(action==='delete'&&!confirm('确定删除这条吗？'))return;try{await api(location.pathname+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});route()}catch(e){toast(e.message)}};
 
-/* ---------- 5. 网站体检（可视化健康状态，无需懂技术） ---------- */
+/* ---------- 5.5 操作日志（2026-10-15：AI 工坊语义操作 + 原始访问/认证日志） ---------- */
+const LOG_TYPES=[['ai-op','AI 工坊操作'],['access','访问日志'],['auth','登录审计'],['error','错误日志']];
+let LOG_CUR='ai-op';
+window.switchLog=t=>{LOG_CUR=t;route()};
+H.logs=async()=>{
+  const d=await api('/console/api/logs?type='+LOG_CUR+'&lines=300').catch(e=>({list:[],error:e.message}));
+  const tabs=LOG_TYPES.map(t=>'<button class="btn '+(t[0]===LOG_CUR?'btn-p':'btn-g')+'" style="margin-right:6px" onclick="switchLog(\''+t[0]+'\')">'+t[1]+'</button>').join('');
+  const color=l=>/FAIL|ERROR/.test(l)?'color:#d6336c':/ok|done/.test(l)?'color:#2f9e5f':'';
+  const rows=(d.list||[]).map(l=>'<div style="padding:5px 2px;border-bottom:1px solid #f1eef9;font-size:12px;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all;'+color(l)+'">'+esc(l)+'</div>').join('')||'<div class="sub" style="padding:20px;text-align:center">今天还没有这类日志</div>';
+  return '<div class="toolbar"><h2>📝 操作日志</h2><div class="sp"></div>'+tabs+'<button class="btn btn-g" onclick="route()">🔄 刷新</button></div>'
+    +'<div class="panel" style="padding:12px 16px"><div class="sub" style="margin-bottom:8px">'+(LOG_TYPES.find(t=>t[0]===LOG_CUR)[1])+' · 今天 + 昨天 · 共 '+(d.total||0)+' 行，显示最新 '+(d.list||[]).length+' 行（新→旧，服务器保留 30 天）</div>'+rows+'</div>';
+};
+
+/* ---------- 6. 网站体检（可视化健康状态，无需懂技术） ---------- */
 H.health=async()=>{
   const d=await api('/console/api/health');
   const ovMap={ok:['🎉 网站一切正常','所有检查项都健康，放心使用'],warn:['⚠️ 有 '+d.warn+' 项需要注意','暂不影响使用，建议抽空处理或联系 Kimi'],bad:['🚨 有 '+d.bad+' 项异常','请截图本页联系 Kimi 处理']};
