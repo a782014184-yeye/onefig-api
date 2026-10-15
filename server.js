@@ -13,6 +13,9 @@ const ADMIN_PATH = process.env.ADMIN_PATH || 'admin';
 const ADMIN_USER = process.env.ADMIN_USER || 'onefig';
 const ADMIN_PASS = process.env.ADMIN_PASS || 'change-me';
 const MAX_UPLOAD_MB = 10;
+const DASHSCOPE_KEY = process.env.DASHSCOPE_API_KEY || '';
+// 2026-10-15：qwen-image-edit(-plus|-max) 全系列被百炼下架（报 Model not exist），改用 qwen-image-2.0（0.2元/张，与原 plus 同价；以后换模型只改环境变量 QWEN_EDIT_MODEL）
+const QWEN_EDIT_MODEL = process.env.QWEN_EDIT_MODEL || 'qwen-image-2.0';
 
 // ---- AIGC 隐式标识（GB 45438-2025）与授权码 ----
 const PRODUCER_CODE = '92330102MAKM5NHF44'; // 统一社会信用代码（生成合成服务提供者编码）
@@ -859,7 +862,7 @@ app.post('/api/ai-stylize', authUser, (req, res) => {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + DASHSCOPE_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'qwen-image-edit-plus',
+          model: QWEN_EDIT_MODEL,
           input: { messages: [{ role: 'user', content: [{ image: imageUrl }, { text: prompt }] }] },
         }),
       });
@@ -880,8 +883,7 @@ app.post('/api/ai-stylize', authUser, (req, res) => {
   });
 });
 
-// ---- AI 图像编辑（百炼 qwen-image-edit-plus，指令改图）----
-const DASHSCOPE_KEY = process.env.DASHSCOPE_API_KEY || '';
+// ---- AI 图像编辑（百炼 QWEN_EDIT_MODEL，指令改图）----
 app.post('/api/ai-edit', authUser, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
@@ -900,7 +902,7 @@ app.post('/api/ai-edit', authUser, (req, res) => {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + DASHSCOPE_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'qwen-image-edit-plus',
+          model: QWEN_EDIT_MODEL,
           input: { messages: [{ role: 'user', content: [{ image: imageUrl }, { text: prompt }] }] },
         }),
       });
