@@ -204,6 +204,13 @@ function makeToken(userId, pv) {
   const p = Buffer.from(JSON.stringify({ uid: userId, exp: Date.now() + 30 * 864e5, pv: pv || 0 })).toString('base64url');
   return p + '.' + sign(p);
 }
+// 在线人数：内存记录每个用户最近一次通过鉴权的时间，5 分钟内有活动即算在线（重启清零，无需持久化）
+const ONLINE_SINCE = new Map();
+function getOnlineCount() {
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  for (const [uid, t] of ONLINE_SINCE) if (t < cutoff) ONLINE_SINCE.delete(uid);
+  return ONLINE_SINCE.size;
+}
 function authUser(req, res, next) {
   const m = (req.headers.authorization || '').match(/^Bearer (.+)$/);
   if (!m) return res.status(401).json({ ok: false, error: '请先登录' });
@@ -215,6 +222,7 @@ function authUser(req, res, next) {
   if (!u) return res.status(401).json({ ok: false, error: '账号不存在' });
   if ((d.pv || 0) !== (u.pwdVer || 0)) return res.status(401).json({ ok: false, error: '密码已修改，请重新登录' });
   req.user = u;
+  ONLINE_SINCE.set(u.id, Date.now());
   next();
 }
 function publicUser(u) {
@@ -659,7 +667,7 @@ app.get('/api/my/submissions', authUser, (req, res) => {
 });
 
 // 挂载四页管理控制台
-require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + ADMIN_PATH, readSubmissions: readDB });
+require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + ADMIN_PATH, readSubmissions: readDB, getOnlineCount });
 
 // AI 工坊：积分体系 + 生图流水线
 require('./ai')(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine });

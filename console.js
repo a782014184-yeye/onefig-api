@@ -9,6 +9,7 @@ const PLAN_PRICE = { basic: 29.9, pro: 99.9, team: 299.9 };
 
 module.exports = function registerConsole(app, deps) {
   const { consoleAuth, esc, DATA_DIR } = deps;
+  const getOnline = deps.getOnlineCount || (() => 0);
   const DIR = path.join(DATA_DIR, 'console');
   fs.mkdirSync(DIR, { recursive: true });
   const file = n => path.join(DIR, n);
@@ -39,7 +40,7 @@ module.exports = function registerConsole(app, deps) {
         revenue: orders.filter(o => (o.paidAt || '').slice(0, 10) === key).reduce((s, o) => s + o.amount, 0),
       });
     }
-    res.json({ ok: true, totalUsers: users.length, levelCount, totalRevenue, monthly, days });
+    res.json({ ok: true, totalUsers: users.length, online: getOnline(), levelCount, totalRevenue, monthly, days });
   });
 
   // 每日走势：新增用户 + 收入（可选 7/30/180/365 天）
@@ -598,8 +599,6 @@ window.doLogin=async()=>{
     document.getElementById('loginMask').style.display='none';route();
   }catch(e){err.textContent='网络错误，稍后再试'}
 };
-window.confirmCreditOrder=async(id)=>{if(!confirm('确认已收到这笔积分转账吗？确认后积分将自动到账。'))return;try{await api('/console/api/credit-orders/'+id+'/confirm',{method:'POST'});toast('已确认，积分已到账 ✅');route()}catch(e){toast(e.message)}};
-window.confirmOrder=async(id)=>{if(!confirm('确认已收到这笔转账吗？确认后会员将自动升级。'))return;try{await api('/console/api/orders/'+id+'/confirm',{method:'POST'});toast('已确认，会员已升级 ✅');route()}catch(e){toast(e.message)}};
 window.payModal=async()=>{const p=await api('/console/api/payinfo').catch(()=>({wechat:'',alipay:'',note:''}));
   showModal('<h3>收款设置</h3>\
   <div class="row"><label>微信号（显示给付款粉丝）</label><input id="m-wx" value="'+esc(p.wechat||'')+'" placeholder="你的微信号"></div>\
@@ -654,20 +653,10 @@ function closeModal(){document.getElementById('mask').style.display='none'}
 document.getElementById('mask').onclick=e=>{if(e.target.id==='mask')closeModal()};
 
 /* ---------- 1. 数据看板 ---------- */
+// 2026-10-15 起微信/支付宝在线支付已对接，付款回调自动升级会员/到账积分，
+// 不再有人工「待确认收款」环节；看板只保留统计卡片与走势图。
 H.dashboard=async()=>{
   const s=await api('/console/api/stats');
-  const pend=(await api('/console/api/orders?status=pending,notified').catch(()=>({list:[]}))).list;
-  const cPend=(await api('/console/api/credit-orders?status=pending,notified').catch(()=>({list:[]}))).list;
-  const cPendHtml=cPend.length
-    ? '<div class="panel"><h3 style="font-size:15px;margin-bottom:12px">⚡ 待确认积分订单（'+cPend.length+' 笔）</h3><table><tr><th>下单时间</th><th>用户</th><th>积分</th><th>金额</th><th>状态</th><th></th></tr>'+
-      cPend.map(o=>{const st=o.status==='pending'?'<span class="tag">待转账</span>':'<span class="tag new">已通知转账</span>';
-        return '<tr><td>'+fmtT(o.createdAt)+'</td><td><b>'+esc(o.userName||'')+'</b></td><td>'+o.credits+' 积分</td><td><b>'+yuan(o.amount)+'</b></td><td>'+st+'</td><td><button class="btn btn-p btn-xs" onclick="confirmCreditOrder(\\''+o.id+'\\')">✅ 确认收款</button></td></tr>'}).join('')+'</table></div>'
-    : '';
-  const pendHtml=pend.length
-    ? '<div class="panel"><h3 style="font-size:15px;margin-bottom:12px">💰 待确认收款（'+pend.length+' 笔）</h3><table><tr><th>下单时间</th><th>用户</th><th>会员类型</th><th>金额</th><th>状态</th><th></th></tr>'+
-      pend.map(o=>{const st=o.status==='pending'?'<span class="tag">待转账</span>':'<span class="tag new">已通知转账</span>';
-        return '<tr><td>'+fmtT(o.createdAt)+'</td><td><b>'+esc(o.userName||'')+'</b></td><td>'+PLANS[o.plan]+'</td><td><b>'+yuan(o.amount)+'</b></td><td>'+st+'</td><td><button class="btn btn-p btn-xs" onclick="confirmOrder(\\''+o.id+'\\')">✅ 确认收款</button></td></tr>'}).join('')+'</table></div>'
-    : '';
   const trend=await api('/console/api/trend?range='+(window._range||30));
   const RANGES=[[7,'一周'],[30,'一月'],[180,'半年'],[365,'一年']];
   const tabBtns=RANGES.map(r=>'<button class="btn btn-xs '+( (window._range||30)===r[0]?'btn-p':'btn-g')+'" onclick="setRange('+r[0]+')">'+r[1]+'</button>').join('');
@@ -689,9 +678,9 @@ H.dashboard=async()=>{
     '+cs.byPkg.map(p=>'<div class="kpi"><div class="lbl">💠 '+p.name+' 套餐</div><div class="num">'+yuan(p.revenue)+'</div><div class="chips"><span class="chip">'+p.count+' 笔</span><span class="chip">'+p.credits+' 积分</span></div></div>').join('')+'\
   </div>\
   <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">⚡ 每日购买积分数</h3><div class="sp"></div>'+crBtns+'</div>'+chart(cs.days,'credits','linear-gradient(180deg,#fbbf24,#f59e0b)',v=>v+'分')+'</div>'):'';
-  return '<div class="toolbar"><h2>📊 数据看板</h2><div class="sp"></div><button class="btn btn-g" onclick="payModal()">💳 收款设置</button><button class="btn btn-p" onclick="orderModal()">＋ 记一笔订单</button></div>'+pendHtml+cPendHtml+'\
+  return '<div class="toolbar"><h2>📊 数据看板</h2><div class="sp"></div><button class="btn btn-g" onclick="payModal()">💳 收款设置</button><button class="btn btn-p" onclick="orderModal()">＋ 记一笔订单</button></div>\
   <div class="cards">\
-    <div class="kpi"><div class="lbl">总用户</div><div class="num">'+s.totalUsers+'</div></div>\
+    <div class="kpi"><div class="lbl">总用户</div><div class="num">'+s.totalUsers+'</div><div class="chips"><span class="chip" style="color:#2f9e5f">🟢 当前在线 '+s.online+' 人</span></div></div>\
     <div class="kpi"><div class="lbl">🟢 青果会员</div><div class="num">'+s.levelCount.basic+'</div></div>\
     <div class="kpi"><div class="lbl">🔴 红果会员</div><div class="num">'+s.levelCount.pro+'</div></div>\
     <div class="kpi"><div class="lbl">🟡 金果会员</div><div class="num">'+s.levelCount.team+'</div></div>\
