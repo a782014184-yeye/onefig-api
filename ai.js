@@ -25,7 +25,7 @@ const PROMPT_TMPL = (topic, style) =>
   `${topic}，形态科学准确。${STYLE_SUFFIX[style] || STYLE_SUFFIX.matte}，轮廓圆润干净，类似现代科研示意图。紫色粉色橙色系低饱和配色，透明背景，无任何文字和标注，主体板正居中，极简专业`;
 
 module.exports = function registerAI(app, deps) {
-  const { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta } = deps;
+  const { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine } = deps;
   const AI_DIR = path.join(DATA_DIR, 'ai');
   const JOBS_FILE = path.join(AI_DIR, 'jobs.json');
   const CREDIT_ORDERS_FILE = path.join(AI_DIR, 'credit-orders.json');
@@ -149,6 +149,11 @@ module.exports = function registerAI(app, deps) {
     }
     j.finishedAt = new Date().toISOString();
     saveJobs(jobs);
+    // AI 操作语义日志（2026-10-15）：谁、什么时间、什么描述、成败与原因
+    const uname = (loadUsers().find(x => x.id === job.userId) || {}).name || job.userId;
+    logLine('ai-op', okCount === 0
+      ? `generate FAIL user=${uname} prompt="${job.prompt.slice(0, 40)}" err=${j.error} cost=${job.cost}`
+      : `generate done user=${uname} prompt="${job.prompt.slice(0, 40)}" ok=${okCount}/${CANDIDATES} cost=${job.cost}`);
   }
 
   // ---- 公开：积分套餐 ----
@@ -187,6 +192,7 @@ module.exports = function registerAI(app, deps) {
       jobs.unshift(job);
       saveJobs(jobs);
       saveUsers(users);
+      logLine('ai-op', `generate start user=${u.name} prompt="${prompt.slice(0, 40)}" style=${style} cost=${COST}`);
       res.json({ ok: true, jobId: job.id, paidWith });
       setImmediate(() => runJob(job).catch(() => {
         const js = loadJobs(); const jj = js.find(x => x.id === job.id);
@@ -236,6 +242,7 @@ module.exports = function registerAI(app, deps) {
     if (!fs.existsSync(f)) return res.status(404).json({ ok: false });
     const name = (j.prompt.slice(0, 20).replace(/[\\/:*?"<>|\s]/g, '') || 'onefig') + '.png';
     const buf = injectAigcMeta(fs.readFileSync(f), 'AI-' + j.id.slice(0, 8).toUpperCase());
+    logLine('ai-op', `download user=${req.user.name} prompt="${j.prompt.slice(0, 40)}"`);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
     res.setHeader('Content-Type', 'image/png');
     res.send(buf);

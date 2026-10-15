@@ -662,7 +662,7 @@ app.get('/api/my/submissions', authUser, (req, res) => {
 require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + ADMIN_PATH, readSubmissions: readDB });
 
 // AI 工坊：积分体系 + 生图流水线
-require('./ai')(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta });
+require('./ai')(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine });
 
 // 在线支付：微信 Native 扫码支付（2026-10-08）
 require('./pay')(app, { authUser, DATA_DIR, PLANS, logLine });
@@ -804,14 +804,17 @@ app.post('/api/vectorize', authUser, (req, res) => {
       fs.unlinkSync(req.file.path);
       const fd = new FormData();
       fd.append('image', new Blob([buf], { type: req.file.mimetype }), req.file.originalname || 'image.png');
+      const t0 = Date.now();
       const r = await fetch('http://127.0.0.1:9000/vectorize', { method: 'POST', body: fd });
       if (!r.ok) throw new Error('vectorize service ' + r.status);
       const out = Buffer.from(await r.arrayBuffer());
       const outName = 'ai-vec-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.svg';
       fs.writeFileSync(path.join(FILES_DIR, outName), out);
       const baseUrl = req.protocol + '://' + req.get('host');
+      logLine('ai-op', `vectorize ok user=${req.user.name} ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName) });
     } catch (e) {
+      logLine('ai-op', `vectorize FAIL user=${req.user.name} ${e && e.message}`);
       res.status(502).json({ ok: false, error: '矢量转换服务开小差了，请稍后重试' });
     }
   });
@@ -828,14 +831,17 @@ app.post('/api/remove-bg', authUser, (req, res) => {
       fs.unlinkSync(req.file.path);
       const fd = new FormData();
       fd.append('image', new Blob([buf], { type: req.file.mimetype }), req.file.originalname || 'image.png');
+      const t0 = Date.now();
       const r = await fetch('http://127.0.0.1:9000/remove-bg', { method: 'POST', body: fd });
       if (!r.ok) throw new Error('bg service ' + r.status);
       const out = Buffer.from(await r.arrayBuffer());
       const outName = 'ai-nobg-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       fs.writeFileSync(path.join(FILES_DIR, outName), out);
       const baseUrl = req.protocol + '://' + req.get('host');
+      logLine('ai-op', `remove-bg ok user=${req.user.name} ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName) });
     } catch (e) {
+      logLine('ai-op', `remove-bg FAIL user=${req.user.name} ${e && e.message}`);
       res.status(502).json({ ok: false, error: '抠图服务开小差了，请稍后重试' });
     }
   });
@@ -855,6 +861,7 @@ app.post('/api/ai-stylize', authUser, (req, res) => {
     if (!verifyUploadedImage(req, res)) return;
     const style = (req.body.style || 'flat').trim();
     const custom = (req.body.prompt || '').trim();
+    const t0 = Date.now();
     const prompt = custom || STYLE_PROMPTS[style] || STYLE_PROMPTS.flat;
     const pubName = 'ai-src-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + path.extname(req.file.filename);
     fs.renameSync(req.file.path, path.join(FILES_DIR, pubName));
@@ -873,14 +880,16 @@ app.post('/api/ai-stylize', authUser, (req, res) => {
       const outUrl = data && data.output && data.output.choices && data.output.choices[0] &&
         data.output.choices[0].message.content.find(c => c.image) &&
         data.output.choices[0].message.content.find(c => c.image).image;
-      if (!outUrl) return res.status(502).json({ ok: false, error: (data && data.message) || 'AI 处理失败，请重试' });
+      if (!outUrl) { logLine('ai-op', `stylize FAIL user=${req.user.name} style=${style}${custom ? ' custom="' + custom.slice(0, 30) + '"' : ''} err=${(data && data.message) || 'no-image'} ${Date.now() - t0}ms`); return res.status(502).json({ ok: false, error: (data && data.message) || 'AI 处理失败，请重试' }); }
       const imgRes = await fetch(outUrl);
       const buf = Buffer.from(await imgRes.arrayBuffer());
       const outName = 'ai-sty-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       // 注入 AIGC 元数据隐式标识（GB 45438-2025），内容编号即文件名
       fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(buf, outName.replace(/\.png$/, '')));
+      logLine('ai-op', `stylize ok user=${req.user.name} style=${style}${custom ? ' custom="' + custom.slice(0, 30) + '"' : ''} ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName) });
     } catch (e) {
+      logLine('ai-op', `stylize ERROR user=${req.user.name} style=${style} ${e && e.message} ${Date.now() - t0}ms`);
       res.status(502).json({ ok: false, error: 'AI 服务连接失败，请稍后重试' });
     }
   });
@@ -895,6 +904,7 @@ app.post('/api/ai-edit', authUser, (req, res) => {
     if (!verifyUploadedImage(req, res)) return;
     const prompt = (req.body.prompt || '').trim();
     if (!prompt) return res.status(400).json({ ok: false, error: '请填写修改要求' });
+    const t0 = Date.now();
     // 把上传文件移到 /files，使其公网可访问（百炼需要能拉到图）
     const pubName = 'ai-src-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + path.extname(req.file.filename);
     fs.renameSync(req.file.path, path.join(FILES_DIR, pubName));
@@ -913,15 +923,17 @@ app.post('/api/ai-edit', authUser, (req, res) => {
       const outUrl = data && data.output && data.output.choices && data.output.choices[0] &&
         data.output.choices[0].message.content.find(c => c.image) &&
         data.output.choices[0].message.content.find(c => c.image).image;
-      if (!outUrl) return res.status(502).json({ ok: false, error: (data && data.message) || 'AI 处理失败，换个描述试试' });
+      if (!outUrl) { logLine('ai-op', `edit FAIL user=${req.user.name} prompt="${prompt.slice(0, 40)}" err=${(data && data.message) || 'no-image'} ${Date.now() - t0}ms`); return res.status(502).json({ ok: false, error: (data && data.message) || 'AI 处理失败，换个描述试试' }); }
       // 结果图转存到服务器，避免 OSS 临时链接过期
       const imgRes = await fetch(outUrl);
       const buf = Buffer.from(await imgRes.arrayBuffer());
       const outName = 'ai-out-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       // 注入 AIGC 元数据隐式标识（GB 45438-2025），内容编号即文件名
       fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(buf, outName.replace(/\.png$/, '')));
+      logLine('ai-op', `edit ok user=${req.user.name} prompt="${prompt.slice(0, 40)}" ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName) });
     } catch (e) {
+      logLine('ai-op', `edit ERROR user=${req.user.name} prompt="${prompt.slice(0, 40)}" ${e && e.message} ${Date.now() - t0}ms`);
       res.status(502).json({ ok: false, error: 'AI 服务连接失败，请稍后重试' });
     }
   });
@@ -1162,6 +1174,24 @@ app.delete('/api/boards/:id/share', authUser, (req, res) => {
   res.json({ ok: true });
 });
 
+// 「我的接收」：别人分享给我、且我打开过的画板（按 visitors 记录反查；2026-10-15）
+// 注意：必须注册在 /api/shared/:token 之前，否则会被当成 token="incoming" 命中 404
+app.get('/api/shared/incoming', authUser, (req, res) => {
+  const shares = loadShares();
+  const out = [];
+  for (const [token, ref] of Object.entries(shares)) {
+    const v = (ref.visitors ?? {})[req.user.id];
+    if (!v) continue;
+    const idx = loadBoardIndex(ref.uid);
+    const meta = idx.boards.find(b => b.id === ref.boardId);
+    if (!meta || meta.shareToken !== token) continue;
+    const owner = loadUsers().find(u => u.id === ref.uid);
+    out.push({ token, mode: meta.shareMode || 'view', name: meta.name, savedAt: meta.savedAt ?? 0, thumb: meta.thumb, ownerName: owner?.name ?? '一位用户', at: v.at ?? 0 });
+  }
+  out.sort((a, b) => b.at - a.at);
+  res.json({ ok: true, list: out });
+});
+
 // 公开只读访问：凭 token 看画板内容（不含任何用户信息）
 app.get('/api/shared/:token', shareRateLimit, (req, res) => {
   const token = String(req.params.token || '');
@@ -1197,6 +1227,18 @@ app.get('/api/shared/:token/state', shareRateLimit, (req, res) => {
   const s = loadShared(req.params.token);
   if (!s) return res.status(404).json({ ok: false, error: '分享链接不存在或已关闭' });
   const me = optionalUser(req);
+  // 记录接收人（登录用户，作者本人不算）：「我的接收」板块的数据来源。60 秒内重复访问不重复写盘（state 轮询 1s 一次）
+  if (me && me.id !== s.ref.uid) {
+    const shares = loadShares();
+    const rec = shares[req.params.token];
+    if (rec) {
+      const v = (rec.visitors ?? {})[me.id];
+      if (!v || Date.now() - (v.at ?? 0) > 60 * 1000) {
+        rec.visitors = { ...(rec.visitors ?? {}), [me.id]: { name: me.name, at: Date.now() } };
+        saveShares(shares);
+      }
+    }
+  }
   const lock = activeLock(s.meta);
   res.json({
     ok: true,
