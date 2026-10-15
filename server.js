@@ -956,7 +956,7 @@ const SHARES_FILE = path.join(DATA_DIR, 'shares.json');
 const loadShares = () => loadJSON(SHARES_FILE, {});
 const saveShares = (s) => saveJSON(SHARES_FILE, s);
 const newShareToken = () => crypto.randomBytes(12).toString('base64url');   // 16 位不可猜测
-const shareRateLimit = makeRateLimiter(600, 10 * 60 * 1000, '请求太频繁，请稍后再试');   // 分享页有 5s 轮询（state+comments），60 次/10 分钟三分钟就打满
+const shareRateLimit = makeRateLimiter(1500, 10 * 60 * 1000, '请求太频繁，请稍后再试');   // 协同编辑期间 state 轮询加速到 1s（60 次/分）+ 批注/内容拉取，放宽到 1500 次/10 分钟
 const removeShare = (token) => {
   if (!token) return;
   const shares = loadShares();
@@ -995,13 +995,15 @@ app.get('/api/boards/:id', authUser, (req, res) => {
   res.json({ ok: true, board: boardMeta(meta), payload });
 });
 
-// 轻量时间戳：编辑器轮询"云端是否有协作者更新"用（不含内容/缩略图，5s 一次无压力；2026-10-15）
+// 轻量时间戳：编辑器轮询"云端是否有协作者更新"用（不含内容/缩略图，1s 一次无压力；2026-10-15）
+// 顺带返回协同编辑锁占用者，作者端据此浮出「xxx 正在操作中」
 app.get('/api/boards/:id/meta', authUser, (req, res) => {
   if (!validBoardId(req.params.id)) return res.status(400).json({ ok: false, error: '无效的画板 id' });
   const idx = loadBoardIndex(req.user.id);
   const meta = idx.boards.find(b => b.id === req.params.id);
   if (!meta) return res.status(404).json({ ok: false, error: '画板不存在' });
-  res.json({ ok: true, savedAt: meta.savedAt ?? 0 });
+  const lock = activeLock(meta);
+  res.json({ ok: true, savedAt: meta.savedAt ?? 0, lock: lock ? { name: lock.name, mine: lock.uid === req.user.id } : null });
 });
 
 // 保存画板内容（自动保存通道）
