@@ -995,6 +995,15 @@ app.get('/api/boards/:id', authUser, (req, res) => {
   res.json({ ok: true, board: boardMeta(meta), payload });
 });
 
+// 轻量时间戳：编辑器轮询"云端是否有协作者更新"用（不含内容/缩略图，5s 一次无压力；2026-10-15）
+app.get('/api/boards/:id/meta', authUser, (req, res) => {
+  if (!validBoardId(req.params.id)) return res.status(400).json({ ok: false, error: '无效的画板 id' });
+  const idx = loadBoardIndex(req.user.id);
+  const meta = idx.boards.find(b => b.id === req.params.id);
+  if (!meta) return res.status(404).json({ ok: false, error: '画板不存在' });
+  res.json({ ok: true, savedAt: meta.savedAt ?? 0 });
+});
+
 // 保存画板内容（自动保存通道）
 app.put('/api/boards/:id', authUser, (req, res) => {
   if (!validBoardId(req.params.id)) return res.status(400).json({ ok: false, error: '无效的画板 id' });
