@@ -956,7 +956,7 @@ const SHARES_FILE = path.join(DATA_DIR, 'shares.json');
 const loadShares = () => loadJSON(SHARES_FILE, {});
 const saveShares = (s) => saveJSON(SHARES_FILE, s);
 const newShareToken = () => crypto.randomBytes(12).toString('base64url');   // 16 位不可猜测
-const shareRateLimit = makeRateLimiter(1500, 10 * 60 * 1000, '请求太频繁，请稍后再试');   // 协同编辑期间 state 轮询加速到 1s（60 次/分）+ 批注/内容拉取，放宽到 1500 次/10 分钟
+const shareRateLimit = makeRateLimiter(2400, 10 * 60 * 1000, '请求太频繁，请稍后再试');   // 协同编辑期间 state+批注双 1s 轮询（120 次/分）+ 内容拉取，放宽到 2400 次/10 分钟
 const removeShare = (token) => {
   if (!token) return;
   const shares = loadShares();
