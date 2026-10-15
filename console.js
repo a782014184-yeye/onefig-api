@@ -121,6 +121,36 @@ module.exports = function registerConsole(app, deps) {
     res.json({ ok: true, list: all.slice(-lines).reverse(), total: all.length, type });
   });
 
+  // AI 工坊今日用量概览（2026-10-15）：解析今天 ai-op 操作日志，供数据看板展示
+  app.get('/console/api/ai-stats', consoleAuth, (req, res) => {
+    const empty = { ok: true, total: 0, okCount: 0, failCount: 0, byFeature: {}, credits: 0 };
+    try {
+      const f = path.join(DATA_DIR, 'logs', `ai-op-${new Date().toISOString().slice(0, 10)}.log`);
+      const lines = fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean);
+      const FEATURES = [
+        ['generate done', '生成素材', false], ['generate FAIL', '生成素材', true],
+        ['edit ok', 'AI 改图', false], ['edit FAIL', 'AI 改图', true], ['edit ERROR', 'AI 改图', true],
+        ['stylize ok', '风格转换', false], ['stylize FAIL', '风格转换', true], ['stylize ERROR', '风格转换', true],
+        ['remove-bg ok', '移除背景', false], ['remove-bg FAIL', '移除背景', true],
+        ['vectorize ok', '位图转矢量', false], ['vectorize FAIL', '位图转矢量', true],
+      ];
+      let ok = 0, fail = 0, credits = 0;
+      const byFeature = {};
+      for (const l of lines) {
+        const hit = FEATURES.find(([k]) => l.includes(' ' + k + ' '));
+        if (hit) {
+          byFeature[hit[1]] = (byFeature[hit[1]] || 0) + 1;
+          if (hit[2]) fail++; else ok++;
+          const c = l.match(/cost=(\d+)/);
+          if (c) credits += Number(c[1]);
+        } else if (l.includes(' download ')) {
+          byFeature['下载'] = (byFeature['下载'] || 0) + 1;
+        }
+      }
+      res.json({ ok: true, total: ok + fail, okCount: ok, failCount: fail, byFeature, credits });
+    } catch { res.json(empty) }
+  });
+
   app.get('/console/api/users', consoleAuth, (req, res) => {
     const users = load('users.json', []);
     const orders = load('orders.json', []).filter(o => o.status === 'paid');
@@ -671,6 +701,16 @@ H.dashboard=async()=>{
     return '<div class="chart">'+cols+'</div><div class="clabels">'+labels+'</div>';
   };
   const cs=await api('/console/api/credit-stats?range='+(window._crange||30)).catch(()=>null);
+  const ai=await api('/console/api/ai-stats').catch(()=>null);
+  const aiPanel=ai?('<div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🤖 今日 AI 工坊使用</h3><div class="sp"></div><a class="btn btn-g btn-xs" href="#/logs">查看操作明细</a></div>'
+    +(ai.total
+      ? '<div class="cards">\
+        <div class="kpi"><div class="lbl">今日使用</div><div class="num">'+ai.total+' 次</div></div>\
+        <div class="kpi"><div class="lbl">成功 / 失败</div><div class="num">'+ai.okCount+' / <span style="color:'+(ai.failCount?'#d6336c':'#2f9e5f')+';font-weight:700">'+ai.failCount+'</span></div></div>\
+        <div class="kpi"><div class="lbl">消耗积分</div><div class="num">'+ai.credits+' 分</div></div>\
+      </div>\
+      <div class="chips" style="margin-top:10px">'+Object.entries(ai.byFeature).map(([k,v])=>'<span class="chip">'+esc(k)+' '+v+' 次</span>').join('')+'</div>'
+      : '<div class="sub">今日还没有 AI 使用记录</div>')+'</div>'):'';
   const crange=window._crange||30;
   const crBtns=RANGES.map(r=>'<button class="btn btn-xs '+(crange===r[0]?'btn-p':'btn-g')+'" onclick="setCRange('+r[0]+')">'+r[1]+'</button>').join('');
   const creditPanel=cs?('<div class="cards">\
@@ -685,7 +725,7 @@ H.dashboard=async()=>{
     <div class="kpi"><div class="lbl">🔴 红果会员</div><div class="num">'+s.levelCount.pro+'</div></div>\
     <div class="kpi"><div class="lbl">🟡 金果会员</div><div class="num">'+s.levelCount.team+'</div></div>\
     <div class="kpi"><div class="lbl">总支付金额</div><div class="num">'+yuan(s.totalRevenue)+'</div></div>\
-  </div>\
+  </div>'+aiPanel+'\
   <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">💰 每日收入走势</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'revenue','linear-gradient(180deg,#a78bfa,#7c5cbf)',v=>'¥'+v)+'</div>\
   <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🌱 每日新增用户</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'users','linear-gradient(180deg,#6ee7b7,#34d399)',v=>v+'人')+'</div>'+creditPanel;
 };

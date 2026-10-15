@@ -1146,7 +1146,7 @@ app.post('/api/boards/:id/share', authUser, (req, res) => {
   const idx = loadBoardIndex(req.user.id);
   const meta = idx.boards.find(b => b.id === req.params.id);
   if (!meta) return res.status(404).json({ ok: false, error: '画板不存在' });
-  const mode = req.body && req.body.mode === 'edit' ? 'edit' : 'view';
+  const mode = ['view', 'edit', 'edit_dl'].includes(req.body.mode) ? req.body.mode : 'view';   // edit_dl = 可编辑+可导出（被分享者可导出，2026-10-15）
   if (meta.shareToken) {
     if (mode !== (meta.shareMode || 'view')) {   // 切换模式
       meta.shareMode = mode;
@@ -1263,7 +1263,7 @@ app.get('/api/shared/:token/state', shareRateLimit, (req, res) => {
 app.post('/api/shared/:token/lock', authUser, (req, res) => {
   const s = loadShared(req.params.token);
   if (!s) return res.status(404).json({ ok: false, error: '分享链接不存在或已关闭' });
-  if ((s.meta.shareMode || 'view') !== 'edit') return res.status(403).json({ ok: false, error: '这个分享是只读的' });
+  if (!['edit', 'edit_dl'].includes(s.meta.shareMode || 'view')) return res.status(403).json({ ok: false, error: '这个分享是只读的' });
   const lock = activeLock(s.meta);
   if (lock && lock.uid !== req.user.id) {
     return res.status(409).json({ ok: false, code: 'LOCKED', lockName: lock.name });
@@ -1288,7 +1288,7 @@ app.delete('/api/shared/:token/lock', authUser, (req, res) => {
 app.put('/api/shared/:token', authUser, (req, res) => {
   const s = loadShared(req.params.token);
   if (!s) return res.status(404).json({ ok: false, error: '分享链接不存在或已关闭' });
-  if ((s.meta.shareMode || 'view') !== 'edit') return res.status(403).json({ ok: false, error: '这个分享是只读的' });
+  if (!['edit', 'edit_dl'].includes(s.meta.shareMode || 'view')) return res.status(403).json({ ok: false, error: '这个分享是只读的' });
   const lock = activeLock(s.meta);
   if (!lock || lock.uid !== req.user.id) {
     return res.status(409).json({ ok: false, code: 'LOCKED', lockName: lock ? lock.name : null, error: lock ? `${lock.name} 正在编辑中` : '编辑锁已失效，请刷新页面' });
