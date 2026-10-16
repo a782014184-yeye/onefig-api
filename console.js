@@ -181,7 +181,27 @@ module.exports = function registerConsole(app, deps) {
       creditLog = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'ai', 'credit-log.json'), 'utf8'))
         .filter(l => l.userId === u.id).reverse();
     } catch {}
-    res.json({ ok: true, user: u, orders: my, totalPaid: my.reduce((s, o) => s + o.amount, 0), levelLog, creditOrders, creditLog });
+    // 画板 + 分享记录：boards/<uid>/index.json + shares.json（visitors = 打开过分享链接的登录用户，2026-10-15 起纳入后台）
+    let boards = [];
+    try {
+      const bidx = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'boards', String(u.id), 'index.json'), 'utf8'));
+      const shares = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'shares.json'), 'utf8'));
+      const folders = Array.isArray(bidx.folders) ? bidx.folders : [];
+      boards = (Array.isArray(bidx.boards) ? bidx.boards : []).map(b => {
+        const share = b.shareToken ? shares[b.shareToken] : null;
+        const visitors = share && share.visitors
+          ? Object.values(share.visitors).sort((x, y) => (y.at || 0) - (x.at || 0))
+          : [];
+        return {
+          id: b.id, name: b.name, savedAt: b.savedAt || 0,
+          folder: ((folders.find(f => f.id === b.folderId) || {}).name) || '',
+          shareMode: b.shareToken ? (b.shareMode || 'view') : null,
+          visitorCount: visitors.length,
+          visitors: visitors.slice(0, 20).map(v => ({ name: v.name, at: v.at })),
+        };
+      }).sort((a, b) => b.savedAt - a.savedAt);
+    } catch {}
+    res.json({ ok: true, user: u, orders: my, totalPaid: my.reduce((s, o) => s + o.amount, 0), levelLog, creditOrders, creditLog, boards });
   });
 
   const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制开通一次性赠送积分
@@ -828,7 +848,7 @@ window.creditLogModal=async()=>{const d=await api('/console/api/credit-log').cat
   showModal('<h3>⚡ 积分流水（最近 200 条）</h3><div style="max-height:320px;overflow:auto"><table><tr><th>时间</th><th>用户</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+rows+'</table></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>')};
 window.setLevel=async(id,level)=>{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({level})});toast('已修改 ✅')};
 window.adjCredits=async(id)=>{const delta=parseInt(document.getElementById('m-delta').value,10);if(!delta)return toast('填写调整数量');try{await api('/console/api/users/'+id+'/credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({delta,reason:document.getElementById('m-reason').value.trim()})});toast('已调整 ✅');userDetail(id)}catch(e){toast(e.message)}};
-window.dtShow=n=>{[1,2].forEach(i=>{document.getElementById('dt-p'+i).style.display=i===n?'block':'none';document.getElementById('dt-b'+i).className='btn btn-xs '+(i===n?'btn-p':'btn-g')})};
+window.dtShow=n=>{[1,2,3].forEach(i=>{document.getElementById('dt-p'+i).style.display=i===n?'block':'none';document.getElementById('dt-b'+i).className='btn btn-xs '+(i===n?'btn-p':'btn-g')})};
 window.userDetail=async(id)=>{
   const d=await api('/console/api/users/'+id);
   const lvName={none:'非会员',basic:'青果会员',pro:'红果会员',team:'金果会员'};
@@ -838,14 +858,24 @@ window.userDetail=async(id)=>{
   const lvRows=(d.levelLog&&d.levelLog.length)
     ?d.levelLog.map(l=>'<tr><td>'+fmtT(l.time)+'</td><td>'+(lvName[l.from]||l.from)+' → <b style="color:#6d4fb0">'+(lvName[l.to]||l.to)+'</b></td><td>'+esc(l.by||'')+'</td></tr>').join('')
     :'<tr><td colspan="3" style="text-align:center;color:#b0aac4;padding:14px">暂无变更记录（此功能上线前的修改不追溯）</td></tr>';
+  // 画板与分享：分享记录 = 打开过该画板分享链接的登录用户（游客不统计）
+  const shareName={view:'👀 只读',edit:'✏️ 可编辑',edit_dl:'✏️ 可编辑+可导出'};
+  const bdRows=(d.boards&&d.boards.length)
+    ?d.boards.map(b=>{
+      const who=b.visitors&&b.visitors.length
+        ?b.visitors.map(v=>'<span class="chip" title="最近打开：'+fmtT(v.at)+'">'+esc(v.name)+' · '+fmtT(v.at).slice(5)+'</span>').join(' ')+(b.visitorCount>20?' <span class="chip">…共 '+b.visitorCount+' 人</span>':'')
+        :'<span style="color:#b0aac4">—</span>';
+      return '<tr><td><b>'+esc(b.name)+'</b>'+(b.folder?' <span style="color:#b0aac4;font-size:12px">'+esc(b.folder)+'</span>':'')+'</td><td>'+fmtT(b.savedAt)+'</td><td>'+(b.shareMode?shareName[b.shareMode]||b.shareMode:'<span style="color:#b0aac4">未分享</span>')+'</td><td style="max-width:220px">'+who+'</td></tr>'}).join('')
+    :'<tr><td colspan="4" style="text-align:center;color:#b0aac4;padding:14px">还没有画板</td></tr>';
   showModal('<h3>👤 '+esc(d.user.name)+'</h3>\
   <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\
   <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center"><input id="m-delta" type="number" placeholder="积分调整，如 5 或 -3" style="flex:1"><input id="m-reason" placeholder="原因（选填）" style="flex:2"><button class="btn btn-g btn-xs" onclick="adjCredits(\\''+d.user.id+'\\')">调整</button></div>\
-  <div style="display:flex;gap:8px;margin-bottom:8px"><button class="btn btn-xs btn-p" id="dt-b1" onclick="dtShow(1)">⚡ 积分变动记录</button><button class="btn btn-xs btn-g" id="dt-b2" onclick="dtShow(2)">📜 会员变更记录</button></div>\
+  <div style="display:flex;gap:8px;margin-bottom:8px"><button class="btn btn-xs btn-p" id="dt-b1" onclick="dtShow(1)">⚡ 积分变动记录</button><button class="btn btn-xs btn-g" id="dt-b2" onclick="dtShow(2)">📜 会员变更记录</button><button class="btn btn-xs btn-g" id="dt-b3" onclick="dtShow(3)">🎨 画板与分享</button></div>\
   <div id="dt-p1" style="max-height:200px;overflow:auto"><table><tr><th>时间</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+coRows+'</table></div>\
   <div id="dt-p2" style="display:none;max-height:200px;overflow:auto"><table><tr><th>时间</th><th>变更</th><th>操作者</th></tr>'+lvRows+'</table></div>\
+  <div id="dt-p3" style="display:none;max-height:200px;overflow:auto"><table><tr><th>画板</th><th>最近编辑</th><th>分享状态</th><th>打开过的人</th></tr>'+bdRows+'</table></div>\
   <div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
-  document.getElementById('modal').style.width='560px';
+  document.getElementById('modal').style.width='640px';
 };
 
 /* ---------- 4. 素材请求 ---------- */
@@ -879,7 +909,7 @@ let LOG_CUR='ai-op';
 window.switchLog=t=>{LOG_CUR=t;route()};
 H.logs=async()=>{
   const d=await api('/console/api/logs?type='+LOG_CUR+'&lines=300').catch(e=>({list:[],error:e.message}));
-  const tabs=LOG_TYPES.map(t=>'<button class="btn '+(t[0]===LOG_CUR?'btn-p':'btn-g')+'" style="margin-right:6px" onclick="switchLog(\''+t[0]+'\')">'+t[1]+'</button>').join('');
+  const tabs=LOG_TYPES.map(t=>'<button class="btn '+(t[0]===LOG_CUR?'btn-p':'btn-g')+'" style="margin-right:6px" onclick="switchLog(\\''+t[0]+'\\')">'+t[1]+'</button>').join('');
   const color=l=>/FAIL|ERROR/.test(l)?'color:#d6336c':/ok|done/.test(l)?'color:#2f9e5f':'';
   const rows=(d.list||[]).map(l=>'<div style="padding:5px 2px;border-bottom:1px solid #f1eef9;font-size:12px;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all;'+color(l)+'">'+esc(l)+'</div>').join('')||'<div class="sub" style="padding:20px;text-align:center">今天还没有这类日志</div>';
   return '<div class="toolbar"><h2>📝 操作日志</h2><div class="sp"></div>'+tabs+'<button class="btn btn-g" onclick="route()">🔄 刷新</button></div>'
