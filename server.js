@@ -613,12 +613,26 @@ app.get('/api/verify', (req, res) => {
         licensee = at > 0 ? raw.slice(0, 1) + '***@' + raw.slice(at + 1) : raw.slice(0, 1) + '***';
       }
     } catch {}
+    // 查询记录：公开验真次数 + 首末时间（2026-10-16）。仅记录成功查询，防止爆破刷爆文件；
+    // 正常自用码查询次数很少，异常高的次数是泄露/转卖信号，展示出来供编辑与买家判断
+    let qCount = 1, qFirst = null, qLast = null;
+    try {
+      const QLOG = path.join(CONSOLE_DIR, 'verify-log.json');
+      const qlog = loadJSON(QLOG, {});
+      const now = new Date().toISOString();
+      const rec = qlog[code] || { count: 0, first: now };
+      rec.count += 1; rec.last = now;
+      qlog[code] = rec;
+      saveJSON(QLOG, qlog);
+      qCount = rec.count; qFirst = rec.first; qLast = rec.last;
+    } catch {}
     res.json({
       ok: true,
       code,
       material: mat ? mat.title : hit.materialId,
       series: mat ? mat.series : '',
       licensee,
+      qCount, qFirst, qLast,
       scope: '学术发表（期刊论文、学术会议、学位论文、学术海报、图文摘要），仅限非商业用途',
       time: hit.time,
       status: '有效',
