@@ -66,6 +66,48 @@ module.exports = function registerConsole(app, deps) {
     res.json({ ok: true, days: out });
   });
 
+  // 验真异常监控：非作者（游客+其他登录用户）查询明显多于作者的授权码，疑似泄露/转卖（2026-10-16）
+  app.get('/console/api/leak-watch', consoleAuth, (req, res) => {
+    try {
+      const qlog = load('verify-log.json', {});
+      const dls = load('downloads.json', []);
+      const users = load('users.json', []);
+      const mats = load('materials.json', []);
+      const matMap = new Map();
+      for (const s of mats) for (const m of s.materials) matMap.set(m.id, { title: m.title, series: m.series || s.folder });
+      const byCode = new Map();
+      for (const l of dls) if (l.code) byCode.set(l.code, l);
+      const rows = [];
+      for (const [code, rec] of Object.entries(qlog)) {
+        if (!rec.entries) continue;
+        const dl = byCode.get(code) || {};
+        const authorId = dl.userId || null;
+        const authorCount = (authorId && rec.entries[authorId]) ? rec.entries[authorId].count : 0;
+        let guestCount = 0, otherTotal = 0, otherUsers = 0, last = rec.entries[authorId] ? rec.entries[authorId].last : '';
+        for (const [k, v] of Object.entries(rec.entries)) {
+          if (k !== authorId) {
+            otherTotal += v.count;
+            if (k === 'guest') guestCount = v.count; else otherUsers++;
+          }
+          if (v.last > last) last = v.last;
+        }
+        const total = authorCount + otherTotal;
+        // 告警门槛：非作者查询 ≥3 且多于作者本人（新码编辑只查一两次不误报）
+        if (otherTotal >= 3 && otherTotal > authorCount) {
+          const author = users.find(x => x.id === authorId);
+          const mat = matMap.get(dl.materialId) || { title: dl.materialId || '—', series: '' };
+          rows.push({
+            code, material: mat.title, series: mat.series,
+            author: author ? (author.email || author.name) : '（账号已注销）',
+            authorCount, guestCount, otherUsers, otherTotal, total, last,
+          });
+        }
+      }
+      rows.sort((a, b) => b.otherTotal - a.otherTotal || (b.last > a.last ? 1 : -1));
+      res.json({ ok: true, list: rows.slice(0, 30), total: rows.length });
+    } catch { res.status(500).json({ ok: false, error: '读取失败' }); }
+  });
+
   // 积分统计：总收入 + 各套餐收入 + 每日购买积分数（近 N 天柱状图）
   app.get('/console/api/credit-stats', consoleAuth, (req, res) => {
     const days = Math.min(366, Math.max(7, parseInt(req.query.range, 10) || 30));
@@ -746,6 +788,14 @@ H.dashboard=async()=>{
   };
   const cs=await api('/console/api/credit-stats?range='+(window._crange||30)).catch(()=>null);
   const ai=await api('/console/api/ai-stats').catch(()=>null);
+  const leak=await api('/console/api/leak-watch').catch(()=>null);
+  // 验真异常：非作者查询明显多于作者的授权码，疑似泄露/转卖
+  const leakPanel=leak?('<div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🔍 验真异常监控</h3><div class="sp"></div><span class="sub" style="font-size:12px">非作者查询 ≥3 且多于作者本人的授权码</span></div>'
+    +(leak.list.length
+      ? '<div style="max-height:260px;overflow:auto"><table><tr><th>授权码</th><th>素材</th><th>获授权账号</th><th>查询构成</th><th>最近查询</th></tr>'
+        +leak.list.map(r=>'<tr><td><button class="btn btn-g btn-xs" title="点击复制" onclick="cpTxt(\\''+r.code+'\\')">'+esc(r.code)+'</button></td><td><b>'+esc(r.material)+'</b>'+(r.series?' <span style="color:#b0aac4;font-size:12px">'+esc(r.series)+'</span>':'')+'</td><td style="font-size:12px">'+esc(r.author)+'</td><td style="font-size:12px">👤 作者 '+r.authorCount+' 次 · 🧑‍💻 游客 '+r.guestCount+' 次 · 🔐 其他 '+r.otherUsers+' 人共 '+(r.otherTotal-r.guestCount)+' 次<span style="color:#d6336c;font-weight:600">（共 '+r.total+' 次）</span></td><td style="font-size:12px">'+fmtT(r.last)+'</td></tr>').join('')
+        +'</table></div>'
+      : '<div class="sub" style="padding:14px;text-align:center">✅ 暂无异常授权码</div>')+'</div>'):'';
   const aiPanel=ai?('<div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🤖 今日 AI 工坊使用</h3><div class="sp"></div><a class="btn btn-g btn-xs" href="#/logs">查看操作明细</a></div>'
     +(ai.total
       ? '<div class="cards">\
@@ -771,7 +821,7 @@ H.dashboard=async()=>{
     <div class="kpi"><div class="lbl">总支付金额</div><div class="num">'+yuan(s.totalRevenue)+'</div></div>\
   </div>'+aiPanel+'\
   <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">💰 每日收入走势</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'revenue','linear-gradient(180deg,#a78bfa,#7c5cbf)',v=>'¥'+v)+'</div>\
-  <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🌱 每日新增用户</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'users','linear-gradient(180deg,#6ee7b7,#34d399)',v=>v+'人')+'</div>'+creditPanel;
+  <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🌱 每日新增用户</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'users','linear-gradient(180deg,#6ee7b7,#34d399)',v=>v+'人')+'</div>'+leakPanel+creditPanel;
 };
 window.setRange=r=>{window._range=r;route()};
 window.setCRange=r=>{window._crange=r;route()};
