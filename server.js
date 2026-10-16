@@ -232,6 +232,27 @@ function authUser(req, res, next) {
 function publicUser(u) {
   return { id: u.id, name: u.name, email: u.email || '', level: u.level || 'none', joinedAt: u.joinedAt, memberSince: u.memberSince || null, dlUsed: u.dlUsed || 0, dlMonth: u.dlMonth || '' };
 }
+// 可选认证：带合法登录 token 则识别身份，不带/失效不拦截（供公开验真区分作者本人/登录用户/游客，2026-10-16）
+function optionalAuth(req, res, next) {
+  try {
+    const m = (req.headers.authorization || '').match(/^Bearer (.+)$/);
+    if (m) {
+      const [p, s] = m[1].split('.');
+      let d; try { d = JSON.parse(Buffer.from(p, 'base64url').toString()); } catch { d = null; }
+      if (d && sign(p) === s && d.exp >= Date.now()) {
+        const u = loadUsers().find(x => x.id === d.uid);
+        if (u && (d.pv || 0) === (u.pwdVer || 0)) req.user = u;
+      }
+    }
+  } catch {}
+  next();
+}
+// 账号脱敏：邮箱显示首字符+***@域名，其他显示首字符+***
+function maskAccount(raw) {
+  if (!raw) return null;
+  const at = raw.indexOf('@');
+  return at > 0 ? raw.slice(0, 1) + '***@' + raw.slice(at + 1) : raw.slice(0, 1) + '***';
+}
 // 可选鉴权：带有效 token 返回用户，否则返回 null（不报错）
 function optionalUser(req) {
   try {
@@ -593,8 +614,8 @@ app.get('/api/my/downloads', authUser, (req, res) => {
   } catch { res.status(500).json({ ok: false, error: '读取失败' }); }
 });
 
-// 公开验真：凭授权码查询授权状态（不返回任何用户信息，供期刊编辑等第三方核查）
-app.get('/api/verify', (req, res) => {
+// 公开验真：凭授权码查询授权状态（不返回完整用户信息，供期刊编辑等第三方核查）
+app.get('/api/verify', optionalAuth, (req, res) => {
   try {
     const code = String(req.query.code || '').trim();
     if (!code) return res.status(400).json({ ok: false, error: '缺少授权码' });
@@ -607,24 +628,37 @@ app.get('/api/verify', (req, res) => {
     let licensee = null;
     try {
       const acc = (loadUsers() || []).find(x => x.id === hit.userId);
-      const raw = acc ? (acc.email || acc.name || '') : '';
-      if (raw) {
-        const at = raw.indexOf('@');
-        licensee = at > 0 ? raw.slice(0, 1) + '***@' + raw.slice(at + 1) : raw.slice(0, 1) + '***';
-      }
+      licensee = maskAccount(acc ? (acc.email || acc.name || '') : '');
     } catch {}
-    // 查询记录：公开验真次数 + 首末时间（2026-10-16）。仅记录成功查询，防止爆破刷爆文件；
-    // 正常自用码查询次数很少，异常高的次数是泄露/转卖信号，展示出来供编辑与买家判断
-    let qCount = 1, qFirst = null, qLast = null;
+    // 查询记录：按查询者身份分组统计（作者本人/登录用户[脱敏]/游客），仅记录成功查询。
+    // 转卖的码会被大量"非作者"查询，此处公开次数与构成，供编辑/买家判断（2026-10-16）
+    let qTotal = 1;
+    const qBy = [];
     try {
       const QLOG = path.join(CONSOLE_DIR, 'verify-log.json');
       const qlog = loadJSON(QLOG, {});
       const now = new Date().toISOString();
-      const rec = qlog[code] || { count: 0, first: now };
-      rec.count += 1; rec.last = now;
+      let rec = qlog[code];
+      // 旧格式（count/first/last）迁移为游客记录
+      if (rec && !rec.entries) rec = { entries: { guest: { count: rec.count || 0, first: rec.first || now, last: rec.last || now } } };
+      if (!rec) rec = { entries: {} };
+      const whoKey = req.user ? req.user.id : 'guest';
+      const e = rec.entries[whoKey] || { count: 0, first: now };
+      e.count += 1; e.last = now;
+      rec.entries[whoKey] = e;
       qlog[code] = rec;
       saveJSON(QLOG, qlog);
-      qCount = rec.count; qFirst = rec.first; qLast = rec.last;
+      const users = loadUsers() || [];
+      qTotal = Object.values(rec.entries).reduce((s, x) => s + x.count, 0);
+      for (const [k, v] of Object.entries(rec.entries)) {
+        if (k === hit.userId) qBy.push({ kind: 'author', count: v.count, first: v.first, last: v.last });
+        else if (k === 'guest') qBy.push({ kind: 'guest', count: v.count, first: v.first, last: v.last });
+        else {
+          const qu = users.find(x => x.id === k);
+          qBy.push({ kind: 'user', name: maskAccount(qu ? (qu.email || qu.name || '') : ''), count: v.count, first: v.first, last: v.last });
+        }
+      }
+      qBy.sort((a, b) => (a.kind === 'author' ? -1 : b.kind === 'author' ? 1 : b.count - a.count));
     } catch {}
     res.json({
       ok: true,
@@ -632,7 +666,7 @@ app.get('/api/verify', (req, res) => {
       material: mat ? mat.title : hit.materialId,
       series: mat ? mat.series : '',
       licensee,
-      qCount, qFirst, qLast,
+      qTotal, qBy,
       scope: '学术发表（期刊论文、学术会议、学位论文、学术海报、图文摘要），仅限非商业用途',
       time: hit.time,
       status: '有效',
