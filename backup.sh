@@ -10,8 +10,8 @@ DEST=/opt/backups/onefig
 mkdir -p "$DEST"
 TS=$(date +%Y%m%d-%H%M)
 
-# 每日：JSON 业务数据 + 代码
-tar -czf "$DEST/onefig-json-$TS.tar.gz" -C /opt/onefig-api/data console submissions.json pricing-config.json ai boards
+# 每日：JSON 业务数据 + 代码（2026-10-16 补 shares.json/comments：画板分享关系与批注此前只在周日全量里，删除事件当天无快照可回滚）
+tar -czf "$DEST/onefig-json-$TS.tar.gz" -C /opt/onefig-api/data console submissions.json pricing-config.json ai boards shares.json comments
 tar -czf "$DEST/onefig-code-$TS.tar.gz" -C /opt/onefig-api server.js console.js ai.js package.json
 
 # 每周日：全量（含原图）
