@@ -281,6 +281,12 @@ app.post('/api/auth/register', authRateLimit, (req, res) => {
   const password = String((req.body || {}).password || '');
   const name = String((req.body || {}).name || '').trim().slice(0, 30);
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok: false, error: '邮箱格式不正确' });
+  // 生产环境闸：拦截 @test.com 注册，防止 e2e 联调误指生产时污染用户表（2026-10-16 事故防护）。
+  // 隔离测试实例（8090 等）不设 ONEFIG_ENV，不受影响。
+  if (process.env.ONEFIG_ENV === 'production' && /@test\.com$/i.test(email)) {
+    logLine('auth', `blocked test-email register ip=${req.ip} email=${email}`);
+    return res.status(400).json({ ok: false, error: '该邮箱不允许注册' });
+  }
   if (password.length < 6) return res.status(400).json({ ok: false, error: '密码至少 6 位' });
   if (!name) return res.status(400).json({ ok: false, error: '给自己起个昵称吧' });
   const users = loadUsers();
