@@ -147,6 +147,9 @@ function ok(name) { passed++; console.log('  ✅', name); }
   const b1 = await post('/api/pay/alipay/pagepay', { plan: 'basic' });
   assert.strictEqual(b1.ok, true);
   assert.strictEqual(b1.order.amount, 29.9);
+  const b1r = await post('/api/pay/alipay/pagepay', { plan: 'basic' });
+  assert.strictEqual(b1r.order.id, b1.order.id, '待支付订单重启付款复用同一笔');
+  ok('B0 待支付订单可再次发起付款（复用原订单，不重复建单）');
   assert.strictEqual(await notify(b1.order), 'success');
   assert.strictEqual(readUser().level, 'basic');
   assert.strictEqual(readUser().credits, 255, '105 + 150 开通赠送');

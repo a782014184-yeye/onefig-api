@@ -279,10 +279,11 @@ module.exports = function registerPay(app, deps) {
   });
 
   // 下单辅助：复用同档位待支付订单；有"人工确认中"的订单则拒绝重复下单
-  // amount 可覆盖（升级差价），缺省 = 档位标价
+  // amount 可覆盖（升级差价），缺省 = 档位标价；reused=true 表示复用了已有待支付订单
   function findOrCreateOrder(req, plan, channel, amount) {
     const orders = loadJSON(ORDERS_FILE, []);
     let order = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'pending');
+    const reused = !!order;
     if (!order) {
       const notified = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'notified');
       if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
@@ -292,7 +293,7 @@ module.exports = function registerPay(app, deps) {
     order.outTradeNo = order.id.replace(/-/g, ''); // 微信要求 ≤32 位：UUID 去横线正好 32 位；支付宝同样兼容
     order.payChannel = channel;
     saveJSON(ORDERS_FILE, orders);
-    return { order };
+    return { order, reused };
   }
 
   // ---- 会员购买守卫：不能重复购买当前或更低档位；升级更高档只补差价 ----
@@ -319,6 +320,7 @@ module.exports = function registerPay(app, deps) {
   function findOrCreateCreditOrder(req, pkgId, channel) {
     const cos = loadCO();
     let order = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'pending');
+    const reused = !!order;
     if (!order) {
       const notified = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'notified');
       if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
@@ -329,7 +331,7 @@ module.exports = function registerPay(app, deps) {
     order.outTradeNo = order.id.replace(/-/g, '');
     order.payChannel = channel;
     saveCO(cos);
-    return { order };
+    return { order, reused };
   }
 
   // 订单可在两个存储里：会员订单（console/orders.json）或积分订单（ai/credit-orders.json）
@@ -385,6 +387,12 @@ module.exports = function registerPay(app, deps) {
     return findOrCreateOrder(req, target.plan, channel, amount);
   }
 
+  // 按订单类型持久化（保存 codeUrl 等附加字段时用）
+  function persistOrder(target, order) {
+    if (target.creditPkg) saveCO(loadCO().map(x => (x.id === order.id ? order : x)));
+    else saveJSON(ORDERS_FILE, loadJSON(ORDERS_FILE, []).map(x => (x.id === order.id ? order : x)));
+  }
+
   // 订单标题/商品描述
   function orderSubject(target, order) {
     if (target.creditPkg) return `无花有果-${order.credits}积分`;
@@ -405,8 +413,18 @@ module.exports = function registerPay(app, deps) {
       payAmount = g.amount;
     }
 
-    const { order, error } = findOrCreateByTarget(req, target, '微信支付', payAmount);
+    const { order, error, reused } = findOrCreateByTarget(req, target, '微信支付', payAmount);
     if (error) return res.status(409).json({ ok: false, error });
+
+    // 复用待支付订单：二维码仍在有效期（约 2 小时）直接返回旧码；已过期先关旧预支付单再换新码
+    if (reused && order.codeUrl) {
+      const age = Date.now() - Date.parse(order.codeUrlAt || order.createdAt);
+      if (age < 110 * 60 * 1000) {
+        return res.json({ ok: true, order, codeUrl: order.codeUrl, reused: true });
+      }
+      try { await wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${order.outTradeNo}/close`, { mchid: w.mchid }); log(`关闭过期预支付单 order=${order.id}`); }
+      catch (e) { log(`关旧单失败（可能已关闭）order=${order.id} err=${e.message}`); }
+    }
 
     try {
       const r = await wxRequest(w, 'POST', '/v3/pay/transactions/native', {
@@ -423,6 +441,9 @@ module.exports = function registerPay(app, deps) {
         return res.status(502).json({ ok: false, error: '微信支付下单失败，请稍后再试或使用转账方式' });
       }
       log(`native下单成功 order=${order.id} ${target.creditPkg ? 'pkg=' + target.creditPkg : 'plan=' + target.plan} amount=${order.amount}`);
+      order.codeUrl = r.json.code_url; // 存下来：有效期内重新发起直接复用，不重复调微信
+      order.codeUrlAt = new Date().toISOString();
+      persistOrder(target, order);
       res.json({ ok: true, order, codeUrl: r.json.code_url });
     } catch (e) {
       log(`native下单异常 order=${order.id} err=${e.message}`);
