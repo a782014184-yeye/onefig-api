@@ -301,7 +301,7 @@ module.exports = function registerPay(app, deps) {
     const cur = req.user.level || 'none';
     if ((PLAN_RANK[cur] || 0) >= PLAN_RANK[plan]) {
       const PLAN_CN = { basic: '青果会员', pro: '红果会员', team: '金果会员' };
-      return { error: `你已经是${PLAN_CN[cur] || '更高档'}会员，无需重复购买。想升级请选择更高档位～` };
+      return { error: `你已经是${PLAN_CN[cur] || '更高档'}，无需重复购买。想升级请选择更高档位～` };
     }
     if ((PLAN_RANK[cur] || 0) > 0) {
       // 升级：收差价（如青果→红果 = 99.9 − 29.9 = 70），赠送积分同样按差额补
