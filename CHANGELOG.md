@@ -5,6 +5,16 @@
 ## [Unreleased]
 
 ### Added
+- 积分充值接入在线支付（2026-10-17）：`POST /api/pay/wechat/native` 与 `POST /api/pay/alipay/pagepay` 新增 `creditPkg` 参数（会员 `plan` 与积分套餐二选一），积分订单复用 `ai/credit-orders.json` 存储，支付成功自动入账积分并记流水（幂等，与人工确认同一记法）
+- 微信/支付宝回调与查单兜底支持积分订单：按 out_trade_no 跨订单存储查找，金额校验通过后自动履约（积分订单 → 入账；会员订单 → 升级）
+- `GET /api/orders/:id/status` 支持积分订单查询（返回 `credits`），前端统一轮询
+- 前端 AI 工坊「充值积分」弹窗改为在线支付流程（微信扫码 / 支付宝收银台 → 自动到账）；在线支付未配置时回退原人工转账
+- 后台用户详情新增「🧾 积分订单」标签页（下单时间/积分/金额/状态/渠道/流水号）；积分统计套餐名更新为现行档位（100/800/2000）
+- 新增 `test-pay-credit.cjs`：9 项积分支付集成测试（自签密钥模拟支付宝回调：下单/验签入账/幂等/金额防篡改/状态查询/未配置降级）
+
+## [1.4.0] - 2026-10-15
+
+### Added
 - 微信支付 Native 扫码支付（`pay.js`，APIv3 零第三方依赖）：`POST /api/pay/wechat/native` 下单返回 code_url、`POST /api/pay/wechat/notify` 支付回调（平台证书验签 + AES-256-GCM 解密 + 金额/商户号校验，幂等）、`GET /api/orders/:id/status` 订单轮询（超 20 秒未回调时主动向微信查单兜底）、`GET /api/pay/config` 支付能力探测
 - 支付成功自动升级会员并赠送积分，与后台人工确认共用 `markOrderPaid`（单一事实来源）
 - 配置经 `pay-config.local.json`（已 gitignore，模板 `pay-config.example.json`），未配置时优雅降级为原人工转账流程

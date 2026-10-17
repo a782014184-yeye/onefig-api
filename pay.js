@@ -7,6 +7,9 @@
 //            用户跳转支付宝付款 → 支付宝回调 /api/pay/alipay/notify（验签）→ 自动升级会员
 // 共同兜底：前端轮询 /api/orders/:id/status 时，后端主动向微信/支付宝查单（防回调丢失）
 //
+// 2026-10-17 扩展：积分充值同样走在线支付（creditPkg 参数），订单复用 ai/credit-orders.json，
+// 支付成功自动入账积分并记流水，后台积分统计/流水自动纳入，无需人工确认。
+//
 // 配置：pay-config.local.json（不进 git，模板见 pay-config.example.json）
 // ⚠️ APIv3 密钥、商户私钥只放服务器，绝不提交到代码仓库。
 
@@ -251,9 +254,11 @@ function markOrderPaid(DATA_DIR, orderId, extra) {
 
 // ---------- 路由注册 ----------
 module.exports = function registerPay(app, deps) {
-  const { authUser, DATA_DIR, PLANS, logLine } = deps;
+  const { authUser, DATA_DIR, PLANS, CREDIT_PACKAGES, loadUsers, saveUsers, logLine } = deps;
   const CONSOLE_DIR = path.join(DATA_DIR, 'console');
   const ORDERS_FILE = path.join(CONSOLE_DIR, 'orders.json');
+  const CREDIT_ORDERS_FILE = path.join(DATA_DIR, 'ai', 'credit-orders.json');
+  const CREDIT_LOG = path.join(DATA_DIR, 'ai', 'credit-log.json');
   const CERTS_CACHE = path.join(CONSOLE_DIR, 'wx-platform-certs.json');
   const loadJSON = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
   const saveJSON = (f, rows) => { const t = f + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, f); };
@@ -284,22 +289,102 @@ module.exports = function registerPay(app, deps) {
     return { order };
   }
 
-  // 微信 Native 下单：返回 code_url 供前端生成二维码
+  // ---- 积分充值订单：与 ai.js 同一存储（ai/credit-orders.json），后台统计/流水天然兼容 ----
+  const loadCO = () => loadJSON(CREDIT_ORDERS_FILE, []);
+  const saveCO = rows => saveJSON(CREDIT_ORDERS_FILE, rows);
+
+  // 积分订单下单辅助：复用同套餐待支付订单；有人工确认中的订单则拒绝重复下单
+  function findOrCreateCreditOrder(req, pkgId, channel) {
+    const cos = loadCO();
+    let order = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'pending');
+    if (!order) {
+      const notified = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'notified');
+      if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
+      const pkg = CREDIT_PACKAGES.find(p => p.id === pkgId);
+      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, pkg: pkg.id, credits: pkg.credits, amount: pkg.price, status: 'pending', createdAt: new Date().toISOString(), paidAt: null };
+      cos.push(order);
+    }
+    order.outTradeNo = order.id.replace(/-/g, '');
+    order.payChannel = channel;
+    saveCO(cos);
+    return { order };
+  }
+
+  // 订单可在两个存储里：会员订单（console/orders.json）或积分订单（ai/credit-orders.json）
+  function findOrderAnywhere(pred) {
+    const planOrders = loadJSON(ORDERS_FILE, []);
+    const o1 = planOrders.find(pred);
+    if (o1) return { kind: 'plan', order: o1 };
+    const creditOrders = loadCO();
+    const o2 = creditOrders.find(pred);
+    if (o2) return { kind: 'credit', order: o2 };
+    return null;
+  }
+
+  // 支付成功履约：会员 → 升级会员；积分 → 入账积分并记流水。均幂等。
+  function fulfillOrder(hit, extra) {
+    if (hit.kind === 'plan') return markOrderPaid(DATA_DIR, hit.order.id, extra);
+    const o = hit.order;
+    if (o.status === 'paid') return { order: o, already: true };
+    o.status = 'paid';
+    o.paidAt = (extra && extra.paidAt) || new Date().toISOString();
+    if (extra && extra.channel) o.channel = extra.channel;
+    if (extra && extra.transactionId) o.transactionId = extra.transactionId;
+    const users = loadUsers();
+    const u = users.find(x => x.id === o.userId);
+    if (u) {
+      u.credits = (u.credits || 0) + o.credits;
+      // 流水记用户本人（与 console.js 人工确认的记法一致）
+      const logs = loadJSON(CREDIT_LOG, []);
+      logs.push({ userId: u.id, name: u.name, delta: o.credits, reason: '积分充值', time: new Date().toISOString(), by: u.name });
+      fs.mkdirSync(path.dirname(CREDIT_LOG), { recursive: true });
+      saveJSON(CREDIT_LOG, logs);
+      saveUsers(users);
+    }
+    saveCO(loadCO().map(x => (x.id === o.id ? o : x)));
+    return { order: o, already: false };
+  }
+
+  // 下单入参解析：plan（会员）或 creditPkg（积分套餐）二选一
+  function resolveOrderTarget(body) {
+    const plan = String((body || {}).plan || '');
+    const creditPkg = String((body || {}).creditPkg || '');
+    if (creditPkg) {
+      const pkg = (CREDIT_PACKAGES || []).find(p => p.id === creditPkg);
+      if (!pkg) return { error: '无效的积分套餐' };
+      return { creditPkg, pkg };
+    }
+    if (!PLANS[plan]) return { error: '无效的会员类型' };
+    return { plan };
+  }
+
+  function findOrCreateByTarget(req, target, channel) {
+    if (target.creditPkg) return findOrCreateCreditOrder(req, target.creditPkg, channel);
+    return findOrCreateOrder(req, target.plan, channel);
+  }
+
+  // 订单标题/商品描述
+  function orderSubject(target, order) {
+    if (target.creditPkg) return `无花有果-${order.credits}积分`;
+    return '无花有果-' + PLANS[target.plan].name;
+  }
+
+  // 微信 Native 下单：返回 code_url 供前端生成二维码（plan=会员 或 creditPkg=积分套餐）
   app.post('/api/pay/wechat/native', authUser, async (req, res) => {
     cfg = loadConfig(); // 每次下单重读配置，改配置不用重启
     const w = cfg.wechat;
     if (!w) return res.status(503).json({ ok: false, error: '微信扫码支付暂未开通，请使用转账方式' });
-    const plan = String((req.body || {}).plan || '');
-    if (!PLANS[plan]) return res.status(400).json({ ok: false, error: '无效的会员类型' });
+    const target = resolveOrderTarget(req.body);
+    if (target.error) return res.status(400).json({ ok: false, error: target.error });
 
-    const { order, error } = findOrCreateOrder(req, plan, '微信支付');
+    const { order, error } = findOrCreateByTarget(req, target, '微信支付');
     if (error) return res.status(409).json({ ok: false, error });
 
     try {
       const r = await wxRequest(w, 'POST', '/v3/pay/transactions/native', {
         appid: w.appid,
         mchid: w.mchid,
-        description: '无花有果-' + PLANS[plan].name,
+        description: orderSubject(target, order),
         out_trade_no: order.outTradeNo,
         notify_url: w.notifyUrl,
         attach: order.id,
@@ -309,7 +394,7 @@ module.exports = function registerPay(app, deps) {
         log(`native下单失败 order=${order.id} http=${r.status} body=${(r.text || '').slice(0, 300)}`);
         return res.status(502).json({ ok: false, error: '微信支付下单失败，请稍后再试或使用转账方式' });
       }
-      log(`native下单成功 order=${order.id} plan=${plan} amount=${order.amount}`);
+      log(`native下单成功 order=${order.id} ${target.creditPkg ? 'pkg=' + target.creditPkg : 'plan=' + target.plan} amount=${order.amount}`);
       res.json({ ok: true, order, codeUrl: r.json.code_url });
     } catch (e) {
       log(`native下单异常 order=${order.id} err=${e.message}`);
@@ -350,9 +435,9 @@ module.exports = function registerPay(app, deps) {
       } catch (e) { log('回调解密失败：' + e.message); return fail(400, '解密失败'); }
 
       const orderId = String(data.attach || '');
-      const orders = loadJSON(ORDERS_FILE, []);
-      const order = orders.find(o => o.id === orderId || (o.outTradeNo && o.outTradeNo === data.out_trade_no));
-      if (!order) { log(`回调找不到订单 out_trade_no=${data.out_trade_no}`); return fail(404, '订单不存在'); }
+      const hit = findOrderAnywhere(o => o.id === orderId || (o.outTradeNo && o.outTradeNo === data.out_trade_no));
+      if (!hit) { log(`回调找不到订单 out_trade_no=${data.out_trade_no}`); return fail(404, '订单不存在'); }
+      const order = hit.order;
 
       // 金额与商户号校验：防伪造/防串单
       const expectFen = Math.round(order.amount * 100);
@@ -360,7 +445,7 @@ module.exports = function registerPay(app, deps) {
         log(`回调金额/商户号不符 order=${order.id} expect=${expectFen} got=${data.amount && data.amount.total} mchid=${data.mchid}`);
         return fail(400, '金额不符');
       }
-      const result = markOrderPaid(DATA_DIR, order.id, {
+      const result = fulfillOrder(hit, {
         channel: '微信支付',
         transactionId: data.transaction_id,
         paidAt: data.success_time || new Date().toISOString(),
@@ -378,19 +463,19 @@ module.exports = function registerPay(app, deps) {
     cfg = loadConfig();
     const a = cfg.alipay;
     if (!a) return res.status(503).json({ ok: false, error: '支付宝支付暂未开通，请使用其他方式' });
-    const plan = String((req.body || {}).plan || '');
-    if (!PLANS[plan]) return res.status(400).json({ ok: false, error: '无效的会员类型' });
+    const target = resolveOrderTarget(req.body);
+    if (target.error) return res.status(400).json({ ok: false, error: target.error });
 
-    const { order, error } = findOrCreateOrder(req, plan, '支付宝');
+    const { order, error } = findOrCreateByTarget(req, target, '支付宝');
     if (error) return res.status(409).json({ ok: false, error });
 
     const payUrl = alipayPageUrl(a, 'alipay.trade.page.pay', {
       out_trade_no: order.outTradeNo,
       total_amount: order.amount.toFixed(2),
-      subject: '无花有果-' + PLANS[plan].name,
+      subject: orderSubject(target, order),
       product_code: 'FAST_INSTANT_TRADE_PAY',
     }, { notify_url: a.notifyUrl, return_url: a.returnUrl });
-    log(`支付宝下单 order=${order.id} plan=${plan} amount=${order.amount}`);
+    log(`支付宝下单 order=${order.id} ${target.creditPkg ? 'pkg=' + target.creditPkg : 'plan=' + target.plan} amount=${order.amount}`);
     res.json({ ok: true, order, payUrl });
   });
 
@@ -410,14 +495,14 @@ module.exports = function registerPay(app, deps) {
       if (params.trade_status !== 'TRADE_SUCCESS' && params.trade_status !== 'TRADE_FINISHED') {
         return res.send('success'); // 等待付款等非终态直接确认
       }
-      const orders = loadJSON(ORDERS_FILE, []);
-      const order = orders.find(o => o.outTradeNo === params.out_trade_no);
-      if (!order) { log(`支付宝回调找不到订单 out_trade_no=${params.out_trade_no}`); return res.status(404).send('failure'); }
+      const hit = findOrderAnywhere(o => o.outTradeNo === params.out_trade_no);
+      if (!hit) { log(`支付宝回调找不到订单 out_trade_no=${params.out_trade_no}`); return res.status(404).send('failure'); }
+      const order = hit.order;
       if (Number(params.total_amount) !== Math.round(order.amount * 100) / 100) {
         log(`支付宝回调金额不符 order=${order.id} expect=${order.amount} got=${params.total_amount}`);
         return res.status(400).send('failure');
       }
-      const result = markOrderPaid(DATA_DIR, order.id, { channel: '支付宝', transactionId: params.trade_no, paidAt: params.gmt_payment });
+      const result = fulfillOrder(hit, { channel: '支付宝', transactionId: params.trade_no, paidAt: params.gmt_payment });
       log(`支付宝支付成功 order=${order.id} trade_no=${params.trade_no}${result && result.already ? '（重复通知，幂等忽略）' : ''}`);
       res.send('success');
     } catch (e) {
@@ -427,29 +512,31 @@ module.exports = function registerPay(app, deps) {
   });
 
   // 订单状态查询（前端轮询）。超过 20 秒未收到回调时，主动向微信/支付宝查单兜底（每 15 秒最多查一次）
+  // 会员订单与积分订单都可查：积分订单支付成功直接入账
   app.get('/api/orders/:id/status', authUser, async (req, res) => {
     cfg = loadConfig();
-    const orders = loadJSON(ORDERS_FILE, []);
-    const o = orders.find(x => x.id === req.params.id && x.userId === req.user.id);
-    if (!o) return res.status(404).json({ ok: false, error: '订单不存在' });
+    const hit = findOrderAnywhere(x => x.id === req.params.id && x.userId === req.user.id);
+    if (!hit) return res.status(404).json({ ok: false, error: '订单不存在' });
+    const o = hit.order;
     if (o.status !== 'paid' && o.outTradeNo) {
       const last = o.lastPayQueryAt ? Date.parse(o.lastPayQueryAt) : 0;
       if (Date.now() - last > 15000 && Date.now() - Date.parse(o.createdAt) > 20000) {
         o.lastPayQueryAt = new Date().toISOString();
-        saveJSON(ORDERS_FILE, orders);
+        if (hit.kind === 'plan') { const all = loadJSON(ORDERS_FILE, []); const t = all.find(x => x.id === o.id); if (t) { t.lastPayQueryAt = o.lastPayQueryAt; saveJSON(ORDERS_FILE, all); } }
+        else { const all = loadCO(); const t = all.find(x => x.id === o.id); if (t) { t.lastPayQueryAt = o.lastPayQueryAt; saveCO(all); } }
         try {
           if (o.payChannel === 'alipay' && cfg.alipay) {
             const r = await alipayApiCall(cfg.alipay, 'alipay.trade.query', { out_trade_no: o.outTradeNo });
             const resp = r.json && r.json.alipay_trade_query_response;
             if (resp && resp.code === '10000' && (resp.trade_status === 'TRADE_SUCCESS' || resp.trade_status === 'TRADE_FINISHED')) {
-              markOrderPaid(DATA_DIR, o.id, { channel: '支付宝', transactionId: resp.trade_no });
+              fulfillOrder(hit, { channel: '支付宝', transactionId: resp.trade_no });
               o.status = 'paid';
               log(`支付宝查单补单成功 order=${o.id}（回调可能丢失）`);
             }
           } else if (o.payChannel !== 'alipay' && cfg.wechat) {
             const r = await wxRequest(cfg.wechat, 'GET', `/v3/pay/transactions/out-trade-no/${o.outTradeNo}?mchid=${cfg.wechat.mchid}`, null);
             if (r.status === 200 && r.json && r.json.trade_state === 'SUCCESS') {
-              markOrderPaid(DATA_DIR, o.id, { channel: '微信支付', transactionId: r.json.transaction_id, paidAt: r.json.success_time });
+              fulfillOrder(hit, { channel: '微信支付', transactionId: r.json.transaction_id, paidAt: r.json.success_time });
               o.status = 'paid';
               log(`微信查单补单成功 order=${o.id}（回调可能丢失）`);
             }
@@ -457,7 +544,7 @@ module.exports = function registerPay(app, deps) {
         } catch (e) { log(`查单异常 order=${o.id} err=${e.message}`); }
       }
     }
-    res.json({ ok: true, status: o.status, plan: o.plan, paidAt: o.paidAt || null });
+    res.json({ ok: true, status: o.status, plan: o.plan || null, credits: o.credits || null, paidAt: o.paidAt || null });
   });
 };
 

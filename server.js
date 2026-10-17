@@ -739,10 +739,11 @@ app.get('/api/my/submissions', authUser, (req, res) => {
 require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + ADMIN_PATH, readSubmissions: readDB, getOnlineCount });
 
 // AI 工坊：积分体系 + 生图流水线
+const CREDIT_PACKAGES = require('./ai').CREDIT_PACKAGES;
 require('./ai')(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine });
 
-// 在线支付：微信 Native 扫码支付（2026-10-08）
-require('./pay')(app, { authUser, DATA_DIR, PLANS, logLine });
+// 在线支付：微信 Native 扫码 + 支付宝电脑网站支付（2026-10-08；2026-10-17 起同时支持积分充值）
+require('./pay')(app, { authUser, DATA_DIR, PLANS, CREDIT_PACKAGES, loadUsers, saveUsers, logLine });
 
 // SEO 公开页：sitemap.xml + 素材详情页 /m/ + 系列页 /s/（服务端直出）
 require('./seo')(app, { esc, DATA_DIR });

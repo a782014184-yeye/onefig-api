@@ -324,3 +324,6 @@ module.exports = function registerAI(app, deps) {
   function loadJSON(f, d) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } }
   function saveJSON(f, rows) { const t = f + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, f); }
 };
+
+// 供 server.js / pay.js 共享同一份套餐定义（在线支付下单时校验用）
+module.exports.CREDIT_PACKAGES = CREDIT_PACKAGES;
