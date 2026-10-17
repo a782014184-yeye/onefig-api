@@ -269,6 +269,13 @@ module.exports = function registerPay(app, deps) {
   const saveJSON = (f, rows) => { const t = f + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, f); };
   const log = (msg) => { if (logLine) logLine('pay', msg); else console.log('[pay]', msg); };
 
+  // 待支付订单有效期：超期显示「已失效」，不可再支付，可一键清空（2026-10-17）
+  const PENDING_TTL = 24 * 60 * 60 * 1000;
+  const isStalePending = o => o.status === 'pending' && Date.now() - Date.parse(o.createdAt) > PENDING_TTL;
+  const markStaleExpired = (list, req) => list.forEach(o => {
+    if (o.userId === req.user.id && isStalePending(o)) { o.status = 'expired'; o.expiredAt = new Date().toISOString(); }
+  });
+
   let cfg = loadConfig();
   const wxEnabled = () => !!cfg.wechat;
 
@@ -282,6 +289,7 @@ module.exports = function registerPay(app, deps) {
   // amount 可覆盖（升级差价），缺省 = 档位标价；reused=true 表示复用了已有待支付订单
   function findOrCreateOrder(req, plan, channel, amount) {
     const orders = loadJSON(ORDERS_FILE, []);
+    markStaleExpired(orders, req);
     let order = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'pending');
     const reused = !!order;
     if (!order) {
@@ -319,6 +327,7 @@ module.exports = function registerPay(app, deps) {
   // 积分订单下单辅助：复用同套餐待支付订单；有人工确认中的订单则拒绝重复下单
   function findOrCreateCreditOrder(req, pkgId, channel) {
     const cos = loadCO();
+    markStaleExpired(cos, req);
     let order = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'pending');
     const reused = !!order;
     if (!order) {
@@ -573,7 +582,14 @@ module.exports = function registerPay(app, deps) {
     const hit = findOrderAnywhere(x => x.id === req.params.id && x.userId === req.user.id);
     if (!hit) return res.status(404).json({ ok: false, error: '订单不存在' });
     const o = hit.order;
-    if (o.status !== 'paid' && o.outTradeNo) {
+    // 超期待支付订单 → 标记失效（前端轮询到也会收敛）
+    if (isStalePending(o)) {
+      o.status = 'expired';
+      o.expiredAt = new Date().toISOString();
+      if (hit.kind === 'plan') { const all = loadJSON(ORDERS_FILE, []); const t = all.find(x => x.id === o.id); if (t) { t.status = 'expired'; t.expiredAt = o.expiredAt; saveJSON(ORDERS_FILE, all); } }
+      else { const all = loadCO(); const t = all.find(x => x.id === o.id); if (t) { t.status = 'expired'; t.expiredAt = o.expiredAt; saveCO(all); } }
+    }
+    if (o.status !== 'paid' && o.status !== 'expired' && o.outTradeNo) {
       const last = o.lastPayQueryAt ? Date.parse(o.lastPayQueryAt) : 0;
       if (Date.now() - last > 15000 && Date.now() - Date.parse(o.createdAt) > 20000) {
         o.lastPayQueryAt = new Date().toISOString();
@@ -600,6 +616,21 @@ module.exports = function registerPay(app, deps) {
       }
     }
     res.json({ ok: true, status: o.status, plan: o.plan || null, credits: o.credits || null, paidAt: o.paidAt || null });
+  });
+
+  // 一键清空当前用户的已失效待支付订单（会员订单 + 积分订单，2026-10-17）
+  app.delete('/api/orders/expired', authUser, (req, res) => {
+    let removed = 0;
+    const planOrders = loadJSON(ORDERS_FILE, []);
+    const keepPlans = planOrders.filter(o => !(o.userId === req.user.id && (o.status === 'expired' || isStalePending(o))));
+    removed += planOrders.length - keepPlans.length;
+    if (removed) saveJSON(ORDERS_FILE, keepPlans);
+    const cos = loadCO();
+    const keepCO = cos.filter(o => !(o.userId === req.user.id && (o.status === 'expired' || isStalePending(o))));
+    removed += cos.length - keepCO.length;
+    if (cos.length !== keepCO.length) saveCO(keepCO);
+    log(`清空失效订单 user=${req.user.name} removed=${removed}`);
+    res.json({ ok: true, removed });
   });
 };
 

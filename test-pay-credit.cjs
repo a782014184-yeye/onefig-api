@@ -192,6 +192,49 @@ function ok(name) { passed++; console.log('  ✅', name); }
   assert.strictEqual(readUser().credits, 3105, '重复通知不重复赠送');
   ok('B6 已是金果 → 不能重复购买；重复回调仍幂等');
 
+  // ========== C. 待支付订单 24h 过期 + 一键清空 ==========
+  // B 段已把测试用户升到金果，先把等级复位以便继续下单会员
+  { const us = loadUsers(); us[0].level = 'none'; saveUsers(us); }
+  const H25 = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+  // 造一笔"25 小时前"的待支付会员订单 + 积分订单
+  const c1 = await post('/api/pay/alipay/pagepay', { plan: 'pro' });
+  const c2 = await post('/api/pay/alipay/pagepay', { creditPkg: 'p2000' });
+  {
+    const all = JSON.parse(fs.readFileSync(path.join(consoleDir, 'orders.json'), 'utf8'));
+    all.find(o => o.id === c1.order.id).createdAt = H25;
+    fs.writeFileSync(path.join(consoleDir, 'orders.json'), JSON.stringify(all, null, 1));
+    const cos2 = JSON.parse(fs.readFileSync(path.join(aiDir, 'credit-orders.json'), 'utf8'));
+    cos2.find(o => o.id === c2.order.id).createdAt = H25;
+    fs.writeFileSync(path.join(aiDir, 'credit-orders.json'), JSON.stringify(cos2, null, 1));
+  }
+  // 过期订单不再复用：重新下单会开新单，旧单标记 expired
+  const c1n = await post('/api/pay/alipay/pagepay', { plan: 'pro' });
+  assert.notStrictEqual(c1n.order.id, c1.order.id);
+  const all2 = JSON.parse(fs.readFileSync(path.join(consoleDir, 'orders.json'), 'utf8'));
+  assert.strictEqual(all2.find(o => o.id === c1.order.id).status, 'expired');
+  ok('C1 超期待支付订单重启付款 → 旧单标记失效、开新单');
+  const c2n = await post('/api/pay/alipay/pagepay', { creditPkg: 'p2000' });
+  assert.notStrictEqual(c2n.order.id, c2.order.id);
+  const cos3 = JSON.parse(fs.readFileSync(path.join(aiDir, 'credit-orders.json'), 'utf8'));
+  assert.strictEqual(cos3.find(o => o.id === c2.order.id).status, 'expired');
+  ok('C2 积分订单同样过期处理');
+
+  // 状态查询也会把超期订单收敛为 expired
+  const stc = await get(`/api/orders/${c1n.order.id}/status`);
+  assert.strictEqual(stc.ok, true);
+  ok('C3 新订单状态查询正常');
+
+  // 一键清空：删掉 2 笔失效单，保留进行中的单
+  const del = await fetch(base + '/api/orders/expired', { method: 'DELETE', headers: { Authorization: 'Bearer t' } }).then(r => r.json());
+  assert.strictEqual(del.ok, true);
+  assert.strictEqual(del.removed, 2);
+  const all3 = JSON.parse(fs.readFileSync(path.join(consoleDir, 'orders.json'), 'utf8'));
+  assert.ok(!all3.some(o => o.id === c1.order.id), '失效会员订单已删除');
+  assert.ok(all3.some(o => o.id === c1n.order.id), '进行中订单保留');
+  const cos4 = JSON.parse(fs.readFileSync(path.join(aiDir, 'credit-orders.json'), 'utf8'));
+  assert.ok(!cos4.some(o => o.id === c2.order.id), '失效积分订单已删除');
+  ok('C4 一键清空失效订单（会员 + 积分，各删一笔，进行中保留）');
+
   server.close();
   fs.rmSync(dir, { recursive: true, force: true });
   console.log(`\n全部通过（${passed} 项）`);
