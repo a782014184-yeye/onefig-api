@@ -391,7 +391,13 @@ app.post('/api/auth/reset', authRateLimit, (req, res) => {
 
 app.get('/api/me', authUser, (req, res) => {
   const orders = loadOrders().filter(o => o.userId === req.user.id).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-  res.json({ ok: true, user: publicUser(req.user), orders });
+  // 积分充值订单一并返回，账号中心「积分订单」区展示（2026-10-17）
+  let creditOrders = [];
+  try {
+    creditOrders = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'ai', 'credit-orders.json'), 'utf8'))
+      .filter(o => o.userId === req.user.id).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  } catch {}
+  res.json({ ok: true, user: publicUser(req.user), orders, creditOrders });
 });
 
 app.get('/api/payinfo', (req, res) => {
