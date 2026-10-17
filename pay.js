@@ -20,6 +20,7 @@ const crypto = require('crypto');
 
 const WX_API_HOST = 'api.mch.weixin.qq.com';
 const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 与 console.js 保持一致：开通会员一次性赠送积分
+const PLAN_RANK = { basic: 1, pro: 2, team: 3 }; // 会员档位序：用于重复购买拦截与差价升级
 
 // ---------- 配置加载 ----------
 function loadConfig() {
@@ -237,12 +238,16 @@ function markOrderPaid(DATA_DIR, orderId, extra) {
     u.level = o.plan;
     if (!u.memberSince) u.memberSince = o.paidAt;
     if (!u.name && o.userName) u.name = o.userName;
-    // 赠送积分：每个等级只送一次
-    if (MEMBER_GIFT[o.plan] && u.creditsGrantedFor !== o.plan) {
+    // 赠送积分：按「目标档位应得总额 − 已赠送额」补差（升级只补差价，如青果→红果 +750）
+    const targetGift = MEMBER_GIFT[o.plan] || 0;
+    const granted = MEMBER_GIFT[u.creditsGrantedFor] || 0;
+    const delta = targetGift - granted;
+    if (delta > 0 && u.creditsGrantedFor !== o.plan) {
       u.creditsGrantedFor = o.plan;
-      u.credits = (u.credits || 0) + MEMBER_GIFT[o.plan];
+      u.credits = (u.credits || 0) + delta;
+      const verb = granted > 0 ? '升级' : '开通';
       const log = loadJSON(CREDIT_LOG, []);
-      log.push({ userId: u.id, name: u.name, delta: MEMBER_GIFT[o.plan], reason: '开通' + (PLAN_NAMES[o.plan] || o.plan) + '赠送', time: new Date().toISOString(), by: 'system' });
+      log.push({ userId: u.id, name: u.name, delta, reason: verb + (PLAN_NAMES[o.plan] || o.plan) + '赠送', time: new Date().toISOString(), by: 'system' });
       fs.mkdirSync(path.dirname(CREDIT_LOG), { recursive: true });
       saveJSON(CREDIT_LOG, log);
     }
@@ -274,19 +279,36 @@ module.exports = function registerPay(app, deps) {
   });
 
   // 下单辅助：复用同档位待支付订单；有"人工确认中"的订单则拒绝重复下单
-  function findOrCreateOrder(req, plan, channel) {
+  // amount 可覆盖（升级差价），缺省 = 档位标价
+  function findOrCreateOrder(req, plan, channel, amount) {
     const orders = loadJSON(ORDERS_FILE, []);
     let order = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'pending');
     if (!order) {
       const notified = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'notified');
       if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
-      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: PLANS[plan].price, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null };
+      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: amount != null ? amount : PLANS[plan].price, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null };
       orders.push(order);
     }
     order.outTradeNo = order.id.replace(/-/g, ''); // 微信要求 ≤32 位：UUID 去横线正好 32 位；支付宝同样兼容
     order.payChannel = channel;
     saveJSON(ORDERS_FILE, orders);
     return { order };
+  }
+
+  // ---- 会员购买守卫：不能重复购买当前或更低档位；升级更高档只补差价 ----
+  // 返回 { error } 或 { amount }（应付金额，全价购买时为 null 用标价）
+  function planPurchaseGuard(req, plan) {
+    const cur = req.user.level || 'none';
+    if ((PLAN_RANK[cur] || 0) >= PLAN_RANK[plan]) {
+      const PLAN_CN = { basic: '青果会员', pro: '红果会员', team: '金果会员' };
+      return { error: `你已经是${PLAN_CN[cur] || '更高档'}会员，无需重复购买。想升级请选择更高档位～` };
+    }
+    if ((PLAN_RANK[cur] || 0) > 0) {
+      // 升级：收差价（如青果→红果 = 99.9 − 29.9 = 70），赠送积分同样按差额补
+      const diff = Math.round((PLANS[plan].price - PLANS[cur].price) * 100) / 100;
+      if (diff > 0) return { amount: diff };
+    }
+    return {};
   }
 
   // ---- 积分充值订单：与 ai.js 同一存储（ai/credit-orders.json），后台统计/流水天然兼容 ----
@@ -358,9 +380,9 @@ module.exports = function registerPay(app, deps) {
     return { plan };
   }
 
-  function findOrCreateByTarget(req, target, channel) {
+  function findOrCreateByTarget(req, target, channel, amount) {
     if (target.creditPkg) return findOrCreateCreditOrder(req, target.creditPkg, channel);
-    return findOrCreateOrder(req, target.plan, channel);
+    return findOrCreateOrder(req, target.plan, channel, amount);
   }
 
   // 订单标题/商品描述
@@ -376,8 +398,14 @@ module.exports = function registerPay(app, deps) {
     if (!w) return res.status(503).json({ ok: false, error: '微信扫码支付暂未开通，请使用转账方式' });
     const target = resolveOrderTarget(req.body);
     if (target.error) return res.status(400).json({ ok: false, error: target.error });
+    let payAmount = null;
+    if (target.plan) {
+      const g = planPurchaseGuard(req, target.plan);
+      if (g.error) return res.status(409).json({ ok: false, error: g.error });
+      payAmount = g.amount;
+    }
 
-    const { order, error } = findOrCreateByTarget(req, target, '微信支付');
+    const { order, error } = findOrCreateByTarget(req, target, '微信支付', payAmount);
     if (error) return res.status(409).json({ ok: false, error });
 
     try {
@@ -465,8 +493,14 @@ module.exports = function registerPay(app, deps) {
     if (!a) return res.status(503).json({ ok: false, error: '支付宝支付暂未开通，请使用其他方式' });
     const target = resolveOrderTarget(req.body);
     if (target.error) return res.status(400).json({ ok: false, error: target.error });
+    let payAmount = null;
+    if (target.plan) {
+      const g = planPurchaseGuard(req, target.plan);
+      if (g.error) return res.status(409).json({ ok: false, error: g.error });
+      payAmount = g.amount;
+    }
 
-    const { order, error } = findOrCreateByTarget(req, target, '支付宝');
+    const { order, error } = findOrCreateByTarget(req, target, '支付宝', payAmount);
     if (error) return res.status(409).json({ ok: false, error });
 
     const payUrl = alipayPageUrl(a, 'alipay.trade.page.pay', {
