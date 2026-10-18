@@ -270,11 +270,31 @@ module.exports = function registerPay(app, deps) {
   const log = (msg) => { if (logLine) logLine('pay', msg); else console.log('[pay]', msg); };
 
   // 待支付订单有效期：超期显示「已失效」，不可再支付，可一键清空（2026-10-17）
+  // 2026-10-18 收紧：与渠道侧硬对齐 —— 支付宝下单带 timeout_express=24h（超时支付宝自动关单），
+  // 订单标记失效时主动关闭微信旧预支付单，杜绝「页面显示已失效但旧二维码仍能付款」的窗口
   const PENDING_TTL = 24 * 60 * 60 * 1000;
   const isStalePending = o => o.status === 'pending' && Date.now() - Date.parse(o.createdAt) > PENDING_TTL;
-  const markStaleExpired = (list, req) => list.forEach(o => {
-    if (o.userId === req.user.id && isStalePending(o)) { o.status = 'expired'; o.expiredAt = new Date().toISOString(); }
-  });
+  // 返回本次新标记为 expired 的订单
+  const markStaleExpired = (list, req) => {
+    const marked = [];
+    list.forEach(o => {
+      if (o.userId === req.user.id && isStalePending(o)) {
+        o.status = 'expired';
+        o.expiredAt = new Date().toISOString();
+        marked.push(o);
+      }
+    });
+    return marked;
+  };
+  // 尽力关闭微信旧预支付单（无微信支付配置时为空操作；关单失败无害——可能已关闭或已支付）
+  function closeWxPrepay(order) {
+    cfg = loadConfig();
+    const w = cfg.wechat;
+    if (!w || !order.outTradeNo || order.payChannel !== '微信支付') return;
+    wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${order.outTradeNo}/close`, { mchid: w.mchid })
+      .then(() => log(`失效订单已关闭微信预支付单 order=${order.id}`))
+      .catch(e => log(`失效关单失败（可忽略）order=${order.id} err=${e.message}`));
+  }
 
   let cfg = loadConfig();
   const wxEnabled = () => !!cfg.wechat;
@@ -289,7 +309,7 @@ module.exports = function registerPay(app, deps) {
   // amount 可覆盖（升级差价），缺省 = 档位标价；reused=true 表示复用了已有待支付订单
   function findOrCreateOrder(req, plan, channel, amount) {
     const orders = loadJSON(ORDERS_FILE, []);
-    markStaleExpired(orders, req);
+    markStaleExpired(orders, req).forEach(closeWxPrepay);
     let order = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'pending');
     const reused = !!order;
     if (!order) {
@@ -327,7 +347,7 @@ module.exports = function registerPay(app, deps) {
   // 积分订单下单辅助：复用同套餐待支付订单；有人工确认中的订单则拒绝重复下单
   function findOrCreateCreditOrder(req, pkgId, channel) {
     const cos = loadCO();
-    markStaleExpired(cos, req);
+    markStaleExpired(cos, req).forEach(closeWxPrepay);
     let order = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'pending');
     const reused = !!order;
     if (!order) {
@@ -538,6 +558,7 @@ module.exports = function registerPay(app, deps) {
       total_amount: order.amount.toFixed(2),
       subject: orderSubject(target, order),
       product_code: 'FAST_INSTANT_TRADE_PAY',
+      timeout_express: '24h', // 与 PENDING_TTL 对齐：超时支付宝自动关单，旧收银台页面无法再付款
     }, { notify_url: a.notifyUrl, return_url: a.returnUrl });
     log(`支付宝下单 order=${order.id} ${target.creditPkg ? 'pkg=' + target.creditPkg : 'plan=' + target.plan} amount=${order.amount}`);
     res.json({ ok: true, order, payUrl });
@@ -582,12 +603,13 @@ module.exports = function registerPay(app, deps) {
     const hit = findOrderAnywhere(x => x.id === req.params.id && x.userId === req.user.id);
     if (!hit) return res.status(404).json({ ok: false, error: '订单不存在' });
     const o = hit.order;
-    // 超期待支付订单 → 标记失效（前端轮询到也会收敛）
+    // 超期待支付订单 → 标记失效 + 关闭微信旧预支付单（前端轮询到也会收敛）
     if (isStalePending(o)) {
       o.status = 'expired';
       o.expiredAt = new Date().toISOString();
       if (hit.kind === 'plan') { const all = loadJSON(ORDERS_FILE, []); const t = all.find(x => x.id === o.id); if (t) { t.status = 'expired'; t.expiredAt = o.expiredAt; saveJSON(ORDERS_FILE, all); } }
       else { const all = loadCO(); const t = all.find(x => x.id === o.id); if (t) { t.status = 'expired'; t.expiredAt = o.expiredAt; saveCO(all); } }
+      closeWxPrepay(o);
     }
     if (o.status !== 'paid' && o.status !== 'expired' && o.outTradeNo) {
       const last = o.lastPayQueryAt ? Date.parse(o.lastPayQueryAt) : 0;
