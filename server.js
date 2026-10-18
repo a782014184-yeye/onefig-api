@@ -190,6 +190,7 @@ const TOKEN_SECRET = process.env.TOKEN_SECRET || crypto.randomBytes(32).toString
 const CONSOLE_DIR = path.join(DATA_DIR, 'console');
 const USERS_FILE = path.join(CONSOLE_DIR, 'users.json');
 const ORDERS_FILE = path.join(CONSOLE_DIR, 'orders.json');
+const PURCHASES_FILE = path.join(CONSOLE_DIR, 'purchases.json');
 const PLANS = { basic: { name: '青果会员', price: 29.9 }, pro: { name: '红果会员', price: 99.9 }, team: { name: '金果会员', price: 299.9 } };
 // 收款信息（微信支付），后台可改
 const PAY_FILE = path.join(CONSOLE_DIR, 'payinfo.json');
@@ -397,7 +398,14 @@ app.get('/api/me', authUser, (req, res) => {
     creditOrders = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'ai', 'credit-orders.json'), 'utf8'))
       .filter(o => o.userId === req.user.id).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   } catch {}
-  res.json({ ok: true, user: publicUser(req.user), orders, creditOrders });
+  res.json({
+    ok: true,
+    user: publicUser(req.user),
+    orders,
+    creditOrders,
+    // 单张购买过的素材 ID（永久可重下；前端据此把“¥6.9 下载”显示为“已购买”）
+    purchases: loadJSON(PURCHASES_FILE, []).filter(p => p.userId === req.user.id).map(p => p.materialId),
+  });
 });
 
 app.get('/api/payinfo', (req, res) => {
@@ -551,7 +559,9 @@ app.get('/api/download', authUser, (req, res) => {
     const id = String(req.query.id || '');
     const u = req.user;
     const level = u.level || 'none';
-    if (level === 'none') return res.status(403).json({ ok: false, error: 'no-plan' });
+    // 单张购买权益：永久可重下；普通账户买了某张后也能下这一张
+    const purchased = loadJSON(PURCHASES_FILE, []).some(p => p.userId === u.id && p.materialId === id);
+    if (level === 'none' && !purchased) return res.status(403).json({ ok: false, error: 'no-plan' });
 
     // 找素材
     const f = path.join(CONSOLE_DIR, 'materials.json');
@@ -566,8 +576,8 @@ app.get('/api/download', authUser, (req, res) => {
     // 授权码：同一用户对同一素材固定一个码（重复下载沿用首个码）
     const code = (logs.find(l => l.userId === u.id && l.materialId === id && l.code) || {}).code || genLicenseCode(logs);
     if (!already) {
-      // 青果会员：每月 5 张额度（自然月重置，重复下载不占额度）
-      if (level === 'basic') {
+      // 青果会员：每月 5 张额度（自然月重置，重复下载不占额度）；单张购买过的素材不占额度
+      if (level === 'basic' && !purchased) {
         const month = curMonth();
         if (u.dlMonth !== month) { u.dlMonth = month; u.dlUsed = 0; }
         if ((u.dlUsed || 0) >= BASIC_MONTHLY_LIMIT) return res.status(403).json({ ok: false, error: 'quota' });

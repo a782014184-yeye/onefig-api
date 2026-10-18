@@ -6,7 +6,7 @@ const path = require('path');
 
 const SITE = 'https://onefig.cn';
 const SITE_NAME = 'OneFig 无花有果';
-const SITE_DESC = '免费高清科研绘图素材库：细胞、器官、实验仪器、信号通路等专业插画，支持在线画板编辑与 AI 图像处理，适用于论文配图、课题汇报与科普设计。';
+const SITE_DESC = '高清科研绘图素材库：细胞、器官、实验仪器、信号通路等专业插画，会员可下载，也支持单张购买，适用于论文配图、课题汇报与科普设计。';
 const ICP = '浙ICP备2026079784号';
 
 module.exports = function registerSeo(app, deps) {
@@ -92,7 +92,7 @@ ${jsonld ? `<script type="application/ld+json">${jsonld}</script>` : ''}
     }
     const img = previewUrl(m.series, m.file);
     const pageTitle = `${m.title} - ${m.series}素材高清下载 - ${SITE_NAME}`;
-    const desc = `${m.title}，${m.series}高清科研绘图素材，${SITE_NAME}提供会员免费下载，可用于论文配图、学术汇报与科普设计。`;
+    const desc = `${m.title}，${m.series}高清科研绘图素材，${SITE_NAME}提供会员下载与单张购买（¥6.9 起），可用于论文配图、学术汇报与科普设计。`;
     const jsonld = JSON.stringify({
       '@context': 'https://schema.org', '@type': 'ImageObject',
       name: m.title, contentUrl: img, description: desc,
@@ -106,9 +106,9 @@ ${jsonld ? `<script type="application/ld+json">${jsonld}</script>` : ''}
   <img src="${img}" alt="${esc(m.title)} - ${esc(m.series)}科研绘图素材">
   <div class="info">
     <h1>${esc(m.title)}</h1>
-    <div class="meta">所属系列：<a href="${seriesPath(m.series)}">${esc(m.series)}</a><br>文件大小：${fmtSize(m.size)}<br>上架时间：${esc(m.createdAt || '—')}<br>已被下载：${m.downloads || 0} 次</div>
-    <a class="cta" href="/materials?focus=${encodeURIComponent(m.id)}">免费下载高清原图 →</a>
-    <p class="desc">${esc(m.title)}是${esc(m.series)}中的高清科研插画素材，适用于论文配图、课题汇报 PPT、基金申请书与科普推文。注册成为会员即可免费下载高清原图，也可在在线画板中直接编辑组合。</p>
+    <div class="meta">所属系列：<a href="${seriesPath(m.series)}">${esc(m.series)}</a><br>文件大小：${fmtSize(m.size)}<br>价格：会员可下载 / 单张 ¥6.9<br>授权：学术发表（非商用 · 须署名）<br>上架时间：${esc(m.createdAt || '—')}<br>已被下载：${m.downloads || 0} 次</div>
+    <a class="cta" href="/materials?focus=${encodeURIComponent(m.id)}">会员可下载 · ¥6.9 起 →</a>
+    <p class="desc">${esc(m.title)}是${esc(m.series)}中的高清科研插画素材，适用于论文配图、课题汇报 PPT、基金申请书与科普推文。注册登录后可开通会员下载，或单张 ¥6.9 购买；也可在在线画板中直接编辑组合。</p>
   </div>
 </div></div>
 ${related.length ? `<h2>同系列素材</h2><div class="grid">` + related.map(x => `<a class="mcard" href="${matPath(x)}"><img src="${previewUrl(x.series, x.file)}" alt="${esc(x.title)}"><div class="t">${esc(x.title)}</div></a>`).join('') + `</div>` : ''}
@@ -125,7 +125,7 @@ ${related.length ? `<h2>同系列素材</h2><div class="grid">` + related.map(x 
     }
     const names = sd.materials.slice(0, 6).map(m => m.title).join('、');
     const pageTitle = `${sd.folder} - 高清科研绘图素材合集 - ${SITE_NAME}`;
-    const desc = `${sd.folder}系列收录 ${sd.materials.length} 张高清科研绘图素材，包括${names}等，会员免费下载，适用于论文配图与学术汇报。`;
+    const desc = `${sd.folder}系列收录 ${sd.materials.length} 张高清科研绘图素材，包括${names}等，会员可下载或单张购买，适用于论文配图与学术汇报。`;
     const jsonld = JSON.stringify({
       '@context': 'https://schema.org', '@type': 'CollectionPage',
       name: sd.folder, description: desc,
@@ -134,7 +134,7 @@ ${related.length ? `<h2>同系列素材</h2><div class="grid">` + related.map(x 
     res.send(head(pageTitle, desc, sd.materials[0] ? previewUrl(sd.folder, sd.materials[0].file) : null, jsonld) + topbar + `<div class="wrap">
 <div class="crumb"><a href="/">首页</a> › <a href="/materials">素材库</a> › ${esc(sd.folder)}</div>
 <h1>${esc(sd.folder)}</h1>
-<p class="desc">本系列共收录 ${sd.materials.length} 张高清素材，包括${esc(names)}等。全部素材支持会员免费下载、在线画板编辑与 AI 处理，适用于论文配图、课题汇报与科普设计。</p>
+<p class="desc">本系列共收录 ${sd.materials.length} 张高清素材，包括${esc(names)}等。全部素材支持会员下载、单张购买、在线画板编辑与 AI 处理，适用于论文配图、课题汇报与科普设计。</p>
 <div class="grid">${sd.materials.map(x => `<a class="mcard" href="${matPath(x)}"><img src="${previewUrl(x.series, x.file)}" alt="${esc(x.title)}"><div class="t">${esc(x.title)}</div></a>`).join('')}</div>
 </div>` + footer);
   });

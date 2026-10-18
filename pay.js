@@ -21,6 +21,8 @@ const crypto = require('crypto');
 const WX_API_HOST = 'api.mch.weixin.qq.com';
 const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 与 console.js 保持一致：开通会员一次性赠送积分
 const PLAN_RANK = { basic: 1, pro: 2, team: 3 }; // 会员档位序：用于重复购买拦截与差价升级
+// 单张素材统一价（服务端为准，前端只展示；可通过环境变量覆盖）
+const SINGLE_PRICE = Math.round((Number(process.env.ONEFIG_SINGLE_PRICE) || 6.9) * 100) / 100;
 
 // ---------- 配置加载 ----------
 function loadConfig() {
@@ -43,7 +45,7 @@ function loadConfig() {
           try { serialNo = new crypto.X509Certificate(certPem).serialNumber.replace(/:/g, '').toUpperCase(); }
           catch (e) { console.warn('[pay] 读取证书序列号失败：' + e.message); }
         }
-        out.wechat = { appid: w.appid, mchid: w.mchid, apiV3Key: w.apiV3Key, notifyUrl: w.notifyUrl, certPem, keyPem, serialNo };
+        out.wechat = { appid: w.appid, mchid: w.mchid, apiV3Key: w.apiV3Key, notifyUrl: w.notifyUrl, appSecret: w.appSecret || '', jsapiAppid: w.jsapiAppid || w.appid, h5Enabled: !!w.h5Enabled, certPem, keyPem, serialNo };
       }
     }
 
@@ -106,6 +108,51 @@ function wxRequest(w, method, urlPath, bodyObj) {
     if (body) req.write(body);
     req.end();
   });
+}
+
+// 微信开放接口（OAuth 换 openid 等）：GET JSON，不经过商户 API v3 签名
+function httpsGetJson(url, timeout = 15000) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch {}
+        resolve({ status: res.statusCode, json, text });
+      });
+    });
+    req.setTimeout(timeout, () => req.destroy(new Error('微信接口请求超时')));
+    req.on('error', reject);
+  });
+}
+
+// 公众号网页授权 code → openid（JSAPI 必需；需要 pay-config 里的 wechat.appSecret）
+async function getWechatOpenid(w, code) {
+  if (!w || !w.appSecret) throw new Error('公众号 AppSecret 未配置');
+  if (!code) throw new Error('缺少微信授权 code');
+  const appid = w.jsapiAppid || w.appid;
+  const url = 'https://api.weixin.qq.com/sns/oauth2/access_token?' + new URLSearchParams({
+    appid, secret: w.appSecret, code, grant_type: 'authorization_code',
+  }).toString();
+  const r = await httpsGetJson(url);
+  if (!r.json || !r.json.openid) {
+    const detail = r.json ? `${r.json.errcode || ''} ${r.json.errmsg || ''}`.trim() : '';
+    throw new Error(detail || '微信网页授权失败');
+  }
+  return { openid: r.json.openid, appid };
+}
+
+// JSAPI 支付参数签名：appId\ntimeStamp\nnonceStr\npackage\n
+function jsapiPayParams(w, prepayId) {
+  const appId = w.jsapiAppid || w.appid;
+  const timeStamp = Math.floor(Date.now() / 1000).toString();
+  const nonceStr = crypto.randomBytes(16).toString('hex');
+  const pkg = `prepay_id=${prepayId}`;
+  const message = `${appId}\n${timeStamp}\n${nonceStr}\n${pkg}\n`;
+  const paySign = crypto.sign('RSA-SHA256', Buffer.from(message), w.keyPem).toString('base64');
+  return { appId, timeStamp, nonceStr, package: pkg, signType: 'RSA', paySign };
 }
 
 // ---------- 平台证书（用于回调验签）：/v3/certificates 获取，AES-256-GCM 解密，按天缓存 ----------
@@ -217,6 +264,7 @@ function markOrderPaid(DATA_DIR, orderId, extra) {
   const CONSOLE_DIR = path.join(DATA_DIR, 'console');
   const USERS_FILE = path.join(CONSOLE_DIR, 'users.json');
   const ORDERS_FILE = path.join(CONSOLE_DIR, 'orders.json');
+  const PURCHASES_FILE = path.join(CONSOLE_DIR, 'purchases.json');
   const CREDIT_LOG = path.join(DATA_DIR, 'ai', 'credit-log.json');
   const loadJSON = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
   const saveJSON = (f, rows) => { const t = f + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, f); };
@@ -231,6 +279,27 @@ function markOrderPaid(DATA_DIR, orderId, extra) {
   o.paidAt = (extra && extra.paidAt) || new Date().toISOString();
   if (extra && extra.channel) o.channel = extra.channel;
   if (extra && extra.transactionId) o.transactionId = extra.transactionId;
+
+  // 单张素材购买：授予该用户这张素材的永久下载权益，不改会员等级
+  if (o.materialId) {
+    const purchases = loadJSON(PURCHASES_FILE, []);
+    if (!purchases.some(p => p.userId === o.userId && p.materialId === o.materialId)) {
+      purchases.push({
+        userId: o.userId,
+        materialId: o.materialId,
+        materialTitle: o.materialTitle || '',
+        orderId: o.id,
+        amount: o.amount,
+        channel: o.channel || '',
+        paidAt: o.paidAt,
+        refundConsent: !!o.refundConsent,
+        refundConsentAt: o.refundConsentAt || null,
+      });
+      saveJSON(PURCHASES_FILE, purchases);
+    }
+    saveJSON(ORDERS_FILE, orders);
+    return { order: o, already: false };
+  }
 
   const PLAN_NAMES = { basic: '青果会员', pro: '红果会员', team: '金果会员' };
   const u = users.find(x => x.id === o.userId);
@@ -265,9 +334,16 @@ module.exports = function registerPay(app, deps) {
   const CREDIT_ORDERS_FILE = path.join(DATA_DIR, 'ai', 'credit-orders.json');
   const CREDIT_LOG = path.join(DATA_DIR, 'ai', 'credit-log.json');
   const CERTS_CACHE = path.join(CONSOLE_DIR, 'wx-platform-certs.json');
+  const MATERIALS_FILE = path.join(CONSOLE_DIR, 'materials.json');
   const loadJSON = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
   const saveJSON = (f, rows) => { const t = f + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, f); };
   const log = (msg) => { if (logLine) logLine('pay', msg); else console.log('[pay]', msg); };
+  const findMaterial = (id) => {
+    for (const s of loadJSON(MATERIALS_FILE, [])) {
+      for (const m of s.materials || []) if (m.id === id) return { s, m };
+    }
+    return null;
+  };
 
   // 待支付订单有效期：超期显示「已失效」，不可再支付，可一键清空（2026-10-17）
   // 2026-10-18 收紧：与渠道侧硬对齐 —— 支付宝下单带 timeout_express=24h（超时支付宝自动关单），
@@ -299,18 +375,29 @@ module.exports = function registerPay(app, deps) {
   let cfg = loadConfig();
   const wxEnabled = () => !!cfg.wechat;
 
-  // 支付能力探测：前端据此决定显示哪些扫码通道 / 人工转账
+  // 支付能力探测：前端据此决定显示哪些扫码通道 / 微信内 JSAPI / H5 / 人工转账
   app.get('/api/pay/config', (req, res) => {
     cfg = loadConfig();
-    res.json({ ok: true, wechatNative: !!cfg.wechat, alipay: !!cfg.alipay });
+    res.json({
+      ok: true,
+      wechatNative: !!cfg.wechat,
+      wechatJsapi: !!(cfg.wechat && cfg.wechat.appSecret),
+      wechatH5: !!(cfg.wechat && cfg.wechat.h5Enabled),
+      wechatJsapiAppid: cfg.wechat ? (cfg.wechat.jsapiAppid || cfg.wechat.appid) : '',
+      alipay: !!cfg.alipay,
+      singlePrice: SINGLE_PRICE,
+    });
   });
 
   // 下单辅助：复用同档位待支付订单；有"人工确认中"的订单则拒绝重复下单
   // amount 可覆盖（升级差价），缺省 = 档位标价；reused=true 表示复用了已有待支付订单
-  function findOrCreateOrder(req, plan, channel, amount) {
+  // 同一笔待支付订单只能复用于同一种支付方式：Native/JSAPI/H5/支付宝的 out_trade_no 不能混用
+  const sameTradeType = (o, tradeType) => o.tradeType ? o.tradeType === tradeType : (tradeType === 'native' && !!o.codeUrl);
+
+  function findOrCreateOrder(req, plan, channel, amount, tradeType) {
     const orders = loadJSON(ORDERS_FILE, []);
     markStaleExpired(orders, req).forEach(closeWxPrepay);
-    let order = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'pending');
+    let order = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'pending' && sameTradeType(o, tradeType));
     const reused = !!order;
     if (!order) {
       const notified = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'notified');
@@ -320,6 +407,43 @@ module.exports = function registerPay(app, deps) {
     }
     order.outTradeNo = order.id.replace(/-/g, ''); // 微信要求 ≤32 位：UUID 去横线正好 32 位；支付宝同样兼容
     order.payChannel = channel;
+    order.tradeType = tradeType;
+    saveJSON(ORDERS_FILE, orders);
+    return { order, reused };
+  }
+
+  // 单张素材订单：复用同一用户+素材的待支付订单；必须勾选“虚拟商品不支持无理由退款”
+  function findOrCreateSingleOrder(req, target, channel, body, tradeType) {
+    if (!body || body.refundConsent !== true) {
+      return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
+    }
+    const orders = loadJSON(ORDERS_FILE, []);
+    markStaleExpired(orders, req).forEach(closeWxPrepay);
+    let order = orders.find(o => o.userId === req.user.id && o.materialId === target.materialId && o.status === 'pending' && sameTradeType(o, tradeType));
+    const reused = !!order;
+    if (!order) {
+      const notified = orders.find(o => o.userId === req.user.id && o.materialId === target.materialId && o.status === 'notified');
+      if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
+      order = {
+        id: crypto.randomUUID(),
+        userId: req.user.id,
+        userName: req.user.name,
+        kind: 'single',
+        materialId: target.materialId,
+        materialTitle: target.materialTitle || '',
+        amount: SINGLE_PRICE,
+        status: 'pending',
+        channel,
+        createdAt: new Date().toISOString(),
+        paidAt: null,
+        refundConsent: true,
+        refundConsentAt: new Date().toISOString(),
+      };
+      orders.push(order);
+    }
+    order.outTradeNo = order.id.replace(/-/g, '');
+    order.payChannel = channel;
+    order.tradeType = tradeType;
     saveJSON(ORDERS_FILE, orders);
     return { order, reused };
   }
@@ -345,10 +469,10 @@ module.exports = function registerPay(app, deps) {
   const saveCO = rows => saveJSON(CREDIT_ORDERS_FILE, rows);
 
   // 积分订单下单辅助：复用同套餐待支付订单；有人工确认中的订单则拒绝重复下单
-  function findOrCreateCreditOrder(req, pkgId, channel) {
+  function findOrCreateCreditOrder(req, pkgId, channel, tradeType) {
     const cos = loadCO();
     markStaleExpired(cos, req).forEach(closeWxPrepay);
-    let order = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'pending');
+    let order = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'pending' && sameTradeType(o, tradeType));
     const reused = !!order;
     if (!order) {
       const notified = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'notified');
@@ -359,6 +483,7 @@ module.exports = function registerPay(app, deps) {
     }
     order.outTradeNo = order.id.replace(/-/g, '');
     order.payChannel = channel;
+    order.tradeType = tradeType;
     saveCO(cos);
     return { order, reused };
   }
@@ -400,6 +525,12 @@ module.exports = function registerPay(app, deps) {
 
   // 下单入参解析：plan（会员）或 creditPkg（积分套餐）二选一
   function resolveOrderTarget(body) {
+    const materialId = String((body || {}).materialId || '');
+    if (materialId) {
+      const hit = findMaterial(materialId);
+      if (!hit) return { error: '素材不存在' };
+      return { materialId, materialTitle: hit.m.title || '', materialSeries: hit.m.series || hit.s.folder || '' };
+    }
     const plan = String((body || {}).plan || '');
     const creditPkg = String((body || {}).creditPkg || '');
     if (creditPkg) {
@@ -411,9 +542,10 @@ module.exports = function registerPay(app, deps) {
     return { plan };
   }
 
-  function findOrCreateByTarget(req, target, channel, amount) {
-    if (target.creditPkg) return findOrCreateCreditOrder(req, target.creditPkg, channel);
-    return findOrCreateOrder(req, target.plan, channel, amount);
+  function findOrCreateByTarget(req, target, channel, amount, body, tradeType) {
+    if (target.materialId) return findOrCreateSingleOrder(req, target, channel, body, tradeType);
+    if (target.creditPkg) return findOrCreateCreditOrder(req, target.creditPkg, channel, tradeType);
+    return findOrCreateOrder(req, target.plan, channel, amount, tradeType);
   }
 
   // 按订单类型持久化（保存 codeUrl 等附加字段时用）
@@ -424,8 +556,17 @@ module.exports = function registerPay(app, deps) {
 
   // 订单标题/商品描述
   function orderSubject(target, order) {
+    if (target.materialId) {
+      const title = target.materialTitle || order.materialTitle || '';
+      return ('无花有果-单张素材-' + title).slice(0, 30);
+    }
     if (target.creditPkg) return `无花有果-${order.credits}积分`;
     return '无花有果-' + PLANS[target.plan].name;
+  }
+  function targetLabel(target) {
+    if (target.materialId) return 'material=' + target.materialId;
+    if (target.creditPkg) return 'pkg=' + target.creditPkg;
+    return 'plan=' + target.plan;
   }
 
   // 微信 Native 下单：返回 code_url 供前端生成二维码（plan=会员 或 creditPkg=积分套餐）
@@ -442,7 +583,7 @@ module.exports = function registerPay(app, deps) {
       payAmount = g.amount;
     }
 
-    const { order, error, reused } = findOrCreateByTarget(req, target, '微信支付', payAmount);
+    const { order, error, reused } = findOrCreateByTarget(req, target, '微信支付', payAmount, req.body, 'native');
     if (error) return res.status(409).json({ ok: false, error });
 
     // 复用待支付订单：二维码仍在有效期（约 2 小时）直接返回旧码；已过期先关旧预支付单再换新码
@@ -469,7 +610,7 @@ module.exports = function registerPay(app, deps) {
         log(`native下单失败 order=${order.id} http=${r.status} body=${(r.text || '').slice(0, 300)}`);
         return res.status(502).json({ ok: false, error: '微信支付下单失败，请稍后再试或使用转账方式' });
       }
-      log(`native下单成功 order=${order.id} ${target.creditPkg ? 'pkg=' + target.creditPkg : 'plan=' + target.plan} amount=${order.amount}`);
+      log(`native下单成功 order=${order.id} ${targetLabel(target)} amount=${order.amount}`);
       order.codeUrl = r.json.code_url; // 存下来：有效期内重新发起直接复用，不重复调微信
       order.codeUrlAt = new Date().toISOString();
       persistOrder(target, order);
@@ -477,6 +618,117 @@ module.exports = function registerPay(app, deps) {
     } catch (e) {
       log(`native下单异常 order=${order.id} err=${e.message}`);
       res.status(502).json({ ok: false, error: '微信支付下单失败，请稍后再试或使用转账方式' });
+    }
+  });
+
+  // 微信 JSAPI 下单（微信内置浏览器）：前端先走公众号网页授权拿 code，后端换 openid 后下单并签名
+  app.post('/api/pay/wechat/jsapi', authUser, async (req, res) => {
+    cfg = loadConfig();
+    const w = cfg.wechat;
+    if (!w) return res.status(503).json({ ok: false, error: '微信支付暂未开通' });
+    if (!w.appSecret) return res.status(503).json({ ok: false, error: '公众号 AppSecret 未配置，微信内支付暂不可用' });
+    const target = resolveOrderTarget(req.body);
+    if (target.error) return res.status(400).json({ ok: false, error: target.error });
+    let payAmount = null;
+    if (target.plan) {
+      const g = planPurchaseGuard(req, target.plan);
+      if (g.error) return res.status(409).json({ ok: false, error: g.error });
+      payAmount = g.amount;
+    }
+    let openid;
+    try { openid = (await getWechatOpenid(w, String((req.body || {}).code || ''))).openid; }
+    catch (e) {
+      log(`JSAPI 授权换 openid 失败 err=${e.message}`);
+      return res.status(400).json({ ok: false, error: '微信授权失败，请返回重试（' + e.message + '）' });
+    }
+
+    const { order, error, reused } = findOrCreateByTarget(req, target, '微信支付', payAmount, req.body, 'jsapi');
+    if (error) return res.status(409).json({ ok: false, error });
+    if (reused && order.prepayId) {
+      const age = Date.now() - Date.parse(order.prepayAt || order.createdAt);
+      if (age < 110 * 60 * 1000) {
+        return res.json({ ok: true, order, payParams: jsapiPayParams(w, order.prepayId), reused: true });
+      }
+      try { await wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${order.outTradeNo}/close`, { mchid: w.mchid }); } catch {}
+    }
+
+    try {
+      const r = await wxRequest(w, 'POST', '/v3/pay/transactions/jsapi', {
+        appid: w.jsapiAppid || w.appid,
+        mchid: w.mchid,
+        description: orderSubject(target, order),
+        out_trade_no: order.outTradeNo,
+        notify_url: w.notifyUrl,
+        attach: order.id,
+        amount: { total: Math.round(order.amount * 100), currency: 'CNY' },
+        payer: { openid },
+      });
+      if (r.status !== 200 || !r.json || !r.json.prepay_id) {
+        log(`JSAPI下单失败 order=${order.id} http=${r.status} body=${(r.text || '').slice(0, 300)}`);
+        return res.status(502).json({ ok: false, error: '微信支付下单失败，请稍后再试' });
+      }
+      order.prepayId = r.json.prepay_id;
+      order.prepayAt = new Date().toISOString();
+      order.openid = openid;
+      persistOrder(target, order);
+      log(`JSAPI下单成功 order=${order.id} ${targetLabel(target)} amount=${order.amount}`);
+      res.json({ ok: true, order, payParams: jsapiPayParams(w, order.prepayId) });
+    } catch (e) {
+      log(`JSAPI下单异常 order=${order.id} err=${e.message}`);
+      res.status(502).json({ ok: false, error: '微信支付下单失败，请稍后再试' });
+    }
+  });
+
+  // 微信 H5（MWEB）下单：手机浏览器（微信外）使用，返回 h5_url 由前端跳转
+  app.post('/api/pay/wechat/h5', authUser, async (req, res) => {
+    cfg = loadConfig();
+    const w = cfg.wechat;
+    if (!w) return res.status(503).json({ ok: false, error: '微信支付暂未开通' });
+    if (!w.h5Enabled) return res.status(503).json({ ok: false, error: '微信 H5 支付暂未开通，请使用微信内支付或支付宝' });
+    const target = resolveOrderTarget(req.body);
+    if (target.error) return res.status(400).json({ ok: false, error: target.error });
+    let payAmount = null;
+    if (target.plan) {
+      const g = planPurchaseGuard(req, target.plan);
+      if (g.error) return res.status(409).json({ ok: false, error: g.error });
+      payAmount = g.amount;
+    }
+
+    const { order, error, reused } = findOrCreateByTarget(req, target, '微信支付', payAmount, req.body, 'h5');
+    if (error) return res.status(409).json({ ok: false, error });
+    if (reused && order.mwebUrl) {
+      const age = Date.now() - Date.parse(order.mwebAt || order.createdAt);
+      if (age < 5 * 60 * 1000) return res.json({ ok: true, order, h5Url: order.mwebUrl, reused: true });
+      try { await wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${order.outTradeNo}/close`, { mchid: w.mchid }); } catch {}
+    }
+
+    try {
+      const ip = String(req.ip || '').replace(/^::ffff:/, '') || '47.98.165.254';
+      const r = await wxRequest(w, 'POST', '/v3/pay/transactions/h5', {
+        appid: w.appid,
+        mchid: w.mchid,
+        description: orderSubject(target, order),
+        out_trade_no: order.outTradeNo,
+        notify_url: w.notifyUrl,
+        attach: order.id,
+        amount: { total: Math.round(order.amount * 100), currency: 'CNY' },
+        scene_info: {
+          payer_client_ip: ip,
+          h5_info: { type: 'Wap', app_name: 'OneFig', app_url: 'https://onefig.cn' },
+        },
+      });
+      if (r.status !== 200 || !r.json || !r.json.h5_url) {
+        log(`H5下单失败 order=${order.id} http=${r.status} body=${(r.text || '').slice(0, 300)}`);
+        return res.status(502).json({ ok: false, error: '微信支付下单失败，请稍后再试' });
+      }
+      order.mwebUrl = r.json.h5_url;
+      order.mwebAt = new Date().toISOString();
+      persistOrder(target, order);
+      log(`H5下单成功 order=${order.id} ${targetLabel(target)} amount=${order.amount}`);
+      res.json({ ok: true, order, h5Url: order.mwebUrl });
+    } catch (e) {
+      log(`H5下单异常 order=${order.id} err=${e.message}`);
+      res.status(502).json({ ok: false, error: '微信支付下单失败，请稍后再试' });
     }
   });
 
@@ -550,7 +802,7 @@ module.exports = function registerPay(app, deps) {
       payAmount = g.amount;
     }
 
-    const { order, error } = findOrCreateByTarget(req, target, '支付宝', payAmount);
+    const { order, error } = findOrCreateByTarget(req, target, '支付宝', payAmount, req.body, 'alipay');
     if (error) return res.status(409).json({ ok: false, error });
 
     const payUrl = alipayPageUrl(a, 'alipay.trade.page.pay', {
@@ -637,7 +889,7 @@ module.exports = function registerPay(app, deps) {
         } catch (e) { log(`查单异常 order=${o.id} err=${e.message}`); }
       }
     }
-    res.json({ ok: true, status: o.status, plan: o.plan || null, credits: o.credits || null, paidAt: o.paidAt || null });
+    res.json({ ok: true, status: o.status, plan: o.plan || null, credits: o.credits || null, materialId: o.materialId || null, kind: o.materialId ? 'single' : (o.creditPkg ? 'credit' : 'plan'), paidAt: o.paidAt || null });
   });
 
   // 一键清空当前用户的已失效待支付订单（会员订单 + 积分订单，2026-10-17）
@@ -658,4 +910,4 @@ module.exports = function registerPay(app, deps) {
 
 module.exports.markOrderPaid = markOrderPaid;
 // 仅供测试脚本使用
-module.exports._internal = { aes256gcmDecrypt, verifyNotifySignature, loadConfig, wxSign, alipaySign, alipayVerify, alipaySignStr };
+module.exports._internal = { aes256gcmDecrypt, verifyNotifySignature, loadConfig, wxSign, alipaySign, alipayVerify, alipaySignStr, jsapiPayParams, getWechatOpenid, SINGLE_PRICE };
