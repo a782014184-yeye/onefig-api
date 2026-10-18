@@ -44,10 +44,11 @@ module.exports = function registerSeo(app, deps) {
     .foot{text-align:center;font-size:12px;color:#b0aac4;padding:20px;border-top:1px solid #efeafb;background:#fff}
     @media(max-width:640px){.hero img{width:100%}}
   `;
-  const head = (title, desc, img, jsonld) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+  const head = (title, desc, img, jsonld, canonical) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
 <meta name="description" content="${esc(desc)}">
+${canonical ? `<link rel="canonical" href="${esc(canonical)}">` : ''}
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="${SITE_NAME}">
 <meta property="og:title" content="${esc(title)}">
@@ -62,12 +63,19 @@ ${jsonld ? `<script type="application/ld+json">${jsonld}</script>` : ''}
   app.get('/sitemap.xml', (req, res) => {
     const series = loadSeries();
     const today = new Date().toISOString().slice(0, 10);
+    // 静态公开页一律带尾斜杠（issue-03：无斜杠会 301，sitemap 必须直达 200 的最终地址）
     const urls = [
       { loc: '/', priority: '1.0', lastmod: today },
-      { loc: '/materials', priority: '0.9', lastmod: today },
-      { loc: '/pricing', priority: '0.6' },
-      { loc: '/ai', priority: '0.6' },
-      { loc: '/request', priority: '0.5' },
+      { loc: '/materials/', priority: '0.9', lastmod: today },
+      { loc: '/pricing/', priority: '0.6' },
+      { loc: '/ai/', priority: '0.6' },
+      { loc: '/request/', priority: '0.5' },
+      { loc: '/custom/', priority: '0.5' },
+      { loc: '/verify/', priority: '0.4' },
+      { loc: '/terms/', priority: '0.3' },
+      { loc: '/privacy/', priority: '0.3' },
+      { loc: '/license/', priority: '0.3' },
+      { loc: '/certificate/', priority: '0.3' },
     ];
     series.forEach(s => {
       const lastmod = s.materials.map(m => m.createdAt).sort().pop() || today;
@@ -100,7 +108,7 @@ ${jsonld ? `<script type="application/ld+json">${jsonld}</script>` : ''}
       creator: { '@type': 'Organization', name: SITE_NAME },
     });
     const related = sd.materials.filter(x => x.title !== m.title).slice(0, 8);
-    res.send(head(pageTitle, desc, img, jsonld) + topbar + `<div class="wrap">
+    res.send(head(pageTitle, desc, img, jsonld, SITE + matPath(m)) + topbar + `<div class="wrap">
 <div class="crumb"><a href="/">首页</a> › <a href="/materials">素材库</a> › <a href="${seriesPath(m.series)}">${esc(m.series)}</a> › ${esc(m.title)}</div>
 <div class="card"><div class="hero">
   <img src="${img}" alt="${esc(m.title)} - ${esc(m.series)}科研绘图素材">
@@ -131,7 +139,7 @@ ${related.length ? `<h2>同系列素材</h2><div class="grid">` + related.map(x 
       name: sd.folder, description: desc,
       isPartOf: { '@type': 'WebSite', name: SITE_NAME, url: SITE },
     });
-    res.send(head(pageTitle, desc, sd.materials[0] ? previewUrl(sd.folder, sd.materials[0].file) : null, jsonld) + topbar + `<div class="wrap">
+    res.send(head(pageTitle, desc, sd.materials[0] ? previewUrl(sd.folder, sd.materials[0].file) : null, jsonld, SITE + seriesPath(sd.folder)) + topbar + `<div class="wrap">
 <div class="crumb"><a href="/">首页</a> › <a href="/materials">素材库</a> › ${esc(sd.folder)}</div>
 <h1>${esc(sd.folder)}</h1>
 <p class="desc">本系列共收录 ${sd.materials.length} 张高清素材，包括${esc(names)}等。全部素材支持会员下载、单张购买、在线画板编辑与 AI 处理，适用于论文配图、课题汇报与科普设计。</p>
