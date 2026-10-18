@@ -293,7 +293,12 @@ module.exports = function registerConsole(app, deps) {
     const users = load('users.json', []);
     const u = users.find(x => x.id === req.params.id);
     if (!u) return res.status(404).json({ ok: false });
-    const { level, notes } = req.body || {};
+    const { level, notes, resetQuota } = req.body || {};
+    if (resetQuota) {
+      // 测试工具：重置本月下载额度（dlMonth 清空后，下次下载按当月重新计数）
+      u.dlUsed = 0;
+      u.dlMonth = '';
+    }
     if (level !== undefined) {
       if (level !== 'none' && !PLANS[level]) return res.status(400).json({ ok: false, error: '无效的会员等级' });
       const from = u.level || 'none';
@@ -307,6 +312,14 @@ module.exports = function registerConsole(app, deps) {
     if (notes !== undefined) u.notes = String(notes).slice(0, 500);
     save('users.json', users);
     res.json({ ok: true });
+  });
+
+  // 测试工具：清空某账号的单张购买记录（只动 purchases.json，不影响会员等级与订单流水）
+  app.delete('/console/api/users/:id/purchases', consoleAuth, (req, res) => {
+    const rows = load('purchases.json', []);
+    const kept = rows.filter(p => p.userId !== req.params.id);
+    save('purchases.json', kept);
+    res.json({ ok: true, removed: rows.length - kept.length });
   });
 
   app.post('/console/api/orders', consoleAuth, (req, res) => {
@@ -922,6 +935,8 @@ window.creditLogModal=async()=>{const d=await api('/console/api/credit-log').cat
   showModal('<h3>⚡ 积分流水（最近 200 条）</h3><div style="max-height:320px;overflow:auto"><table><tr><th>时间</th><th>用户</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+rows+'</table></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>')};
 window.setLevel=async(id,level)=>{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({level})});toast('已修改 ✅')};
 window.adjCredits=async(id)=>{const delta=parseInt(document.getElementById('m-delta').value,10);if(!delta)return toast('填写调整数量');try{await api('/console/api/users/'+id+'/credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({delta,reason:document.getElementById('m-reason').value.trim()})});toast('已调整 ✅');userDetail(id)}catch(e){toast(e.message)}};
+window.resetQuota=async(id)=>{if(!confirm('把该账号本月下载额度重置为未使用？（测试用）'))return;try{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({resetQuota:true})});toast('本月额度已重置 ✅');userDetail(id)}catch(e){toast(e.message)}};
+window.clearPurchases=async(id)=>{if(!confirm('清空该账号的全部单张购买记录？不影响会员等级与订单流水（测试用）'))return;try{const r=await api('/console/api/users/'+id+'/purchases',{method:'DELETE'});toast('已清空 '+r.removed+' 条 ✅');userDetail(id)}catch(e){toast(e.message)}};
 window.dtShow=n=>{[1,2,3,4,5].forEach(i=>{document.getElementById('dt-p'+i).style.display=i===n?'block':'none';document.getElementById('dt-b'+i).className='btn btn-xs '+(i===n?'btn-p':'btn-g')})};
 window.userDetail=async(id)=>{
   const d=await api('/console/api/users/'+id);
@@ -957,8 +972,9 @@ window.userDetail=async(id)=>{
       return '<tr><td>'+fmtT(o.createdAt)+'</td><td><b>'+(o.credits||0)+'</b> 积分</td><td>'+yuan(o.amount)+'</td><td style="color:'+stClr+';font-weight:600">'+stTxt+(o.channel?' · '+esc(o.channel):'')+'</td><td style="font-size:11px;color:#8b84a3">'+(o.transactionId?esc(String(o.transactionId)):'—')+'</td></tr>'}).join('')
     :'<tr><td colspan="5" style="text-align:center;color:#b0aac4;padding:14px">暂无积分订单</td></tr>';
   showModal('<h3>👤 '+esc(d.user.name)+'</h3>\
-  <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\
+  <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 本月已下 '+(d.user.dlUsed||0)+' 张 · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\
   <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center"><input id="m-delta" type="number" placeholder="积分调整，如 5 或 -3" style="flex:1"><input id="m-reason" placeholder="原因（选填）" style="flex:2"><button class="btn btn-g btn-xs" onclick="adjCredits(\\''+d.user.id+'\\')">调整</button></div>\
+  <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap"><button class="btn btn-g btn-xs" onclick="resetQuota(\\''+d.user.id+'\\')">🧪 重置本月下载额度</button><button class="btn btn-g btn-xs" onclick="clearPurchases(\\''+d.user.id+'\\')">🧪 清空单张购买记录</button></div>\
   <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap"><button class="btn btn-xs btn-p" id="dt-b1" onclick="dtShow(1)">⚡ 积分变动记录</button><button class="btn btn-xs btn-g" id="dt-b2" onclick="dtShow(2)">📜 会员变更记录</button><button class="btn btn-xs btn-g" id="dt-b3" onclick="dtShow(3)">🎨 画板与分享</button><button class="btn btn-xs btn-g" id="dt-b4" onclick="dtShow(4)">⬇️ 下载历史</button><button class="btn btn-xs btn-g" id="dt-b5" onclick="dtShow(5)">🧾 积分订单</button></div>\
   <div id="dt-p1" style="max-height:200px;overflow:auto"><table><tr><th>时间</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+coRows+'</table></div>\
   <div id="dt-p2" style="display:none;max-height:200px;overflow:auto"><table><tr><th>时间</th><th>变更</th><th>操作者</th></tr>'+lvRows+'</table></div>\
