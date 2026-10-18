@@ -394,7 +394,11 @@ module.exports = function registerPay(app, deps) {
   // 同一笔待支付订单只能复用于同一种支付方式：Native/JSAPI/H5/支付宝的 out_trade_no 不能混用
   const sameTradeType = (o, tradeType) => o.tradeType ? o.tradeType === tradeType : (tradeType === 'native' && !!o.codeUrl);
 
-  function findOrCreateOrder(req, plan, channel, amount, tradeType) {
+  function findOrCreateOrder(req, plan, channel, amount, tradeType, body) {
+    // E11/O05（2026-10-18）：会员订单与单张订单同样必须勾选"不支持无理由退款"并留痕
+    if (!body || body.refundConsent !== true) {
+      return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
+    }
     const orders = loadJSON(ORDERS_FILE, []);
     markStaleExpired(orders, req).forEach(closeWxPrepay);
     let order = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'pending' && sameTradeType(o, tradeType));
@@ -402,7 +406,7 @@ module.exports = function registerPay(app, deps) {
     if (!order) {
       const notified = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'notified');
       if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
-      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: amount != null ? amount : PLANS[plan].price, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null };
+      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: amount != null ? amount : PLANS[plan].price, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null, refundConsent: true, refundConsentAt: new Date().toISOString() };
       orders.push(order);
     }
     order.outTradeNo = order.id.replace(/-/g, ''); // 微信要求 ≤32 位：UUID 去横线正好 32 位；支付宝同样兼容
@@ -545,7 +549,7 @@ module.exports = function registerPay(app, deps) {
   function findOrCreateByTarget(req, target, channel, amount, body, tradeType) {
     if (target.materialId) return findOrCreateSingleOrder(req, target, channel, body, tradeType);
     if (target.creditPkg) return findOrCreateCreditOrder(req, target.creditPkg, channel, tradeType);
-    return findOrCreateOrder(req, target.plan, channel, amount, tradeType);
+    return findOrCreateOrder(req, target.plan, channel, amount, tradeType, body);
   }
 
   // 按订单类型持久化（保存 codeUrl 等附加字段时用）
