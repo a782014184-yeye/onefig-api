@@ -550,6 +550,43 @@ app.post('/api/track-download', trackRateLimit, (req, res) => {
 // 会员下载原图：校验登录 + 会员/额度，记流水，返回文件（优先服务器原图，否则跳转 OSS 预览图）
 const ORIG_DIR = path.join(DATA_DIR, 'originals');
 const DOWNLOADS_FILE = path.join(CONSOLE_DIR, 'downloads.json');
+// 会员干净预览（2026-10-19）：付费会员/已购单张的用户在画板中加载无水印预览图
+// 图片标签不能带请求头，故接受 ?tk= 查询令牌（与 Bearer 同一校验；access log 会留查询串，已知晓）
+function validateToken(tk) {
+  if (!tk) return null;
+  const [p, s] = String(tk).split('.');
+  if (!p || sign(p) !== s) return null;
+  let d; try { d = JSON.parse(Buffer.from(p, 'base64url').toString()); } catch { return null; }
+  if (d.exp < Date.now()) return null;
+  const u = loadUsers().find(x => x.id === d.uid);
+  if (!u || (d.pv || 0) !== (u.pwdVer || 0)) return null;
+  return u;
+}
+app.get('/api/clean-preview/:series/:title', (req, res) => {
+  try {
+    const tk = (req.headers.authorization || '').replace(/^Bearer /, '') || String(req.query.tk || '');
+    const u = validateToken(tk);
+    if (!u) return res.status(401).json({ ok: false, error: '请先登录' });
+    const series = String(req.params.series || '');
+    const title = String(req.params.title || '');
+    if (!series || !title || series.includes('..') || title.includes('..') || series.includes('/') || title.includes('/')) {
+      return res.status(400).json({ ok: false, error: '参数无效' });
+    }
+    // 权益：任一付费会员等级，或普通账户已单张购买该素材
+    const id = `${series}/${title}`;
+    const levelOk = ['basic', 'pro', 'team'].includes(u.level || 'none');
+    const purchased = !levelOk && loadJSON(PURCHASES_FILE, []).some(p => p.userId === u.id && p.materialId === id);
+    if (!levelOk && !purchased) return res.status(403).json({ ok: false, error: 'no-plan' });
+    const file = path.join(DATA_DIR, 'clean-previews', series, title + '.webp');
+    if (!fs.existsSync(file)) return res.status(404).json({ ok: false, error: '素材不存在' });
+    res.setHeader('Content-Type', 'image/webp');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    fs.createReadStream(file).pipe(res);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: '读取失败' });
+  }
+});
+
 const BASIC_MONTHLY_LIMIT = 5;
 // 画板导出额度（2026-10-19 定价改版）：青果 5 次/月、红果 10 次/月、金果不限；
 // 普通账户无月度额度，靠单次购买（exportCredits，¥6.9/次，用一次扣一次）
