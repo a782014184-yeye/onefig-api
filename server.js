@@ -572,11 +572,8 @@ app.get('/api/clean-preview/:series/:title', (req, res) => {
     if (!series || !title || series.includes('..') || title.includes('..') || series.includes('/') || title.includes('/')) {
       return res.status(400).json({ ok: false, error: '参数无效' });
     }
-    // 权益：任一付费会员等级，或普通账户已单张购买该素材
-    const id = `${series}/${title}`;
-    const levelOk = ['basic', 'pro', 'team'].includes(u.level || 'none');
-    const purchased = !levelOk && loadJSON(PURCHASES_FILE, []).some(p => p.userId === u.id && p.materialId === id);
-    if (!levelOk && !purchased) return res.status(403).json({ ok: false, error: 'no-plan' });
+    // 2026-10-19 定稿：任何登录用户都可在画板使用干净预览（元素不再带水印）；
+    // 导出硬墙与 300dpi 原图付费墙不变——防的是结果物而非作图过程
     const file = path.join(DATA_DIR, 'clean-previews', series, title + '.webp');
     if (!fs.existsSync(file)) return res.status(404).json({ ok: false, error: '素材不存在' });
     res.setHeader('Content-Type', 'image/webp');
