@@ -6,7 +6,10 @@
     "apiV3Key": "32位APIv3密钥",
     "certFile": "secrets/apiclient_cert.pem",
     "keyFile": "secrets/apiclient_key.pem",
-    "notifyUrl": "https://onefig.cn/api/pay/wechat/notify"
+    "notifyUrl": "https://onefig.cn/api/pay/wechat/notify",
+    "pubKeyFile": "secrets/wx-pay-pubkey.pem  （公钥模式商户必填：商户平台「账户中心→API安全→微信支付公钥」下载）",
+    "pubKeyId": "PUB_KEY_ID_开头的公钥ID（公钥模式必填）",
+    "jsapiEnabled": true
   },
   "alipay": {
     "enabled": false,

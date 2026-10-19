@@ -45,7 +45,10 @@ function loadConfig() {
           try { serialNo = new crypto.X509Certificate(certPem).serialNumber.replace(/:/g, '').toUpperCase(); }
           catch (e) { console.warn('[pay] 读取证书序列号失败：' + e.message); }
         }
-        out.wechat = { appid: w.appid, mchid: w.mchid, apiV3Key: w.apiV3Key, notifyUrl: w.notifyUrl, appSecret: w.appSecret || '', jsapiAppid: w.jsapiAppid || w.appid, jsapiEnabled: w.jsapiEnabled !== false, h5Enabled: !!w.h5Enabled, certPem, keyPem, serialNo };
+        // 微信支付公钥（新商户公钥模式，2026-10-19）：商户平台「API安全→微信支付公钥」下载
+        const pubKeyFile = w.pubKeyFile ? path.resolve(__dirname, w.pubKeyFile) : '';
+        const pubKeyPem = pubKeyFile && fs.existsSync(pubKeyFile) ? fs.readFileSync(pubKeyFile, 'utf8') : '';
+        out.wechat = { appid: w.appid, mchid: w.mchid, apiV3Key: w.apiV3Key, notifyUrl: w.notifyUrl, appSecret: w.appSecret || '', jsapiAppid: w.jsapiAppid || w.appid, jsapiEnabled: w.jsapiEnabled !== false, h5Enabled: !!w.h5Enabled, pubKeyId: w.pubKeyId || '', pubKeyPem, certPem, keyPem, serialNo };
       }
     }
 
@@ -243,14 +246,17 @@ function alipayApiCall(a, method, bizContent) {
 }
 
 // ---------- 回调验签：Wechatpay-Signature = RSA-SHA256(timestamp\nnonce\nbody\n) ----------
-function verifyNotifySignature(certs, headers, rawBody) {
-  const serial = String(headers['wechatpay-serial'] || '');
+function verifyNotifySignature(certs, headers, rawBody, pubKeyPem) {
   const ts = String(headers['wechatpay-timestamp'] || '');
   const nonce = String(headers['wechatpay-nonce'] || '');
   const sig = String(headers['wechatpay-signature'] || '');
+  // 公钥模式的回调头为 Wechatpay-PublicKey-Id，证书模式为 Wechatpay-Serial
+  const serial = String(headers['wechatpay-serial'] || headers['wechatpay-publickey-id'] || '');
   if (!serial || !ts || !nonce || !sig) return false;
   if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false; // 防重放：5 分钟窗口
-  const pem = certs[serial];
+  // 公钥模式（2024 后新商户，平台不再下发证书，/v3/certificates 返回 RESOURCE_NOT_EXISTS）：
+  // 直接用商户平台下载的「微信支付公钥」验签；老商户仍走平台证书
+  const pem = pubKeyPem || certs[serial];
   if (!pem) return false;
   const message = `${ts}\n${nonce}\n${rawBody}\n`;
   try {
@@ -746,14 +752,19 @@ module.exports = function registerPay(app, deps) {
       const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
       if (!rawBody) return fail(400, '空请求体');
 
-      let certs;
-      try { certs = await getPlatformCerts(w, CERTS_CACHE); }
-      catch (e) { log('平台证书获取失败：' + e.message); return fail(500, '平台证书不可用'); }
-      if (!verifyNotifySignature(certs, req.headers, rawBody)) {
-        // 可能是缓存里没有新证书：强制刷新一次再验
-        try { fs.unlinkSync(CERTS_CACHE); certs = await getPlatformCerts(w, CERTS_CACHE); } catch {}
-        if (!verifyNotifySignature(certs, req.headers, rawBody)) {
-          log(`回调验签失败 ip=${req.ip} serial=${req.headers['wechatpay-serial']}`);
+      let certs = {};
+      // 公钥模式商户无需平台证书（配了 pubKeyPem 就跳过证书获取）
+      if (!w.pubKeyPem) {
+        try { certs = await getPlatformCerts(w, CERTS_CACHE); }
+        catch (e) { log('平台证书获取失败：' + e.message); return fail(500, '平台证书不可用'); }
+      }
+      if (!verifyNotifySignature(certs, req.headers, rawBody, w.pubKeyPem)) {
+        // 证书模式下可能是缓存里没有新证书：强制刷新一次再验
+        if (!w.pubKeyPem) {
+          try { fs.unlinkSync(CERTS_CACHE); certs = await getPlatformCerts(w, CERTS_CACHE); } catch {}
+        }
+        if (!verifyNotifySignature(certs, req.headers, rawBody, w.pubKeyPem)) {
+          log(`回调验签失败 ip=${req.ip} serial=${req.headers['wechatpay-serial'] || req.headers['wechatpay-publickey-id']}`);
           return fail(401, '验签失败');
         }
       }
