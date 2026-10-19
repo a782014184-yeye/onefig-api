@@ -590,16 +590,28 @@ const BASIC_MONTHLY_LIMIT = 5;
 // 普通账户无月度额度，靠单次购买（exportCredits，¥6.9/次，用一次扣一次）
 const EXPORT_MONTHLY = { basic: 5, pro: 10 };
 
-// 导出许可：返回 { ok, watermark } —— watermark=true 表示这次导出带水印（未扣额度/权益的兜底导出）
-// 设计（A 方案软墙）：导出永远可用，无额度/未付费则烘焙水印；付费与额度内导出无水印
+// 导出许可：返回 { ok, watermark, code } —— watermark=true 表示无权益（前端拦截不导出）；
+// 授权成功时生成可追溯授权码（与素材下载同格式 OF-年份-XXXXXX），记入 downloads 流水，/api/verify 可查
 app.post('/api/export/permit', authUser, (req, res) => {
   try {
     const u = req.user;
     const level = u.level || 'none';
     const month = curMonth();
     if (u.exMonth !== month) { u.exMonth = month; u.exUsed = 0; }
+    const grant = () => {
+      const logs = loadJSON(DOWNLOADS_FILE, []);
+      const code = genLicenseCode(logs);
+      const boardTitle = String((req.body || {}).boardTitle || '').slice(0, 80);
+      logs.push({
+        userId: u.id, kind: 'export', materialId: '画板导出作品',
+        boardId: String((req.body || {}).boardId || ''), boardTitle,
+        code, time: new Date().toISOString(), free: false,
+      });
+      saveJSON(DOWNLOADS_FILE, logs);
+      return code;
+    };
     // 金果：不限量
-    if (level === 'team') return res.json({ ok: true, watermark: false });
+    if (level === 'team') return res.json({ ok: true, watermark: false, code: grant() });
     // 青果/红果：月度额度
     const limit = EXPORT_MONTHLY[level];
     if (limit !== undefined) {
@@ -610,10 +622,11 @@ app.post('/api/export/permit', authUser, (req, res) => {
       if ((u.exportCredits || 0) <= 0) return res.json({ ok: true, watermark: true, reason: 'no-plan' });
       u.exportCredits = (u.exportCredits || 0) - 1;
     }
+    const code = grant();
     const users = loadUsers();
     const ui = users.findIndex(x => x.id === u.id);
     if (ui >= 0) { users[ui] = u; saveUsers(users); }
-    res.json({ ok: true, watermark: false });
+    res.json({ ok: true, watermark: false, code });
   } catch (e) {
     res.status(500).json({ ok: false, error: '校验失败，请稍后再试' });
   }
@@ -765,11 +778,13 @@ app.get('/api/verify', optionalAuth, (req, res) => {
       }
       qBy.sort((a, b) => (a.kind === 'author' ? -1 : b.kind === 'author' ? 1 : b.count - a.count));
     } catch {}
+    // 导出授权码记录（2026-10-19）：与素材下载同流水，验真页按 kind 分支展示
+    const isExport = hit.kind === 'export';
     res.json({
       ok: true,
       code,
-      material: mat ? mat.title : hit.materialId,
-      series: mat ? mat.series : '',
+      material: isExport ? ('画板导出作品' + (hit.boardTitle ? '：' + hit.boardTitle : '')) : (mat ? mat.title : hit.materialId),
+      series: isExport ? '画板导出' : (mat ? mat.series : ''),
       licensee,
       qTotal, qBy,
       scope: '学术发表（期刊论文、学术会议、学位论文、学术海报、图文摘要），仅限非商业用途',
