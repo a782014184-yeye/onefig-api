@@ -287,6 +287,17 @@ function markOrderPaid(DATA_DIR, orderId, extra) {
   if (extra && extra.transactionId) o.transactionId = extra.transactionId;
 
   // 单张素材购买：授予该用户这张素材的永久下载权益，不改会员等级
+  if (o.kind === 'export') {
+    // 画板导出单次权益：paid 后 +1 次（导出时经 /api/export/permit 核销）
+    const u = users.find(x => x.id === o.userId);
+    if (u) {
+      u.exportCredits = (u.exportCredits || 0) + 1;
+      saveJSON(USERS_FILE, users);
+    }
+    saveJSON(ORDERS_FILE, orders);
+    return { order: o, already: false };
+  }
+
   if (o.materialId) {
     const purchases = loadJSON(PURCHASES_FILE, []);
     if (!purchases.some(p => p.userId === o.userId && p.materialId === o.materialId)) {
@@ -422,6 +433,41 @@ module.exports = function registerPay(app, deps) {
     return { order, reused };
   }
 
+  // 画板导出单次订单（¥6.9/次，2026-10-19 定价改版）：同一用户可复用待支付单，paid 后 +1 导出权益
+  function findOrCreateExportOrder(req, channel, body, tradeType) {
+    if (!body || body.refundConsent !== true) {
+      return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
+    }
+    const orders = loadJSON(ORDERS_FILE, []);
+    markStaleExpired(orders, req).forEach(closeWxPrepay);
+    let order = orders.find(o => o.userId === req.user.id && o.kind === 'export' && o.status === 'pending' && sameTradeType(o, tradeType));
+    const reused = !!order;
+    if (!order) {
+      const notified = orders.find(o => o.userId === req.user.id && o.kind === 'export' && o.status === 'notified');
+      if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
+      order = {
+        id: crypto.randomUUID(),
+        userId: req.user.id,
+        userName: req.user.name,
+        kind: 'export',
+        materialTitle: '画板导出（单次）',
+        amount: SINGLE_PRICE,
+        status: 'pending',
+        channel,
+        createdAt: new Date().toISOString(),
+        paidAt: null,
+        refundConsent: true,
+        refundConsentAt: new Date().toISOString(),
+      };
+      orders.push(order);
+    }
+    order.outTradeNo = order.id.replace(/-/g, '');
+    order.payChannel = channel;
+    order.tradeType = tradeType;
+    saveJSON(ORDERS_FILE, orders);
+    return { order, reused };
+  }
+
   // 单张素材订单：复用同一用户+素材的待支付订单；必须勾选“虚拟商品不支持无理由退款”
   function findOrCreateSingleOrder(req, target, channel, body, tradeType) {
     if (!body || body.refundConsent !== true) {
@@ -543,6 +589,8 @@ module.exports = function registerPay(app, deps) {
     }
     const plan = String((body || {}).plan || '');
     const creditPkg = String((body || {}).creditPkg || '');
+    // 画板导出单次购买（2026-10-19）
+    if (body && body.exportBoard) return { exportBoard: true };
     if (creditPkg) {
       const pkg = (CREDIT_PACKAGES || []).find(p => p.id === creditPkg);
       if (!pkg) return { error: '无效的积分套餐' };
@@ -554,6 +602,7 @@ module.exports = function registerPay(app, deps) {
 
   function findOrCreateByTarget(req, target, channel, amount, body, tradeType) {
     if (target.materialId) return findOrCreateSingleOrder(req, target, channel, body, tradeType);
+    if (target.exportBoard) return findOrCreateExportOrder(req, channel, body, tradeType);
     if (target.creditPkg) return findOrCreateCreditOrder(req, target.creditPkg, channel, tradeType);
     return findOrCreateOrder(req, target.plan, channel, amount, tradeType, body);
   }
@@ -570,11 +619,13 @@ module.exports = function registerPay(app, deps) {
       const title = target.materialTitle || order.materialTitle || '';
       return ('无花有果-单张素材-' + title).slice(0, 30);
     }
+    if (target.exportBoard) return '无花有果-画板导出单次';
     if (target.creditPkg) return `无花有果-${order.credits}积分`;
     return '无花有果-' + PLANS[target.plan].name;
   }
   function targetLabel(target) {
     if (target.materialId) return 'material=' + target.materialId;
+    if (target.exportBoard) return 'export=board';
     if (target.creditPkg) return 'pkg=' + target.creditPkg;
     return 'plan=' + target.plan;
   }

@@ -551,6 +551,54 @@ app.post('/api/track-download', trackRateLimit, (req, res) => {
 const ORIG_DIR = path.join(DATA_DIR, 'originals');
 const DOWNLOADS_FILE = path.join(CONSOLE_DIR, 'downloads.json');
 const BASIC_MONTHLY_LIMIT = 5;
+// 画板导出额度（2026-10-19 定价改版）：青果 5 次/月、红果 10 次/月、金果不限；
+// 普通账户无月度额度，靠单次购买（exportCredits，¥6.9/次，用一次扣一次）
+const EXPORT_MONTHLY = { basic: 5, pro: 10 };
+
+// 导出许可：返回 { ok, watermark } —— watermark=true 表示这次导出带水印（未扣额度/权益的兜底导出）
+// 设计（A 方案软墙）：导出永远可用，无额度/未付费则烘焙水印；付费与额度内导出无水印
+app.post('/api/export/permit', authUser, (req, res) => {
+  try {
+    const u = req.user;
+    const level = u.level || 'none';
+    const month = curMonth();
+    if (u.exMonth !== month) { u.exMonth = month; u.exUsed = 0; }
+    // 金果：不限量
+    if (level === 'team') return res.json({ ok: true, watermark: false });
+    // 青果/红果：月度额度
+    const limit = EXPORT_MONTHLY[level];
+    if (limit !== undefined) {
+      if ((u.exUsed || 0) >= limit) return res.json({ ok: true, watermark: true, reason: 'quota', limit, used: u.exUsed });
+      u.exUsed = (u.exUsed || 0) + 1;
+    } else {
+      // 普通账户：用单次购买权益
+      if ((u.exportCredits || 0) <= 0) return res.json({ ok: true, watermark: true, reason: 'no-plan' });
+      u.exportCredits = (u.exportCredits || 0) - 1;
+    }
+    const users = loadUsers();
+    const ui = users.findIndex(x => x.id === u.id);
+    if (ui >= 0) { users[ui] = u; saveUsers(users); }
+    res.json({ ok: true, watermark: false });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: '校验失败，请稍后再试' });
+  }
+});
+
+// 导出状态（画板导出按钮的额度显示用）
+app.get('/api/export/status', authUser, (req, res) => {
+  const u = req.user;
+  const level = u.level || 'none';
+  const month = curMonth();
+  const used = u.exMonth === month ? (u.exUsed || 0) : 0;
+  const limit = EXPORT_MONTHLY[level];
+  res.json({
+    ok: true, level,
+    monthly: level === 'team' ? -1 : (limit ?? 0),   // -1 = 不限量
+    used,
+    credits: u.exportCredits || 0,                   // 普通账户单次购买余额
+  });
+});
+
 fs.mkdirSync(ORIG_DIR, { recursive: true });
 function curMonth() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
 
@@ -1233,6 +1281,10 @@ app.post('/api/boards/:id/share', authUser, (req, res) => {
   const meta = idx.boards.find(b => b.id === req.params.id);
   if (!meta) return res.status(404).json({ ok: false, error: '画板不存在' });
   const mode = ['view', 'edit', 'edit_dl'].includes(req.body.mode) ? req.body.mode : 'view';   // edit_dl = 可编辑+可导出（被分享者可导出，2026-10-15）
+  // 协作分享分档（2026-10-19 定价改版）：只读 view 全档可用；可编辑类（edit/edit_dl）需红果/金果
+  if (mode !== 'view' && !['pro', 'team'].includes(req.user.level || 'none')) {
+    return res.status(403).json({ ok: false, error: 'collab-forbidden', message: '协作分享（可编辑）需红果/金果会员' });
+  }
   if (meta.shareToken) {
     if (mode !== (meta.shareMode || 'view')) {   // 切换模式
       meta.shareMode = mode;
