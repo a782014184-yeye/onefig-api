@@ -15,19 +15,21 @@ module.exports = function registerConsole(app, deps) {
   const file = n => path.join(DIR, n);
   const load = (n, d) => { try { return JSON.parse(fs.readFileSync(file(n), 'utf8')); } catch { return d; } };
   const save = (n, rows) => { const t = file(n) + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, file(n)); };
+  // 金额一律按"分"取整（2 位小数），避免 0.1+0.2 类浮点误差进统计
+  const rmb = n => Math.round(Number(n) * 100) / 100;
 
   // ---------- API ----------
   app.get('/console/api/stats', consoleAuth, (req, res) => {
     const users = load('users.json', []);
     const orders = load('orders.json', []).filter(o => o.status === 'paid');
-    const totalRevenue = orders.reduce((s, o) => s + o.amount, 0);
+    const totalRevenue = rmb(orders.reduce((s, o) => s + o.amount, 0));
     const levelCount = { basic: 0, pro: 0, team: 0 };
     users.forEach(u => { if (levelCount[u.level] !== undefined) levelCount[u.level]++; });
     const monthly = {};
     orders.forEach(o => {
       const m = (o.paidAt || '').slice(0, 7) || '未知';
       monthly[m] = monthly[m] || { basic: { n: 0, amt: 0 }, pro: { n: 0, amt: 0 }, team: { n: 0, amt: 0 } };
-      if (monthly[m][o.plan]) { monthly[m][o.plan].n++; monthly[m][o.plan].amt += o.amount; }
+      if (monthly[m][o.plan]) { monthly[m][o.plan].n++; monthly[m][o.plan].amt = rmb(monthly[m][o.plan].amt + o.amount); }
     });
     const days = [];
     const now = new Date();
@@ -37,7 +39,7 @@ module.exports = function registerConsole(app, deps) {
       days.push({
         date: key.slice(5),
         users: users.filter(u => (u.joinedAt || '').slice(0, 10) === key).length,
-        revenue: orders.filter(o => (o.paidAt || '').slice(0, 10) === key).reduce((s, o) => s + o.amount, 0),
+        revenue: rmb(orders.filter(o => (o.paidAt || '').slice(0, 10) === key).reduce((s, o) => s + o.amount, 0)),
       });
     }
     res.json({ ok: true, totalUsers: users.length, online: getOnline(), levelCount, totalRevenue, monthly, days });
@@ -60,7 +62,7 @@ module.exports = function registerConsole(app, deps) {
       out.push({
         date: k.slice(5),
         users: users.filter(u => u.joinedAt && key(u.joinedAt) === k).length,
-        revenue: orders.filter(o => o.paidAt && key(o.paidAt) === k).reduce((s, o) => s + o.amount, 0),
+        revenue: rmb(orders.filter(o => o.paidAt && key(o.paidAt) === k).reduce((s, o) => s + o.amount, 0)),
       });
     }
     res.json({ ok: true, days: out });
@@ -117,7 +119,7 @@ module.exports = function registerConsole(app, deps) {
     const byPkg = {};
     paid.forEach(o => {
       byPkg[o.pkg] = byPkg[o.pkg] || { pkg: o.pkg, name: PKG_NAMES[o.pkg] || o.pkg, count: 0, credits: 0, revenue: 0 };
-      byPkg[o.pkg].count++; byPkg[o.pkg].credits += o.credits; byPkg[o.pkg].revenue += o.amount;
+      byPkg[o.pkg].count++; byPkg[o.pkg].credits += o.credits; byPkg[o.pkg].revenue = rmb(byPkg[o.pkg].revenue + o.amount);
     });
     const key = iso => {
       const d = new Date(iso);
@@ -129,11 +131,11 @@ module.exports = function registerConsole(app, deps) {
       const d = new Date(now); d.setDate(d.getDate() - i);
       const k = key(d.toISOString());
       const todays = paid.filter(o => o.paidAt && key(o.paidAt) === k);
-      out.push({ date: k.slice(5), credits: todays.reduce((s, o) => s + o.credits, 0), revenue: todays.reduce((s, o) => s + o.amount, 0), orders: todays.length });
+      out.push({ date: k.slice(5), credits: todays.reduce((s, o) => s + o.credits, 0), revenue: rmb(todays.reduce((s, o) => s + o.amount, 0)), orders: todays.length });
     }
     res.json({
       ok: true,
-      totalRevenue: paid.reduce((s, o) => s + o.amount, 0),
+      totalRevenue: rmb(paid.reduce((s, o) => s + o.amount, 0)),
       totalCredits: paid.reduce((s, o) => s + o.credits, 0),
       totalOrders: paid.length,
       pending: all.filter(o => o.status === 'pending' || o.status === 'notified').length,
@@ -199,7 +201,7 @@ module.exports = function registerConsole(app, deps) {
     const q = (req.query.q || '').trim().toLowerCase();
     let list = users.map(u => ({
       ...u,
-      totalPaid: orders.filter(o => o.userId === u.id).reduce((s, o) => s + o.amount, 0),
+      totalPaid: rmb(orders.filter(o => o.userId === u.id).reduce((s, o) => s + o.amount, 0)),
       orderCount: orders.filter(o => o.userId === u.id).length,
     }));
     if (q) list = list.filter(u => ((u.name || '') + (u.contact || '') + (u.email || '')).toLowerCase().includes(q));
@@ -267,7 +269,7 @@ module.exports = function registerConsole(app, deps) {
       }
       downloads = [...seen.values()].sort((a, b) => b.time.localeCompare(a.time));
     } catch {}
-    res.json({ ok: true, user: u, orders: my, totalPaid: my.reduce((s, o) => s + o.amount, 0), levelLog, creditOrders, creditLog, boards, downloads });
+    res.json({ ok: true, user: u, orders: my, totalPaid: rmb(my.reduce((s, o) => s + o.amount, 0)), levelLog, creditOrders, creditLog, boards, downloads });
   });
 
   const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制开通一次性赠送积分
@@ -743,7 +745,7 @@ async function api(u,opt){
   const j=await r.json();if(!j.ok)throw new Error(j.error||'操作失败');return j;
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function yuan(n){return '¥'+Number(n).toLocaleString()}
+function yuan(n){return '¥'+Number(n).toLocaleString('zh-CN',{minimumFractionDigits:1,maximumFractionDigits:1})}
 function fmtSize(b){b=Number(b)||0;if(!b)return '—';return b>=1048576?(b/1048576).toFixed(1)+' MB':Math.max(1,Math.round(b/1024))+' KB'}
 function fmtT(t){if(!t)return '—';if(/^\d{4}-\d{2}-\d{2}$/.test(t))return t;const d=new Date(t);if(isNaN(d))return t;const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())}
 const OSS_P='${OSS}';
@@ -833,7 +835,7 @@ H.dashboard=async()=>{
     <div class="kpi"><div class="lbl">🟡 金果会员</div><div class="num">'+s.levelCount.team+'</div></div>\
     <div class="kpi"><div class="lbl">总支付金额</div><div class="num">'+yuan(s.totalRevenue)+'</div></div>\
   </div>'+aiPanel+'\
-  <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">💰 每日收入走势</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'revenue','linear-gradient(180deg,#a78bfa,#7c5cbf)',v=>'¥'+v)+'</div>\
+  <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">💰 每日收入走势</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'revenue','linear-gradient(180deg,#a78bfa,#7c5cbf)',v=>yuan(v))+'</div>\
   <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🌱 每日新增用户</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'users','linear-gradient(180deg,#6ee7b7,#34d399)',v=>v+'人')+'</div>'+leakPanel+creditPanel;
 };
 window.setRange=r=>{window._range=r;route()};

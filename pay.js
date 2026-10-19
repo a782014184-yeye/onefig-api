@@ -412,7 +412,7 @@ module.exports = function registerPay(app, deps) {
     if (!order) {
       const notified = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'notified');
       if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
-      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: amount != null ? amount : PLANS[plan].price, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null, refundConsent: true, refundConsentAt: new Date().toISOString() };
+      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: Math.round((amount != null ? amount : PLANS[plan].price) * 100) / 100, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null, refundConsent: true, refundConsentAt: new Date().toISOString() };
       orders.push(order);
     }
     order.outTradeNo = order.id.replace(/-/g, ''); // 微信要求 ≤32 位：UUID 去横线正好 32 位；支付宝同样兼容
