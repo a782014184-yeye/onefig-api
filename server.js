@@ -568,7 +568,8 @@ app.get('/api/clean-preview/:series/:title', (req, res) => {
     const u = validateToken(tk);
     if (!u) return res.status(401).json({ ok: false, error: '请先登录' });
     const series = String(req.params.series || '');
-    const title = String(req.params.title || '');
+    // 客户端带 .webp 后缀调用，服务端统一剥掉再拼（11-19 实测：双后缀导致 404）
+    const title = String(req.params.title || '').replace(/\.webp$/i, '');
     if (!series || !title || series.includes('..') || title.includes('..') || series.includes('/') || title.includes('/')) {
       return res.status(400).json({ ok: false, error: '参数无效' });
     }
