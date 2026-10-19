@@ -613,9 +613,9 @@ select:focus,input:focus{border-color:#a78bfa}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
 .chart{display:flex;align-items:flex-end;gap:3px;height:170px;padding-top:18px}
 .chart .ccol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;min-width:0;position:relative;height:100%}
-.chart .cbar{width:70%;max-width:26px;border-radius:4px 4px 0 0;min-height:2px;transition:.2s}
+.chart .cbar{width:70%;max-width:26px;border-radius:4px 4px 0 0;min-height:2px;transition:.2s;position:relative}
 .chart .ccol:hover .cbar{filter:brightness(1.12)}
-.chart .cval{position:absolute;top:0;font-size:10px;color:#6d4fb0;font-weight:600;white-space:nowrap}
+.chart .cval{position:absolute;bottom:calc(100% + 3px);left:50%;transform:translateX(-50%);font-size:10px;color:#6d4fb0;font-weight:600;white-space:nowrap}
 .clabels{display:flex;gap:3px;margin-top:6px}
 .clabels span{flex:1;font-size:10px;color:#b0aac4;text-align:center;min-width:0;overflow:hidden}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:14px}
@@ -795,7 +795,7 @@ H.dashboard=async()=>{
     const max=Math.max(1,...days.map(d=>d[key]));
     const cols=days.map(d=>{
       const h=Math.max(d[key]>0?4:1.5, d[key]/max*100);
-      return '<div class="ccol" title="'+d.date+' · '+fmt(d[key])+'"><div class="cval">'+(d[key]>0?fmt(d[key]):'')+'</div><div class="cbar" style="height:'+h+'%;background:'+color+'"></div></div>';
+      return '<div class="ccol" title="'+d.date+' · '+fmt(d[key])+'"><div class="cbar" style="height:'+h+'%;background:'+color+'">'+(d[key]>0?'<div class="cval">'+fmt(d[key])+'</div>':'')+'</div></div>';
     }).join('');
     const step=Math.ceil(days.length/8);
     const labels=days.map((d,i)=>(i%step===0||i===days.length-1)?'<span>'+d.date+'</span>':'<span></span>').join('');
