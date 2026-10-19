@@ -45,7 +45,7 @@ function loadConfig() {
           try { serialNo = new crypto.X509Certificate(certPem).serialNumber.replace(/:/g, '').toUpperCase(); }
           catch (e) { console.warn('[pay] 读取证书序列号失败：' + e.message); }
         }
-        out.wechat = { appid: w.appid, mchid: w.mchid, apiV3Key: w.apiV3Key, notifyUrl: w.notifyUrl, appSecret: w.appSecret || '', jsapiAppid: w.jsapiAppid || w.appid, h5Enabled: !!w.h5Enabled, certPem, keyPem, serialNo };
+        out.wechat = { appid: w.appid, mchid: w.mchid, apiV3Key: w.apiV3Key, notifyUrl: w.notifyUrl, appSecret: w.appSecret || '', jsapiAppid: w.jsapiAppid || w.appid, jsapiEnabled: w.jsapiEnabled !== false, h5Enabled: !!w.h5Enabled, certPem, keyPem, serialNo };
       }
     }
 
@@ -381,7 +381,7 @@ module.exports = function registerPay(app, deps) {
     res.json({
       ok: true,
       wechatNative: !!cfg.wechat,
-      wechatJsapi: !!(cfg.wechat && cfg.wechat.appSecret),
+      wechatJsapi: !!(cfg.wechat && cfg.wechat.appSecret && cfg.wechat.jsapiEnabled !== false),
       wechatH5: !!(cfg.wechat && cfg.wechat.h5Enabled),
       wechatJsapiAppid: cfg.wechat ? (cfg.wechat.jsapiAppid || cfg.wechat.appid) : '',
       alipay: !!cfg.alipay,
