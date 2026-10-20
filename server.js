@@ -12,6 +12,12 @@ const DB_FILE = path.join(DATA_DIR, 'submissions.json');
 const ADMIN_PATH = process.env.ADMIN_PATH || 'admin';
 const ADMIN_USER = process.env.ADMIN_USER || 'onefig';
 const ADMIN_PASS = process.env.ADMIN_PASS || 'change-me';
+// 生产环境启动自检（2026-10-20，P1-2 同类）：后台默认口令 change-me 出现在生产 = 门户大开，拒绝启动
+if (process.env.ONEFIG_ENV === 'production' && !process.env.ADMIN_PASS) {
+  console.error('❌ 致命错误：生产环境未配置 ADMIN_PASS（onefig-api.env），拒绝启动。');
+  process.exit(1);
+}
+if (!process.env.ADMIN_PASS) console.warn('⚠️  ADMIN_PASS 未配置，使用默认口令（仅适用于测试环境）');
 const MAX_UPLOAD_MB = 10;
 const DASHSCOPE_KEY = process.env.DASHSCOPE_API_KEY || '';
 // 2026-10-15：qwen-image-edit(-plus|-max) 全系列被百炼下架（报 Model not exist），改用 qwen-image-2.0（0.2元/张，与原 plus 同价；以后换模型只改环境变量 QWEN_EDIT_MODEL）
@@ -214,6 +220,15 @@ app.use((req, res, next) => {
 });
 
 // ---- 会员体系：注册 / 登录 / 订单 ----
+// P1-2（2026-10-20）：生产环境必须显式配置 TOKEN_SECRET——
+// 缺省随机生成意味着每次重启全站用户/后台 token 静默失效且无任何报错，极难排查。
+// 非生产（本地/8090 隔离实例）保留随机 fallback 方便起服务，但启动时打醒目警告。
+if (!process.env.TOKEN_SECRET && process.env.ONEFIG_ENV === 'production') {
+  console.error('❌ 致命错误：生产环境未配置 TOKEN_SECRET（onefig-api.env），拒绝启动。');
+  console.error('   生成方式：openssl rand -hex 32，写入 env 文件后重启。');
+  process.exit(1);
+}
+if (!process.env.TOKEN_SECRET) console.warn('⚠️  TOKEN_SECRET 未配置，使用随机密钥（仅适用于测试环境，重启后所有登录态失效）');
 const TOKEN_SECRET = process.env.TOKEN_SECRET || crypto.randomBytes(32).toString('hex');
 const CONSOLE_DIR = path.join(DATA_DIR, 'console');
 const USERS_FILE = path.join(CONSOLE_DIR, 'users.json');
