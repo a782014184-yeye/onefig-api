@@ -141,6 +141,24 @@ const submitRateLimit = makeRateLimiter(5, 10 * 60 * 1000, '提交太频繁啦�
 const authRateLimit = makeRateLimiter(20, 10 * 60 * 1000, '尝试太频繁啦，请 10 分钟后再试');
 const trackRateLimit = makeRateLimiter(60, 10 * 60 * 1000, '请求太频繁，请稍后再试');
 
+// ---- 按用户限流（2026-10-20）：登录接口按 user.id 计数，不受换 IP 影响；需放在 authUser 之后使用 ----
+function makeUserRateLimiter(max, windowMs, msg) {
+  const hits = new Map();
+  return function (req, res, next) {
+    const key = (req.user && req.user.id) || req.ip || '?';
+    const now = Date.now();
+    const rec = (hits.get(key) || []).filter(t => now - t < windowMs);
+    if (rec.length >= max) return res.status(429).json({ ok: false, error: msg });
+    rec.push(now);
+    hits.set(key, rec);
+    next();
+  };
+}
+// AI 付费接口（直连百炼按张扣费）：每小时 30 次兜底，积分才是主闸门
+const aiEditRateLimit = makeUserRateLimiter(30, 3600e3, 'AI 调用太频繁啦，休息一下再来～（每小时最多 30 次）');
+// AI 本地服务接口（抠图/转矢量，CPU 密集）：每小时 10 次，防脚本打满服务器
+const aiLocalRateLimit = makeUserRateLimiter(10, 3600e3, '这个功能每小时最多用 10 次，稍后再试～');
+
 // ---- 图片魔数校验：不信任客户端声明的 mimetype，防伪装文件上传（2026-09-21 安全加固）----
 function sniffImage(filePath) {
   try {
@@ -1025,7 +1043,7 @@ app.post('/console/api/materials/upload', consoleAuth, (req, res) => {
 app.listen(PORT, () => console.log(`OneFig API listening on :${PORT}`));
 
 // ---- 位图转 SVG 矢量（服务器本地 vtracer，免费）----
-app.post('/api/vectorize', authUser, (req, res) => {
+app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
     if (!req.file) return res.status(400).json({ ok: false, error: '请上传图片' });
@@ -1052,7 +1070,7 @@ app.post('/api/vectorize', authUser, (req, res) => {
 });
 
 // ---- 移除背景（服务器本地 rembg 抠图，免费）----
-app.post('/api/remove-bg', authUser, (req, res) => {
+app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
     if (!req.file) return res.status(400).json({ ok: false, error: '请上传图片' });
@@ -1078,13 +1096,54 @@ app.post('/api/remove-bg', authUser, (req, res) => {
   });
 });
 
+// ---- AI 改图/风格转换 费用闸门（2026-10-20，P0-1 修复）----
+// 背景：这两个接口直连百炼 qwen-image（约 0.2 元/张，平台按量扣我们的钱），此前只查登录、
+// 不扣费不限流，注册个账号就能无限刷余额。规则（2026-10-20 定）：
+//   每个功能每用户各 1 次免费试用（ai-edit 与 ai-stylize 独立计数，互不影响；
+//   ONEFIG_AI_EDIT_FREE 可调，0 = 纯积分制），
+//   用完后每次扣 AI_EDIT_COST 积分（默认 20，约 2 元，ONEFIG_AI_EDIT_COST 可调）；失败全额退还。
+// 注：charge/refund 为同步 read-modify-write，单进程内天然原子（无 await 交错），无需加锁。
+const AI_EDIT_COST = Math.max(0, Number(process.env.ONEFIG_AI_EDIT_COST ?? 20));
+const AI_EDIT_FREE = Math.max(0, Number(process.env.ONEFIG_AI_EDIT_FREE ?? 1));
+// feature：'edit' | 'stylize'，免费次数按功能分别记在 users.aiFreeUsed.<feature>
+function chargeAIEdit(uid, feature) {
+  const users = loadUsers();
+  const u = users.find(x => x.id === uid);
+  if (!u) return { ok: false, error: '账号异常，请重新登录' };
+  const fu = u.aiFreeUsed && typeof u.aiFreeUsed === 'object' ? u.aiFreeUsed : (u.aiFreeUsed = {});
+  if ((fu[feature] || 0) < AI_EDIT_FREE) {
+    fu[feature] = (fu[feature] || 0) + 1;
+    saveUsers(users);
+    return { ok: true, paidWith: 'free' };
+  }
+  if (AI_EDIT_COST <= 0) return { ok: true, paidWith: 'free' };
+  if ((u.credits || 0) < AI_EDIT_COST) {
+    return { ok: false, code: 'no-credit', credits: u.credits || 0, error: `这个功能的免费试用已用完，之后每次 ${AI_EDIT_COST} 积分——点右上角「充值积分」充一点就能继续用～` };
+  }
+  u.credits -= AI_EDIT_COST;
+  saveUsers(users);
+  return { ok: true, paidWith: 'credit', credits: u.credits };
+}
+function refundAIEdit(uid, paidWith, feature) {
+  try {
+    const users = loadUsers();
+    const u = users.find(x => x.id === uid);
+    if (!u) return;
+    if (paidWith === 'credit') u.credits = (u.credits || 0) + AI_EDIT_COST;
+    else if (paidWith === 'free' && AI_EDIT_FREE > 0 && u.aiFreeUsed) u.aiFreeUsed[feature] = Math.max(0, (u.aiFreeUsed[feature] || 0) - 1);
+    else return;
+    saveUsers(users);
+    logLine('ai-op', `refund user=${u.name} feature=${feature} paidWith=${paidWith}`);
+  } catch {}
+}
+
 // ---- AI 风格转换（照片/其他图 → 指定插画风）----
 const STYLE_PROMPTS = {
   flat: '把这张图重绘成扁平矢量插画风格：色块平涂、柔和渐变、简洁流畅的轮廓线条，类似 Figdraw 科研示意图，保持原有构图和主体不变，纯色干净背景',
   matte: '把这张图重绘成柔和奶油质感插画：水彩般的渐变晕染、哑光柔和色彩、边缘圆润，保持原有构图和主体不变，纯色干净背景',
   threed: '把这张图重绘成 3D 渲染风格：立体光影、柔和材质、类似 Blender 卡通渲染，保持原有构图和主体不变，纯色干净背景',
 };
-app.post('/api/ai-stylize', authUser, (req, res) => {
+app.post('/api/ai-stylize', authUser, aiEditRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
     if (!DASHSCOPE_KEY) return res.status(500).json({ ok: false, error: '服务器未配置 AI 服务' });
@@ -1094,6 +1153,13 @@ app.post('/api/ai-stylize', authUser, (req, res) => {
     const custom = (req.body.prompt || '').trim();
     const t0 = Date.now();
     const prompt = custom || STYLE_PROMPTS[style] || STYLE_PROMPTS.flat;
+    // 费用闸门：先扣后用，失败退还（2026-10-20）
+    const charge = chargeAIEdit(req.user.id, 'stylize');
+    if (!charge.ok) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_EDIT_COST });
+    }
+    const refund = () => refundAIEdit(req.user.id, charge.paidWith, 'stylize');
     const pubName = 'ai-src-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + path.extname(req.file.filename);
     fs.renameSync(req.file.path, path.join(FILES_DIR, pubName));
     const baseUrl = req.protocol + '://' + req.get('host');
@@ -1111,23 +1177,24 @@ app.post('/api/ai-stylize', authUser, (req, res) => {
       const outUrl = data && data.output && data.output.choices && data.output.choices[0] &&
         data.output.choices[0].message.content.find(c => c.image) &&
         data.output.choices[0].message.content.find(c => c.image).image;
-      if (!outUrl) { logLine('ai-op', `stylize FAIL user=${req.user.name} style=${style}${custom ? ' custom="' + custom.slice(0, 30) + '"' : ''} err=${(data && data.message) || 'no-image'} ${Date.now() - t0}ms`); return res.status(502).json({ ok: false, error: (data && data.message) || 'AI 处理失败，请重试' }); }
+      if (!outUrl) { refund(); logLine('ai-op', `stylize FAIL user=${req.user.name} style=${style}${custom ? ' custom="' + custom.slice(0, 30) + '"' : ''} err=${(data && data.message) || 'no-image'} ${Date.now() - t0}ms`); return res.status(502).json({ ok: false, error: (data && data.message) || 'AI 处理失败，请重试（未扣积分）' }); }
       const imgRes = await fetch(outUrl);
       const buf = Buffer.from(await imgRes.arrayBuffer());
       const outName = 'ai-sty-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       // 注入 AIGC 元数据隐式标识（GB 45438-2025），内容编号即文件名
       fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(buf, outName.replace(/\.png$/, '')));
-      logLine('ai-op', `stylize ok user=${req.user.name} style=${style}${custom ? ' custom="' + custom.slice(0, 30) + '"' : ''} ${Date.now() - t0}ms`);
-      res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName) });
+      logLine('ai-op', `stylize ok user=${req.user.name} style=${style}${custom ? ' custom="' + custom.slice(0, 30) + '"' : ''} paidWith=${charge.paidWith} ${Date.now() - t0}ms`);
+      res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName), paidWith: charge.paidWith, credits: charge.paidWith === 'credit' ? charge.credits : undefined });
     } catch (e) {
+      refund();
       logLine('ai-op', `stylize ERROR user=${req.user.name} style=${style} ${e && e.message} ${Date.now() - t0}ms`);
-      res.status(502).json({ ok: false, error: 'AI 服务连接失败，请稍后重试' });
+      res.status(502).json({ ok: false, error: 'AI 服务连接失败，请稍后重试（未扣积分）' });
     }
   });
 });
 
 // ---- AI 图像编辑（百炼 QWEN_EDIT_MODEL，指令改图）----
-app.post('/api/ai-edit', authUser, (req, res) => {
+app.post('/api/ai-edit', authUser, aiEditRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
     if (!DASHSCOPE_KEY) return res.status(500).json({ ok: false, error: '服务器未配置 AI 服务' });
@@ -1136,6 +1203,13 @@ app.post('/api/ai-edit', authUser, (req, res) => {
     const prompt = (req.body.prompt || '').trim();
     if (!prompt) return res.status(400).json({ ok: false, error: '请填写修改要求' });
     const t0 = Date.now();
+    // 费用闸门：先扣后用，失败退还（2026-10-20）
+    const charge = chargeAIEdit(req.user.id, 'edit');
+    if (!charge.ok) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_EDIT_COST });
+    }
+    const refund = () => refundAIEdit(req.user.id, charge.paidWith, 'edit');
     // 把上传文件移到 /files，使其公网可访问（百炼需要能拉到图）
     const pubName = 'ai-src-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + path.extname(req.file.filename);
     fs.renameSync(req.file.path, path.join(FILES_DIR, pubName));
@@ -1154,18 +1228,19 @@ app.post('/api/ai-edit', authUser, (req, res) => {
       const outUrl = data && data.output && data.output.choices && data.output.choices[0] &&
         data.output.choices[0].message.content.find(c => c.image) &&
         data.output.choices[0].message.content.find(c => c.image).image;
-      if (!outUrl) { logLine('ai-op', `edit FAIL user=${req.user.name} prompt="${prompt.slice(0, 40)}" err=${(data && data.message) || 'no-image'} ${Date.now() - t0}ms`); return res.status(502).json({ ok: false, error: (data && data.message) || 'AI 处理失败，换个描述试试' }); }
+      if (!outUrl) { refund(); logLine('ai-op', `edit FAIL user=${req.user.name} prompt="${prompt.slice(0, 40)}" err=${(data && data.message) || 'no-image'} ${Date.now() - t0}ms`); return res.status(502).json({ ok: false, error: (data && data.message) || 'AI 处理失败，换个描述试试（未扣积分）' }); }
       // 结果图转存到服务器，避免 OSS 临时链接过期
       const imgRes = await fetch(outUrl);
       const buf = Buffer.from(await imgRes.arrayBuffer());
       const outName = 'ai-out-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       // 注入 AIGC 元数据隐式标识（GB 45438-2025），内容编号即文件名
       fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(buf, outName.replace(/\.png$/, '')));
-      logLine('ai-op', `edit ok user=${req.user.name} prompt="${prompt.slice(0, 40)}" ${Date.now() - t0}ms`);
-      res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName) });
+      logLine('ai-op', `edit ok user=${req.user.name} prompt="${prompt.slice(0, 40)}" paidWith=${charge.paidWith} ${Date.now() - t0}ms`);
+      res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName), paidWith: charge.paidWith, credits: charge.paidWith === 'credit' ? charge.credits : undefined });
     } catch (e) {
+      refund();
       logLine('ai-op', `edit ERROR user=${req.user.name} prompt="${prompt.slice(0, 40)}" ${e && e.message} ${Date.now() - t0}ms`);
-      res.status(502).json({ ok: false, error: 'AI 服务连接失败，请稍后重试' });
+      res.status(502).json({ ok: false, error: 'AI 服务连接失败，请稍后重试（未扣积分）' });
     }
   });
 });
