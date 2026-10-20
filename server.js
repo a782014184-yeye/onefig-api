@@ -465,6 +465,13 @@ app.post('/api/submissions', submitRateLimit, (req, res) => {
       const rows = readDB();
       const u = optionalUser(req);
       if (!u) { cleanup(); return res.status(401).json({ ok: false, error: '请先登录后再提交需求' }); }
+      // 求素材配额（2026-10-20 权益分级）：普通/青果/红果每月 5 个（自然月），金果不限量
+      const reqMonth = new Date().toISOString().slice(0, 7);
+      const usedReq = rows.filter(r => r.userId === u.id && String(r.createdAt || '').startsWith(reqMonth)).length;
+      if ((u.level || 'none') !== 'team' && usedReq >= 5) {
+        cleanup();
+        return res.json({ ok: false, error: '本月求素材名额已用完（每月 5 个，自然月重置），金果会员不限量' });
+      }
       const row = {
         id: crypto.randomUUID(),
         desc, contact, series,
