@@ -101,6 +101,14 @@ const app = express();
 // nginx 反代（X-Forwarded-Proto: https），信任代理头，req.protocol 才是 https——
 // 否则生成的资源链接是 http://，浏览器拦截混合内容且 <a download> 失效（2026-10-15）
 app.set('trust proxy', true);
+// 真实客户端 IP（2026-10-20，P0-2 修复）：全站只信 nginx 写入的 X-Real-IP（$remote_addr，
+// proxy_set_header 会覆盖客户端伪造值），绝不用 X-Forwarded-For——nginx 的
+// $proxy_add_x_forwarded_for 会把客户端自带的伪造 XFF 保留在最左侧，而 trust proxy 取最左值，
+// 导致 req.ip 可被任意伪造、按 IP 的限流和日志全部失效。教训：伪造 XFF 即可绕过登录限流爆破。
+function clientIp(req) {
+  const h = String(req.headers['x-real-ip'] || '').trim();
+  return h || req.socket.remoteAddress || '?';
+}
 // 画板内容最大 10MB：画板路由单独用大解析器（需在全局 256kb 解析器之前注册，
 // body-parser 解析过后会置 req._body，全局解析器自动跳过）
 app.use('/api/boards', express.json({ limit: '12mb' }));
@@ -128,7 +136,7 @@ app.use((req, res, next) => {
 function makeRateLimiter(max, windowMs, msg) {
   const hits = new Map();
   return function (req, res, next) {
-    const ip = req.ip || req.socket.remoteAddress || '?';
+    const ip = clientIp(req);
     const now = Date.now();
     const rec = (hits.get(ip) || []).filter(t => now - t < windowMs);
     if (rec.length >= max) return res.status(429).json({ ok: false, error: msg });
@@ -145,7 +153,7 @@ const trackRateLimit = makeRateLimiter(60, 10 * 60 * 1000, '请求太频繁，�
 function makeUserRateLimiter(max, windowMs, msg) {
   const hits = new Map();
   return function (req, res, next) {
-    const key = (req.user && req.user.id) || req.ip || '?';
+    const key = (req.user && req.user.id) || clientIp(req);
     const now = Date.now();
     const rec = (hits.get(key) || []).filter(t => now - t < windowMs);
     if (rec.length >= max) return res.status(429).json({ ok: false, error: msg });
@@ -197,7 +205,7 @@ process.on('unhandledRejection', e => logLine('error', 'unhandledRejection ' + (
 app.use((req, res, next) => {
   const t0 = Date.now();
   res.on('finish', () => {
-    const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
+    const ip = clientIp(req).replace(/[\r\n]/g, '');   // 过滤换行防日志注入（P2-14）
     logLine('access', `${ip} ${req.method} ${req.originalUrl} -> ${res.statusCode} ${Date.now() - t0}ms`);
   });
   next();
@@ -303,7 +311,7 @@ app.post('/api/auth/register', authRateLimit, (req, res) => {
   // 生产环境闸：拦截 @test.com 注册，防止 e2e 联调误指生产时污染用户表（2026-10-16 事故防护）。
   // 隔离测试实例（8090 等）不设 ONEFIG_ENV，不受影响。
   if (process.env.ONEFIG_ENV === 'production' && /@test\.com$/i.test(email)) {
-    logLine('auth', `blocked test-email register ip=${req.ip} email=${email}`);
+    logLine('auth', `blocked test-email register ip=${clientIp(req)} email=${email}`);
     return res.status(400).json({ ok: false, error: '该邮箱不允许注册' });
   }
   if (password.length < 6) return res.status(400).json({ ok: false, error: '密码至少 6 位' });
@@ -322,7 +330,7 @@ app.post('/api/auth/login', authRateLimit, (req, res) => {
   const password = String((req.body || {}).password || '');
   const u = loadUsers().find(x => x.email === email);
   if (!u || !u.passHash || crypto.scryptSync(password, u.salt, 32).toString('hex') !== u.passHash) {
-    logLine('auth', `user-login-fail email=${email} ip=${req.ip}`);
+    logLine('auth', `user-login-fail email=${email} ip=${clientIp(req)}`);
     return res.status(401).json({ ok: false, error: '邮箱或密码不对，再检查一下' });
   }
   res.json({ ok: true, token: makeToken(u.id, u.pwdVer || 0), user: publicUser(u) });
@@ -368,7 +376,7 @@ app.post('/api/auth/forgot', forgotRateLimit, async (req, res) => {
       subject: '【OneFig 无花有果】重置密码验证码',
       text: '你正在重置 OneFig 无花有果账号的密码。\n\n验证码：' + code + '\n\n10 分钟内有效。如果这不是你本人的操作，请忽略本邮件，你的密码不会改变。',
     });
-    logLine('auth', 'reset-code-sent email=' + email + ' ip=' + req.ip);
+    logLine('auth', 'reset-code-sent email=' + email + ' ip=' + clientIp(req));
     res.json({ ok: true });
   } catch (e) {
     logLine('error', 'reset-code-send-fail email=' + email + ' ' + e.message);
@@ -391,7 +399,7 @@ app.post('/api/auth/reset', authRateLimit, (req, res) => {
   if (crypto.scryptSync(code, r.salt, 32).toString('hex') !== r.codeHash) {
     r.attempts++;
     saveResets(resets);
-    logLine('auth', 'reset-code-wrong email=' + email + ' ip=' + req.ip);
+    logLine('auth', 'reset-code-wrong email=' + email + ' ip=' + clientIp(req));
     return res.status(400).json({ ok: false, error: '验证码不对，再检查一下' });
   }
   const users = loadUsers();
@@ -404,7 +412,7 @@ app.post('/api/auth/reset', authRateLimit, (req, res) => {
   saveUsers(users);
   resets.splice(idx, 1);
   saveResets(resets);
-  logLine('auth', 'password-reset-ok email=' + email + ' ip=' + req.ip);
+  logLine('auth', 'password-reset-ok email=' + email + ' ip=' + clientIp(req));
   res.json({ ok: true, token: makeToken(u.id, u.pwdVer), user: publicUser(u) });
 });
 
@@ -498,7 +506,7 @@ app.post('/api/submissions', submitRateLimit, (req, res) => {
         image: files[0] ? path.basename(files[0].path) : null,
         images: files.map(f => path.basename(f.path)),
         createdAt: new Date().toISOString(),
-        ip: (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim(),
+        ip: clientIp(req).replace(/[\r\n]/g, ''),
         status: 'new',
       };
       rows.unshift(row);
@@ -519,7 +527,7 @@ function basicAuth(req, res, next) {
     const [u, p] = Buffer.from(m[1], 'base64').toString().split(':');
     if (u === ADMIN_USER && p === ADMIN_PASS) return next();
   }
-  logLine('auth', `admin-login-fail ip=${req.ip} url=${req.originalUrl}`);
+  logLine('auth', `admin-login-fail ip=${clientIp(req)} url=${req.originalUrl}`);
   res.setHeader('WWW-Authenticate', 'Basic realm="OneFig Admin"');
   res.status(401).send('需要登录');
 }
@@ -541,17 +549,17 @@ function checkConsoleToken(t) {
 function consoleAuth(req, res, next) {
   const m = (req.headers.authorization || '').match(/^Bearer (.+)$/);
   if ((m && checkConsoleToken(m[1])) || checkConsoleToken(req.query.t)) return next();
-  logLine('auth', `admin-auth-fail ip=${req.ip} url=${req.originalUrl}`);
+  logLine('auth', `admin-auth-fail ip=${clientIp(req)} url=${req.originalUrl}`);
   res.status(401).json({ ok: false, error: '请先登录后台' });
 }
 const consoleLoginLimit = makeRateLimiter(10, 10 * 60 * 1000, '尝试太频繁，请 10 分钟后再试');
 app.post('/console/api/login', consoleLoginLimit, (req, res) => {
   const { username, password } = req.body || {};
   if (username === ADMIN_USER && password === ADMIN_PASS) {
-    logLine('auth', `admin-login-ok ip=${req.ip}`);
+    logLine('auth', `admin-login-ok ip=${clientIp(req)}`);
     return res.json({ ok: true, token: makeConsoleToken(), name: ADMIN_USER });
   }
-  logLine('auth', `admin-login-fail ip=${req.ip}`);
+  logLine('auth', `admin-login-fail ip=${clientIp(req)}`);
   res.status(401).json({ ok: false, error: '账号或密码不对，再检查一下' });
 });
 

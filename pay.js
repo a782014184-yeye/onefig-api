@@ -764,7 +764,8 @@ module.exports = function registerPay(app, deps) {
     }
 
     try {
-      const ip = String(req.ip || '').replace(/^::ffff:/, '') || '47.98.165.254';
+      // P0-2（2026-10-20）：只信 nginx 写入的 X-Real-IP，不用 req.ip（XFF 可伪造，会把假 IP 报给微信风控）
+      const ip = String(req.headers['x-real-ip'] || req.socket.remoteAddress || '').replace(/^::ffff:/, '') || '47.98.165.254';
       const r = await wxRequest(w, 'POST', '/v3/pay/transactions/h5', {
         appid: w.appid,
         mchid: w.mchid,
@@ -815,7 +816,7 @@ module.exports = function registerPay(app, deps) {
           try { fs.unlinkSync(CERTS_CACHE); certs = await getPlatformCerts(w, CERTS_CACHE); } catch {}
         }
         if (!verifyNotifySignature(certs, req.headers, rawBody, w.pubKeyPem)) {
-          log(`回调验签失败 ip=${req.ip} serial=${req.headers['wechatpay-serial'] || req.headers['wechatpay-publickey-id']}`);
+          log(`回调验签失败 ip=${req.headers['x-real-ip'] || req.socket.remoteAddress} serial=${req.headers['wechatpay-serial'] || req.headers['wechatpay-publickey-id']}`);
           return fail(401, '验签失败');
         }
       }
@@ -891,7 +892,7 @@ module.exports = function registerPay(app, deps) {
       const params = req.body || {};
       const { sign, sign_type: _st, ...rest } = params; // 验签时排除 sign 与 sign_type
       if (!alipayVerify(rest, sign, a.alipayPublicKey)) {
-        log(`支付宝回调验签失败 ip=${req.ip} out_trade_no=${params.out_trade_no}`);
+        log(`支付宝回调验签失败 ip=${req.headers['x-real-ip'] || req.socket.remoteAddress} out_trade_no=${params.out_trade_no}`);
         return res.status(400).send('failure');
       }
       if (params.app_id !== a.appid) { log('支付宝回调 app_id 不符'); return res.status(400).send('failure'); }
