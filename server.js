@@ -611,10 +611,16 @@ app.post('/api/export/permit', authUser, (req, res) => {
 });
 
 // 导出核销：确认下载时调用——扣额度/单次权益 + 生成授权码记流水（验真页可查）
+// 2026-10-20 权益分级：PDF/SVG 矢量格式与 600dpi 高清为红果/金果专享（客户端已置灰，此为服务端硬墙）
 app.post('/api/export/commit', authUser, (req, res) => {
   try {
     const u = req.user;
     const level = u.level || 'none';
+    const fmt = String((req.body || {}).fmt || '');
+    const dpi = Number((req.body || {}).dpi) || 300;
+    if (level !== 'pro' && level !== 'team' && (fmt === 'pdf' || fmt === 'svg' || dpi > 300)) {
+      return res.json({ ok: false, reason: 'fmt' });
+    }
     const month = curMonth();
     if (u.exMonth !== month) { u.exMonth = month; u.exUsed = 0; }
     if (level !== 'team') {
