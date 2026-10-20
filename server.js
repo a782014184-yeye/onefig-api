@@ -590,45 +590,58 @@ const BASIC_MONTHLY_LIMIT = 5;
 // 普通账户无月度额度，靠单次购买（exportCredits，¥6.9/次，用一次扣一次）
 const EXPORT_MONTHLY = { basic: 5, pro: 10 };
 
-// 导出许可：返回 { ok, watermark, code } —— watermark=true 表示无权益（前端拦截不导出）；
-// 授权成功时生成可追溯授权码（与素材下载同格式 OF-年份-XXXXXX），记入 downloads 流水，/api/verify 可查
+// 导出预检（2026-10-20 修复"打开弹窗就扣额度"）：只查不扣，实际扣减在 /api/export/commit（确认下载时）
 app.post('/api/export/permit', authUser, (req, res) => {
+  try {
+    const u = req.user;
+    const level = u.level || 'none';
+    if (level === 'team') return res.json({ ok: true, watermark: false, allowed: true });
+    const month = curMonth();
+    const used = u.exMonth === month ? (u.exUsed || 0) : 0;
+    const limit = EXPORT_MONTHLY[level];
+    if (limit !== undefined) {
+      if (used >= limit) return res.json({ ok: true, watermark: true, allowed: false, reason: 'quota', limit, used });
+      return res.json({ ok: true, watermark: false, allowed: true });
+    }
+    if ((u.exportCredits || 0) <= 0) return res.json({ ok: true, watermark: true, allowed: false, reason: 'no-plan' });
+    res.json({ ok: true, watermark: false, allowed: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: '校验失败，请稍后再试' });
+  }
+});
+
+// 导出核销：确认下载时调用——扣额度/单次权益 + 生成授权码记流水（验真页可查）
+app.post('/api/export/commit', authUser, (req, res) => {
   try {
     const u = req.user;
     const level = u.level || 'none';
     const month = curMonth();
     if (u.exMonth !== month) { u.exMonth = month; u.exUsed = 0; }
-    const grant = () => {
-      const logs = loadJSON(DOWNLOADS_FILE, []);
-      const code = genLicenseCode(logs);
-      const boardTitle = String((req.body || {}).boardTitle || '').slice(0, 80);
-      logs.push({
-        userId: u.id, kind: 'export', materialId: '画板导出作品',
-        boardId: String((req.body || {}).boardId || ''), boardTitle,
-        code, time: new Date().toISOString(), free: false,
-      });
-      saveJSON(DOWNLOADS_FILE, logs);
-      return code;
-    };
-    // 金果：不限量
-    if (level === 'team') return res.json({ ok: true, watermark: false, code: grant() });
-    // 青果/红果：月度额度
-    const limit = EXPORT_MONTHLY[level];
-    if (limit !== undefined) {
-      if ((u.exUsed || 0) >= limit) return res.json({ ok: true, watermark: true, reason: 'quota', limit, used: u.exUsed });
-      u.exUsed = (u.exUsed || 0) + 1;
-    } else {
-      // 普通账户：用单次购买权益
-      if ((u.exportCredits || 0) <= 0) return res.json({ ok: true, watermark: true, reason: 'no-plan' });
-      u.exportCredits = (u.exportCredits || 0) - 1;
+    if (level !== 'team') {
+      const limit = EXPORT_MONTHLY[level];
+      if (limit !== undefined) {
+        if ((u.exUsed || 0) >= limit) return res.json({ ok: false, reason: 'quota', limit, used: u.exUsed });
+        u.exUsed = (u.exUsed || 0) + 1;
+      } else {
+        if ((u.exportCredits || 0) <= 0) return res.json({ ok: false, reason: 'no-plan' });
+        u.exportCredits = (u.exportCredits || 0) - 1;
+      }
+      const users = loadUsers();
+      const ui = users.findIndex(x => x.id === u.id);
+      if (ui >= 0) { users[ui] = u; saveUsers(users); }
     }
-    const code = grant();
-    const users = loadUsers();
-    const ui = users.findIndex(x => x.id === u.id);
-    if (ui >= 0) { users[ui] = u; saveUsers(users); }
-    res.json({ ok: true, watermark: false, code });
+    const logs = loadJSON(DOWNLOADS_FILE, []);
+    const code = genLicenseCode(logs);
+    const boardTitle = String((req.body || {}).boardTitle || '').slice(0, 80);
+    logs.push({
+      userId: u.id, kind: 'export', materialId: '画板导出作品',
+      boardId: String((req.body || {}).boardId || ''), boardTitle,
+      code, time: new Date().toISOString(), free: false,
+    });
+    saveJSON(DOWNLOADS_FILE, logs);
+    res.json({ ok: true, code });
   } catch (e) {
-    res.status(500).json({ ok: false, error: '校验失败，请稍后再试' });
+    res.status(500).json({ ok: false, error: '核销失败，请稍后再试' });
   }
 });
 
