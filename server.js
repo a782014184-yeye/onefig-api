@@ -1290,9 +1290,12 @@ const removeShare = (token) => {
 };
 
 // 列表（元信息，不含内容）
+// P1-6（2026-10-20）：金果上限 Infinity 经 JSON.stringify 会变 null、前端 fallback 成 3，
+// 付最高档的用户反而看到"只有 3 个额度"——序列化前统一转 -1（= 不限量）
+const boardLimitFor = (level) => { const l = BOARD_LIMITS[level] ?? 3; return Number.isFinite(l) ? l : -1; };
 app.get('/api/boards', authUser, (req, res) => {
   const idx = loadBoardIndex(req.user.id);
-  res.json({ ok: true, folders: idx.folders, boards: idx.boards.map(boardMeta).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0)), limit: BOARD_LIMITS[req.user.level] ?? 3 });
+  res.json({ ok: true, folders: idx.folders, boards: idx.boards.map(boardMeta).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0)), limit: boardLimitFor(req.user.level) });
 });
 
 // 新建画板：服务端强制数量上限
@@ -1443,7 +1446,7 @@ app.post('/api/boards/import-local', authUser, (req, res) => {
     imported.push(b.id);
   }
   saveBoardIndex(req.user.id, idx);
-  res.json({ ok: true, imported, skipped, limit });
+  res.json({ ok: true, imported, skipped, limit: boardLimitFor(req.user.level) });   // P1-6：Infinity 序列化变 null，统一 -1
 });
 
 // 开启分享：生成/复用 token，可带 mode（view 只读 / edit 可编辑），返回分享链接标识

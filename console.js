@@ -17,6 +17,9 @@ module.exports = function registerConsole(app, deps) {
   const save = (n, rows) => { const t = file(n) + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, file(n)); };
   // 金额一律按"分"取整（2 位小数），避免 0.1+0.2 类浮点误差进统计
   const rmb = n => Math.round(Number(n) * 100) / 100;
+  // 下发前剔除敏感字段（2026-10-20 P1-3）：密码哈希/盐/密码版本绝不出服务端——
+  // 后台一旦 XSS 或被抓包，泄露的就是全站密码哈希（可离线爆破弱密码）
+  const adminUserView = (u) => { if (!u) return u; const { passHash, salt, pwdVer, ...pub } = u; return pub; };
 
   // ---------- API ----------
   app.get('/console/api/stats', consoleAuth, (req, res) => {
@@ -200,7 +203,7 @@ module.exports = function registerConsole(app, deps) {
     const orders = load('orders.json', []).filter(o => o.status === 'paid');
     const q = (req.query.q || '').trim().toLowerCase();
     let list = users.map(u => ({
-      ...u,
+      ...adminUserView(u),
       totalPaid: rmb(orders.filter(o => o.userId === u.id).reduce((s, o) => s + o.amount, 0)),
       orderCount: orders.filter(o => o.userId === u.id).length,
     }));
@@ -269,7 +272,7 @@ module.exports = function registerConsole(app, deps) {
       }
       downloads = [...seen.values()].sort((a, b) => b.time.localeCompare(a.time));
     } catch {}
-    res.json({ ok: true, user: u, orders: my, totalPaid: rmb(my.reduce((s, o) => s + o.amount, 0)), levelLog, creditOrders, creditLog, boards, downloads });
+    res.json({ ok: true, user: adminUserView(u), orders: my, totalPaid: rmb(my.reduce((s, o) => s + o.amount, 0)), levelLog, creditOrders, creditLog, boards, downloads });
   });
 
   const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制开通一次性赠送积分
