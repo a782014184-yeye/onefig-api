@@ -719,7 +719,7 @@ app.get('/api/download', authUser, (req, res) => {
   }
 });
 
-// 我的下载历史（去重，按最近时间倒序，便于再次免费下载）
+// 我的下载历史（素材去重 + 画板导出记录，按最近时间倒序，便于再次免费下载/查授权码）
 app.get('/api/my/downloads', authUser, (req, res) => {
   try {
     const logs = loadJSON(DOWNLOADS_FILE, []).filter(l => l.userId === req.user.id);
@@ -727,7 +727,20 @@ app.get('/api/my/downloads', authUser, (req, res) => {
     const map = new Map();
     for (const s of data) for (const m of s.materials) map.set(m.id, { s, m });
     const seen = new Map();
+    const exports = [];
     for (const l of logs) {
+      // 画板导出（2026-10-20）：每次导出对应一份独立作品文件和授权码，逐条展示
+      if (l.kind === 'export') {
+        exports.push({
+          id: 'export:' + (l.code || l.time),
+          kind: 'export',
+          title: l.boardTitle || '画板导出作品',
+          boardId: l.boardId || '',
+          time: l.time,
+          code: l.code || null,
+        });
+        continue;
+      }
       const hit = map.get(l.materialId);
       if (!hit) continue;
       seen.set(l.materialId, {
@@ -740,7 +753,7 @@ app.get('/api/my/downloads', authUser, (req, res) => {
         code: l.code || null, // 授权码（旧记录无码时前端会显示临时码）
       });
     }
-    const list = [...seen.values()].sort((a, b) => b.time.localeCompare(a.time));
+    const list = [...seen.values(), ...exports].sort((a, b) => b.time.localeCompare(a.time));
     res.json({ ok: true, list });
   } catch { res.status(500).json({ ok: false, error: '读取失败' }); }
 });
