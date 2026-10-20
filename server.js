@@ -147,6 +147,8 @@ function makeRateLimiter(max, windowMs, msg) {
 }
 const submitRateLimit = makeRateLimiter(5, 10 * 60 * 1000, '提交太频繁啦，请 10 分钟后再试');
 const authRateLimit = makeRateLimiter(20, 10 * 60 * 1000, '尝试太频繁啦，请 10 分钟后再试');
+// 登录专用更严（2026-10-20 应要求收紧）：6 次/10 分钟，配合 P0-2 的真实 IP 计数，爆破基本不可行
+const loginRateLimit = makeRateLimiter(6, 10 * 60 * 1000, '密码错误次数太多，请 10 分钟后再试（忘记密码可用邮箱找回）');
 const trackRateLimit = makeRateLimiter(60, 10 * 60 * 1000, '请求太频繁，请稍后再试');
 
 // ---- 按用户限流（2026-10-20）：登录接口按 user.id 计数，不受换 IP 影响；需放在 authUser 之后使用 ----
@@ -325,7 +327,7 @@ app.post('/api/auth/register', authRateLimit, (req, res) => {
   res.json({ ok: true, token: makeToken(u.id, u.pwdVer || 0), user: publicUser(u) });
 });
 
-app.post('/api/auth/login', authRateLimit, (req, res) => {
+app.post('/api/auth/login', loginRateLimit, (req, res) => {
   const email = String((req.body || {}).email || '').trim().toLowerCase();
   const password = String((req.body || {}).password || '');
   const u = loadUsers().find(x => x.email === email);
