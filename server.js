@@ -948,6 +948,7 @@ function aiFreeLeft(u) {
     edit: Math.max(0, AI_EDIT_FREE - (fu.edit || 0)),
     stylize: Math.max(0, AI_EDIT_FREE - (fu.stylize || 0)),
     nobg: Math.max(0, AI_EDIT_FREE - (fu.nobg || 0)),
+    vec: Math.max(0, AI_EDIT_FREE - (fu.vec || 0)),
   };
 }
 
@@ -1080,12 +1081,19 @@ app.post('/console/api/materials/upload', consoleAuth, (req, res) => {
 
 app.listen(PORT, () => console.log(`OneFig API listening on :${PORT}`));
 
-// ---- 位图转 SVG 矢量（服务器本地 vtracer，免费）----
+// ---- 位图转 SVG 矢量（服务器本地 vtracer；2026-10-21 起 1 次免费试用，之后 20 积分/次）----
 app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
     if (!req.file) return res.status(400).json({ ok: false, error: '请上传图片' });
     if (!verifyUploadedImage(req, res)) return;
+    // 费用闸门：与 AI 改图/风格转换/移除背景同一套（首次免费试用，之后 AI_EDIT_COST 积分/次，失败退还）
+    const charge = chargeAIEdit(req.user.id, 'vec');
+    if (!charge.ok) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_EDIT_COST });
+    }
+    const refund = () => refundAIEdit(req.user.id, charge.paidWith, 'vec');
     try {
       const buf = fs.readFileSync(req.file.path);
       fs.unlinkSync(req.file.path);
@@ -1100,11 +1108,12 @@ app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
       const baseUrl = req.protocol + '://' + req.get('host');
       // 生成记录：位图转矢量也入账（2026-10-21）
       recordAIResult({ userId: req.user.id, kind: 'vec', prompt: '位图转矢量：' + String(req.file.originalname || '图片').slice(0, 60), ext: 'svg', buf: out });
-      logLine('ai-op', `vectorize ok user=${req.user.name} ${Date.now() - t0}ms`);
-      res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName) });
+      logLine('ai-op', `vectorize ok user=${req.user.name} paidWith=${charge.paidWith} ${Date.now() - t0}ms`);
+      res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName), paidWith: charge.paidWith, credits: charge.paidWith === 'credit' ? charge.credits : undefined });
     } catch (e) {
+      refund();
       logLine('ai-op', `vectorize FAIL user=${req.user.name} ${e && e.message}`);
-      res.status(502).json({ ok: false, error: '矢量转换服务开小差了，请稍后重试' });
+      res.status(502).json({ ok: false, error: '矢量转换服务开小差了，请稍后重试（未扣积分）' });
     }
   });
 });
@@ -1155,7 +1164,7 @@ app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
 // 注：charge/refund 为同步 read-modify-write，单进程内天然原子（无 await 交错），无需加锁。
 const AI_EDIT_COST = Math.max(0, Number(process.env.ONEFIG_AI_EDIT_COST ?? 20));
 const AI_EDIT_FREE = Math.max(0, Number(process.env.ONEFIG_AI_EDIT_FREE ?? 1));
-// feature：'edit' | 'stylize' | 'nobg'，免费次数按功能分别记在 users.aiFreeUsed.<feature>
+// feature：'edit' | 'stylize' | 'nobg' | 'vec'，免费次数按功能分别记在 users.aiFreeUsed.<feature>
 function chargeAIEdit(uid, feature) {
   const users = loadUsers();
   const u = users.find(x => x.id === uid);
