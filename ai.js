@@ -4,9 +4,13 @@ const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
 
-const MODEL = process.env.ARK_MODEL || 'doubao-seedream-4-5-251128';
+// 2026-10-21：默认模型升 Seedream 5.0 Pro（准确率代际提升），尺寸 2048² → 1536²
+// （1536×1536 = 236 万像素 ≤ 261 万，卡在 0.30 元/张档；2048² 会跳进 0.60 元档）
+// 均可环境变量覆盖：ARK_MODEL / ARK_SIZE
+const MODEL = process.env.ARK_MODEL || 'doubao-seedream-5-0-pro-260628';
+const SIZE = process.env.ARK_SIZE || '1536x1536';
 const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
-const CANDIDATES = 1; // 每次生成 = 1 张候选 = 10 积分（成本约 0.26 元/张，定价 1 元/张，毛利约 74%）；不满意再生成再扣 10 积分，无免费重抽
+const CANDIDATES = 1; // 每次生成 = 1 张候选 = 10 积分（Seedream 5.0 Pro 1536² 成本 0.30 元/张，定价 1 元/张，毛利约 70%）；不满意再生成再扣 10 积分，无免费重抽
 const COST = 10; // 每次生成消耗积分（2026-10-21 按反馈统一定价 10）
 const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // 生成素材每人免费试用次数（2026-10-21 按反馈：1 次终身，与改图/风格转换同记 users.aiFreeUsed；0 = 纯积分制）
 const CREDIT_PACKAGES = [
@@ -92,7 +96,7 @@ module.exports = function registerAI(app, deps) {
     return new Promise((resolve, reject) => {
       const key = arkKey();
       if (!key) return reject(new Error('生图服务未配置'));
-      const body = JSON.stringify({ model: MODEL, prompt, size: '2048x2048', response_format: 'b64_json', watermark: false });
+      const body = JSON.stringify({ model: MODEL, prompt, size: SIZE, response_format: 'b64_json', watermark: false });
       const req = https.request(ARK_URL, {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
