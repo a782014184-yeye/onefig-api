@@ -937,9 +937,15 @@ require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + A
 // AI 工坊：积分体系 + 生图流水线
 const aiModule = require('./ai');
 const CREDIT_PACKAGES = aiModule.CREDIT_PACKAGES;
-aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine });
+aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft });
 // 生成记录入账：AI 工坊四个非生成类页签的成功结果统一写入 jobs（2026-10-21）
 const recordAIResult = aiModule.recordAIResult;
+// 免费试用剩余次数（edit/stylize 独立计数，读 users.aiFreeUsed）——
+// 注意：AI_EDIT_FREE 在本文件更下方才定义，本函数只在请求期被调用，届时已完成初始化（2026-10-21）
+function aiFreeLeft(u) {
+  const fu = u.aiFreeUsed && typeof u.aiFreeUsed === 'object' ? u.aiFreeUsed : {};
+  return { edit: Math.max(0, AI_EDIT_FREE - (fu.edit || 0)), stylize: Math.max(0, AI_EDIT_FREE - (fu.stylize || 0)) };
+}
 
 // 在线支付：微信 Native 扫码 + 支付宝电脑网站支付（2026-10-08；2026-10-17 起同时支持积分充值）
 require('./pay')(app, { authUser, DATA_DIR, PLANS, CREDIT_PACKAGES, loadUsers, saveUsers, logLine });
