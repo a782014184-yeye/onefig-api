@@ -1078,7 +1078,7 @@ app.post('/console/api/materials/upload', consoleAuth, (req, res) => {
 app.listen(PORT, () => console.log(`OneFig API listening on :${PORT}`));
 
 // ---- 位图转 SVG 矢量（服务器本地 vtracer；2026-10-21 规则：红果/金果免费不限次，
-//      普通/青果每天 5 次免费（北京时间 00:00 重置），超出 5 积分/次，失败退还）----
+//      普通/青果每天 5 次免费（北京时间 00:00 重置），超出 10 积分/次，失败退还）----
 app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
@@ -1120,7 +1120,7 @@ app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
 // （按北京时间 00:00 重置），超出后 AI_LOCAL_COST 积分/次；失败全额退还（积分或当日次数）。
 // 用量记 users.aiDailyUsed.<feature> = { date: 'YYYY-MM-DD'(北京时间), count: n }。
 const AI_LOCAL_FREE = Math.max(0, Number(process.env.ONEFIG_AI_LOCAL_FREE ?? 5));
-const AI_LOCAL_COST = Math.max(0, Number(process.env.ONEFIG_AI_LOCAL_COST ?? 5));
+const AI_LOCAL_COST = Math.max(0, Number(process.env.ONEFIG_AI_LOCAL_COST ?? 10));
 const AI_LOCAL_UNLIMITED_LEVELS = ['pro', 'team']; // 红果/金果
 function beijingToday() { return new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10); } // 与全站"按北京时间重置"一致
 function chargeAILocal(uid, feature) {
@@ -1196,16 +1196,17 @@ app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
   });
 });
 
-// ---- AI 改图/风格转换 费用闸门（2026-10-20，P0-1 修复）----
+// ---- AI 改图/风格转换 费用闸门（2026-10-20，P0-1 修复；2026-10-21 单价按反馈统一定为 10）----
 // 背景：这两个接口直连百炼 qwen-image（约 0.2 元/张，平台按量扣我们的钱），此前只查登录、
-// 不扣费不限流，注册个账号就能无限刷余额。规则（2026-10-20 定）：
+// 不扣费不限流，注册个账号就能无限刷余额。规则（2026-10-20 定，10-21 调价）：
 //   每个功能每用户各 1 次免费试用（ai-edit 与 ai-stylize 独立计数，互不影响；
 //   ONEFIG_AI_EDIT_FREE 可调，0 = 纯积分制），
-//   用完后每次扣 AI_EDIT_COST 积分（默认 20，约 2 元，ONEFIG_AI_EDIT_COST 可调）；失败全额退还。
+//   用完后每次扣 AI_EDIT_COST 积分（默认 10，约 1 元，ONEFIG_AI_EDIT_COST 可调）；失败全额退还。
 // 注：charge/refund 为同步 read-modify-write，单进程内天然原子（无 await 交错），无需加锁。
-const AI_EDIT_COST = Math.max(0, Number(process.env.ONEFIG_AI_EDIT_COST ?? 20));
+const AI_EDIT_COST = Math.max(0, Number(process.env.ONEFIG_AI_EDIT_COST ?? 10));
 const AI_EDIT_FREE = Math.max(0, Number(process.env.ONEFIG_AI_EDIT_FREE ?? 1));
-// feature：'edit' | 'stylize' | 'nobg' | 'vec'，免费次数按功能分别记在 users.aiFreeUsed.<feature>
+// feature：'edit' | 'stylize'，免费次数按功能分别记在 users.aiFreeUsed.<feature>
+// （移除背景/位图转矢量已改走每日额度模型 chargeAILocal，不在此列）
 function chargeAIEdit(uid, feature) {
   const users = loadUsers();
   const u = users.find(x => x.id === uid);

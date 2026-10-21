@@ -6,14 +6,14 @@ const crypto = require('crypto');
 
 const MODEL = process.env.ARK_MODEL || 'doubao-seedream-4-5-251128';
 const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
-const CANDIDATES = 1; // 每次生成 = 1 张候选 = 30 积分（成本约 0.26 元/张，定价约 1~3 元/张，毛利 83%+）；不满意再生成再扣 30 积分，无免费重抽
-const COST = 30; // 每次生成消耗积分
+const CANDIDATES = 1; // 每次生成 = 1 张候选 = 10 积分（成本约 0.26 元/张，定价 1 元/张，毛利约 74%）；不满意再生成再扣 10 积分，无免费重抽
+const COST = 10; // 每次生成消耗积分（2026-10-21 按反馈统一定价 10）
 const CREDIT_PACKAGES = [
   { id: 'p100', credits: 100, price: 9.9 },
   { id: 'p800', credits: 800, price: 59.9 },
   { id: 'p2000', credits: 2000, price: 99.9 },
 ];
-const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制一次性赠送（约 5/30/100 张图）
+const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制一次性赠送（按 10 积分/张约 15/90/300 张图）
 // 平台安全策略会 403 的词，提前拦截并友好提示（不扣积分）
 const BLOCKWORDS = ['肾小球', '肾小囊', '肾单位', '髓袢', '肾小管'];
 
