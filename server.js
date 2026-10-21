@@ -937,7 +937,7 @@ require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + A
 // AI 工坊：积分体系 + 生图流水线
 const aiModule = require('./ai');
 const CREDIT_PACKAGES = aiModule.CREDIT_PACKAGES;
-aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST, aiLocalLeft, aiLocalCost: () => AI_LOCAL_COST });
+aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST, aiLocalLeft, aiLocalCost: () => ({ nobg: AI_NOBG_COST, vec: AI_VEC_COST }) });
 // 生成记录入账：AI 工坊四个非生成类页签的成功结果统一写入 jobs（2026-10-21）
 const recordAIResult = aiModule.recordAIResult;
 // 免费试用剩余次数（edit/stylize 独立计数，读 users.aiFreeUsed）——
@@ -1088,7 +1088,7 @@ app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
     const charge = chargeAILocal(req.user.id, 'vec');
     if (!charge.ok) {
       fs.unlink(req.file.path, () => {});
-      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_LOCAL_COST });
+      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_VEC_COST });
     }
     const refund = () => refundAILocal(req.user.id, charge.paidWith, 'vec');
     try {
@@ -1117,10 +1117,13 @@ app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
 
 // ---- 本地算法（抠图/矢量化）每日免费额度（2026-10-21 规则，取代此前的"1 次试用 + 20 积分"）----
 // 红果/金果（pro/team）：完全免费不限次；普通（none）/青果（basic）：每功能每天 5 次免费
-// （按北京时间 00:00 重置），超出后 AI_LOCAL_COST 积分/次；失败全额退还（积分或当日次数）。
+// （按北京时间 00:00 重置），超出后按功能单价扣积分；失败全额退还（积分或当日次数）。
 // 用量记 users.aiDailyUsed.<feature> = { date: 'YYYY-MM-DD'(北京时间), count: n }。
+// 单价（2026-10-21 按反馈分档）：移除背景 5 积分/次，位图转矢量 10 积分/次。
 const AI_LOCAL_FREE = Math.max(0, Number(process.env.ONEFIG_AI_LOCAL_FREE ?? 5));
-const AI_LOCAL_COST = Math.max(0, Number(process.env.ONEFIG_AI_LOCAL_COST ?? 10));
+const AI_NOBG_COST = Math.max(0, Number(process.env.ONEFIG_AI_NOBG_COST ?? 5));
+const AI_VEC_COST = Math.max(0, Number(process.env.ONEFIG_AI_VEC_COST ?? 10));
+const localCostOf = feature => feature === 'nobg' ? AI_NOBG_COST : AI_VEC_COST;
 const AI_LOCAL_UNLIMITED_LEVELS = ['pro', 'team']; // 红果/金果
 function beijingToday() { return new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10); } // 与全站"按北京时间重置"一致
 function chargeAILocal(uid, feature) {
@@ -1128,14 +1131,15 @@ function chargeAILocal(uid, feature) {
   const u = users.find(x => x.id === uid);
   if (!u) return { ok: false, error: '账号异常，请重新登录' };
   if (AI_LOCAL_UNLIMITED_LEVELS.includes(u.level)) return { ok: true, paidWith: 'member' };
+  const cost = localCostOf(feature);
   const du = u.aiDailyUsed && typeof u.aiDailyUsed === 'object' ? u.aiDailyUsed : (u.aiDailyUsed = {});
   const slot = du[feature] && du[feature].date === beijingToday() ? du[feature] : (du[feature] = { date: beijingToday(), count: 0 });
   if (slot.count < AI_LOCAL_FREE) { slot.count++; saveUsers(users); return { ok: true, paidWith: 'free' }; }
-  if (AI_LOCAL_COST <= 0) return { ok: true, paidWith: 'free' };
-  if ((u.credits || 0) < AI_LOCAL_COST) {
-    return { ok: false, code: 'no-credit', credits: u.credits || 0, error: `今天的 ${AI_LOCAL_FREE} 次免费已经用完啦，之后每次 ${AI_LOCAL_COST} 积分——点右上角「充值积分」充一点就能继续用～` };
+  if (cost <= 0) return { ok: true, paidWith: 'free' };
+  if ((u.credits || 0) < cost) {
+    return { ok: false, code: 'no-credit', credits: u.credits || 0, error: `今天的 ${AI_LOCAL_FREE} 次免费已经用完啦，之后每次 ${cost} 积分——点右上角「充值积分」充一点就能继续用～` };
   }
-  u.credits -= AI_LOCAL_COST;
+  u.credits -= cost;
   saveUsers(users);
   return { ok: true, paidWith: 'credit', credits: u.credits };
 }
@@ -1144,7 +1148,7 @@ function refundAILocal(uid, paidWith, feature) {
     const users = loadUsers();
     const u = users.find(x => x.id === uid);
     if (!u) return;
-    if (paidWith === 'credit') u.credits = (u.credits || 0) + AI_LOCAL_COST;
+    if (paidWith === 'credit') u.credits = (u.credits || 0) + localCostOf(feature);
     else if (paidWith === 'free' && u.aiDailyUsed && u.aiDailyUsed[feature]) u.aiDailyUsed[feature].count = Math.max(0, u.aiDailyUsed[feature].count - 1);
     else return;
     saveUsers(users);
@@ -1159,17 +1163,17 @@ function aiLocalLeft(u) {
   return { unlimited: false, nobg: left('nobg'), vec: left('vec') };
 }
 
-// ---- 移除背景（服务器本地 rembg 抠图；额度规则与位图转矢量完全一致，见 chargeAILocal）----
+// ---- 移除背景（服务器本地 rembg 抠图；每日额度规则与位图转矢量一致，单价单独 5 积分/次，见 chargeAILocal）----
 app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
     if (!req.file) return res.status(400).json({ ok: false, error: '请上传图片' });
     if (!verifyUploadedImage(req, res)) return;
-    // 每日额度闸门（与位图转矢量同一套）
+    // 每日额度闸门（与位图转矢量同一套，单价不同）
     const charge = chargeAILocal(req.user.id, 'nobg');
     if (!charge.ok) {
       fs.unlink(req.file.path, () => {});
-      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_LOCAL_COST });
+      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_NOBG_COST });
     }
     const refund = () => refundAILocal(req.user.id, charge.paidWith, 'nobg');
     try {
