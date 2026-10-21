@@ -118,6 +118,37 @@ module.exports = function registerAI(app, deps) {
     });
   }
 
+  // ---- 智能抠底（2026-10-21）：优先调用本地 rembg 服务（AI 识别主体，浅色/奶油风描边不会被误吃），
+  // 服务不可用时回退到洪泛算法 whiteToTransparent。
+  // 背景：Seedream 5.0 Pro 出图底色接近纯白（249-255），洪泛容差 42 会把浅蓝/浅紫主体边缘
+  // （距白 <40/通道）一起抠掉，用户反馈"生成的图被扣了底色"。
+  function rembgTransparent(buf) {
+    return new Promise((resolve, reject) => {
+      const boundary = '----onefig' + crypto.randomBytes(8).toString('hex');
+      const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="gen.png"\r\nContent-Type: image/png\r\n\r\n`);
+      const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+      const req = require('http').request({
+        host: '127.0.0.1', port: 9000, path: '/remove-bg', method: 'POST',
+        headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': head.length + buf.length + tail.length },
+        timeout: 120000,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          if (res.statusCode === 200 && chunks.length) return resolve(Buffer.concat(chunks));
+          reject(new Error('rembg ' + res.statusCode));
+        });
+      });
+      req.on('timeout', () => req.destroy(new Error('rembg 超时')));
+      req.on('error', reject);
+      req.write(head); req.write(buf); req.write(tail); req.end();
+    });
+  }
+  async function matteImage(buf) {
+    try { return await rembgTransparent(buf); }
+    catch (e) { logLine('ai-op', 'rembg 不可用，回退洪泛抠底：' + e.message); return whiteToTransparent(buf); }
+  }
+
   async function runJob(job) {
     const dir = path.join(AI_DIR, job.id);
     fs.mkdirSync(dir, { recursive: true });
@@ -126,7 +157,7 @@ module.exports = function registerAI(app, deps) {
     for (let i = 0; i < CANDIDATES; i++) {
       try {
         const buf = await generateImage(prompt);
-        const transparent = whiteToTransparent(buf);
+        const transparent = await matteImage(buf);
         const f = path.join(dir, `c${i}.png`);
         fs.writeFileSync(f, transparent);
         results.push({ i, ok: true, size: transparent.length });
