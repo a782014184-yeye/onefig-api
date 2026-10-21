@@ -937,19 +937,15 @@ require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + A
 // AI 工坊：积分体系 + 生图流水线
 const aiModule = require('./ai');
 const CREDIT_PACKAGES = aiModule.CREDIT_PACKAGES;
-aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST });
+aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST, aiLocalLeft, aiLocalCost: () => AI_LOCAL_COST });
 // 生成记录入账：AI 工坊四个非生成类页签的成功结果统一写入 jobs（2026-10-21）
 const recordAIResult = aiModule.recordAIResult;
-// 免费试用剩余次数（edit/stylize/nobg 独立计数，读 users.aiFreeUsed）——
+// 免费试用剩余次数（edit/stylize 独立计数，读 users.aiFreeUsed）——
 // 注意：AI_EDIT_FREE 在本文件更下方才定义，本函数只在请求期被调用，届时已完成初始化（2026-10-21）
+// 注：移除背景/位图转矢量 2026-10-21 起改用每日免费额度模型（chargeAILocal / aiLocalLeft），不在此列
 function aiFreeLeft(u) {
   const fu = u.aiFreeUsed && typeof u.aiFreeUsed === 'object' ? u.aiFreeUsed : {};
-  return {
-    edit: Math.max(0, AI_EDIT_FREE - (fu.edit || 0)),
-    stylize: Math.max(0, AI_EDIT_FREE - (fu.stylize || 0)),
-    nobg: Math.max(0, AI_EDIT_FREE - (fu.nobg || 0)),
-    vec: Math.max(0, AI_EDIT_FREE - (fu.vec || 0)),
-  };
+  return { edit: Math.max(0, AI_EDIT_FREE - (fu.edit || 0)), stylize: Math.max(0, AI_EDIT_FREE - (fu.stylize || 0)) };
 }
 
 // 在线支付：微信 Native 扫码 + 支付宝电脑网站支付（2026-10-08；2026-10-17 起同时支持积分充值）
@@ -1081,19 +1077,20 @@ app.post('/console/api/materials/upload', consoleAuth, (req, res) => {
 
 app.listen(PORT, () => console.log(`OneFig API listening on :${PORT}`));
 
-// ---- 位图转 SVG 矢量（服务器本地 vtracer；2026-10-21 起 1 次免费试用，之后 20 积分/次）----
+// ---- 位图转 SVG 矢量（服务器本地 vtracer；2026-10-21 规则：红果/金果免费不限次，
+//      普通/青果每天 5 次免费（北京时间 00:00 重置），超出 5 积分/次，失败退还）----
 app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
     if (!req.file) return res.status(400).json({ ok: false, error: '请上传图片' });
     if (!verifyUploadedImage(req, res)) return;
-    // 费用闸门：与 AI 改图/风格转换/移除背景同一套（首次免费试用，之后 AI_EDIT_COST 积分/次，失败退还）
-    const charge = chargeAIEdit(req.user.id, 'vec');
+    // 每日额度闸门（与移除背景同一套，见 chargeAILocal）
+    const charge = chargeAILocal(req.user.id, 'vec');
     if (!charge.ok) {
       fs.unlink(req.file.path, () => {});
-      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_EDIT_COST });
+      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_LOCAL_COST });
     }
-    const refund = () => refundAIEdit(req.user.id, charge.paidWith, 'vec');
+    const refund = () => refundAILocal(req.user.id, charge.paidWith, 'vec');
     try {
       const buf = fs.readFileSync(req.file.path);
       fs.unlinkSync(req.file.path);
@@ -1118,19 +1115,63 @@ app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
   });
 });
 
-// ---- 移除背景（服务器本地 rembg 抠图；2026-10-21 起 1 次免费试用，之后 20 积分/次）----
+// ---- 本地算法（抠图/矢量化）每日免费额度（2026-10-21 规则，取代此前的"1 次试用 + 20 积分"）----
+// 红果/金果（pro/team）：完全免费不限次；普通（none）/青果（basic）：每功能每天 5 次免费
+// （按北京时间 00:00 重置），超出后 AI_LOCAL_COST 积分/次；失败全额退还（积分或当日次数）。
+// 用量记 users.aiDailyUsed.<feature> = { date: 'YYYY-MM-DD'(北京时间), count: n }。
+const AI_LOCAL_FREE = Math.max(0, Number(process.env.ONEFIG_AI_LOCAL_FREE ?? 5));
+const AI_LOCAL_COST = Math.max(0, Number(process.env.ONEFIG_AI_LOCAL_COST ?? 5));
+const AI_LOCAL_UNLIMITED_LEVELS = ['pro', 'team']; // 红果/金果
+function beijingToday() { return new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10); } // 与全站"按北京时间重置"一致
+function chargeAILocal(uid, feature) {
+  const users = loadUsers();
+  const u = users.find(x => x.id === uid);
+  if (!u) return { ok: false, error: '账号异常，请重新登录' };
+  if (AI_LOCAL_UNLIMITED_LEVELS.includes(u.level)) return { ok: true, paidWith: 'member' };
+  const du = u.aiDailyUsed && typeof u.aiDailyUsed === 'object' ? u.aiDailyUsed : (u.aiDailyUsed = {});
+  const slot = du[feature] && du[feature].date === beijingToday() ? du[feature] : (du[feature] = { date: beijingToday(), count: 0 });
+  if (slot.count < AI_LOCAL_FREE) { slot.count++; saveUsers(users); return { ok: true, paidWith: 'free' }; }
+  if (AI_LOCAL_COST <= 0) return { ok: true, paidWith: 'free' };
+  if ((u.credits || 0) < AI_LOCAL_COST) {
+    return { ok: false, code: 'no-credit', credits: u.credits || 0, error: `今天的 ${AI_LOCAL_FREE} 次免费已经用完啦，之后每次 ${AI_LOCAL_COST} 积分——点右上角「充值积分」充一点就能继续用～` };
+  }
+  u.credits -= AI_LOCAL_COST;
+  saveUsers(users);
+  return { ok: true, paidWith: 'credit', credits: u.credits };
+}
+function refundAILocal(uid, paidWith, feature) {
+  try {
+    const users = loadUsers();
+    const u = users.find(x => x.id === uid);
+    if (!u) return;
+    if (paidWith === 'credit') u.credits = (u.credits || 0) + AI_LOCAL_COST;
+    else if (paidWith === 'free' && u.aiDailyUsed && u.aiDailyUsed[feature]) u.aiDailyUsed[feature].count = Math.max(0, u.aiDailyUsed[feature].count - 1);
+    else return;
+    saveUsers(users);
+    logLine('ai-op', `refund-local user=${u.name} feature=${feature} paidWith=${paidWith}`);
+  } catch {}
+}
+// 今日剩余免费次数（前端提示用；会员返回 unlimited）
+function aiLocalLeft(u) {
+  if (AI_LOCAL_UNLIMITED_LEVELS.includes(u.level)) return { unlimited: true, nobg: null, vec: null };
+  const du = u.aiDailyUsed && typeof u.aiDailyUsed === 'object' ? u.aiDailyUsed : {};
+  const left = f => { const s = du[f]; return s && s.date === beijingToday() ? Math.max(0, AI_LOCAL_FREE - s.count) : AI_LOCAL_FREE; };
+  return { unlimited: false, nobg: left('nobg'), vec: left('vec') };
+}
+
+// ---- 移除背景（服务器本地 rembg 抠图；额度规则与位图转矢量完全一致，见 chargeAILocal）----
 app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
     if (!req.file) return res.status(400).json({ ok: false, error: '请上传图片' });
     if (!verifyUploadedImage(req, res)) return;
-    // 费用闸门：与 AI 改图/风格转换同一套（首次免费试用，之后 AI_EDIT_COST 积分/次，失败退还）
-    const charge = chargeAIEdit(req.user.id, 'nobg');
+    // 每日额度闸门（与位图转矢量同一套）
+    const charge = chargeAILocal(req.user.id, 'nobg');
     if (!charge.ok) {
       fs.unlink(req.file.path, () => {});
-      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_EDIT_COST });
+      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_LOCAL_COST });
     }
-    const refund = () => refundAIEdit(req.user.id, charge.paidWith, 'nobg');
+    const refund = () => refundAILocal(req.user.id, charge.paidWith, 'nobg');
     try {
       const buf = fs.readFileSync(req.file.path);
       fs.unlinkSync(req.file.path);

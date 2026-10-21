@@ -11,7 +11,7 @@ const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'onefig-ai-records-'));
 const AI_DIR = path.join(DATA_DIR, 'ai');
 fs.mkdirSync(AI_DIR, { recursive: true });
 
-const USER = { id: 'u-test-1', name: '测试用户', credits: 100, pwdVer: 1, aiFreeUsed: { edit: 1, stylize: 0, nobg: 0 } };
+const USER = { id: 'u-test-1', name: '测试用户', credits: 100, pwdVer: 1, aiFreeUsed: { edit: 1, stylize: 0 }, aiDailyUsed: { nobg: { date: new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10), count: 1 }, vec: { date: '2026-01-01', count: 9 } } };
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 fs.writeFileSync(USERS_FILE, JSON.stringify([USER]));
 const loadUsers = () => JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
@@ -24,9 +24,15 @@ const injectAigcMeta = (buf) => buf;
 
 const app = express();
 app.use(express.json({ limit: '12mb' }));
-const aiFreeLeft = u => ({ edit: Math.max(0, 1 - ((u.aiFreeUsed || {}).edit || 0)), stylize: Math.max(0, 1 - ((u.aiFreeUsed || {}).stylize || 0)), nobg: Math.max(0, 1 - ((u.aiFreeUsed || {}).nobg || 0)) });
+const aiFreeLeft = u => ({ edit: Math.max(0, 1 - ((u.aiFreeUsed || {}).edit || 0)), stylize: Math.max(0, 1 - ((u.aiFreeUsed || {}).stylize || 0)) });
+const aiLocalLeft = u => {
+  if (['pro', 'team'].includes(u.level)) return { unlimited: true, nobg: null, vec: null };
+  const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+  const left = f => { const s = (u.aiDailyUsed || {})[f]; return s && s.date === today ? Math.max(0, 5 - s.count) : 5; };
+  return { unlimited: false, nobg: left('nobg'), vec: left('vec') };
+};
 const aiModule = require('./ai');
-aiModule(app, { consoleAuth: (req, res, next) => next(), DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => 20 });
+aiModule(app, { consoleAuth: (req, res, next) => next(), DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => 20, aiLocalLeft, aiLocalCost: () => 5 });
 
 const PNG_1PX = Buffer.from('89504e470d0a1a0a0000000d49484452' + '000000010000000108060000001f15c489' + '0000000a49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082', 'hex');
 const SVG_MINI = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>');
@@ -81,10 +87,14 @@ const get = (port, p, headers = {}) => new Promise((resolve, reject) => {
     const dlPng = await get(port, `/api/ai/job/${idEdit}/download`);
     ok(dlPng.status === 200 && dlPng.headers['content-type'] === 'image/png' && /\.png/.test(dlPng.headers['content-disposition']), 'PNG 记录 download 返回 png 附件');
 
-    // 6) /api/ai/status 返回 aiFreeLeft 与 aiCost：edit 已用 1 次 → 0；stylize/nobg 未用 → 1（2026-10-21）
+    // 6) /api/ai/status 字段（2026-10-21）：aiFreeLeft/aiCost = 改图/风格转换试用体系；
+    //    aiLocal/aiLocalCost = 移除背景/位图转矢量每日额度体系（今日已抠 1 次 → nobg 剩 4；vec 记录是旧日期 → 满额 5）
     const stRes = await get(port, '/api/ai/status');
     const st = JSON.parse(stRes.body.toString());
-    ok(stRes.status === 200 && st.aiFreeLeft && st.aiFreeLeft.edit === 0 && st.aiFreeLeft.stylize === 1 && st.aiFreeLeft.nobg === 1 && st.aiCost === 20, `status 返回 aiFreeLeft/aiCost（实际 ${JSON.stringify({ aiFreeLeft: st.aiFreeLeft, aiCost: st.aiCost })}）`);
+    ok(stRes.status === 200
+      && st.aiFreeLeft && st.aiFreeLeft.edit === 0 && st.aiFreeLeft.stylize === 1 && st.aiCost === 20
+      && st.aiLocal && st.aiLocal.unlimited === false && st.aiLocal.nobg === 4 && st.aiLocal.vec === 5 && st.aiLocalCost === 5,
+      `status 返回计费体系字段（实际 ${JSON.stringify({ aiFreeLeft: st.aiFreeLeft, aiCost: st.aiCost, aiLocal: st.aiLocal, aiLocalCost: st.aiLocalCost })}）`);
 
     server.close();
     fs.rmSync(DATA_DIR, { recursive: true, force: true });

@@ -164,9 +164,10 @@ module.exports = function registerAI(app, deps) {
   // ---- 状态：积分余额 + 今日免费次数 ----
   // aiFreeLeft（2026-10-21）：改图/风格转换各自的免费试用剩余次数，
   // 供前端"每人免费试 1 次"提示在试用用完后自动隐藏
+  // aiLocal（2026-10-21）：移除背景/位图转矢量的今日剩余免费次数（会员返回 unlimited），aiLocalCost 为其超出单价
   app.get('/api/ai/status', authUser, (req, res) => {
 
-    res.json({ ok: true, credits: req.user.credits || 0, freeLeft: freeLeft(req.user), level: req.user.level || 'none', aiFreeLeft: deps.aiFreeLeft ? deps.aiFreeLeft(req.user) : undefined, aiCost: deps.aiCost ? deps.aiCost() : undefined });
+    res.json({ ok: true, credits: req.user.credits || 0, freeLeft: freeLeft(req.user), level: req.user.level || 'none', aiFreeLeft: deps.aiFreeLeft ? deps.aiFreeLeft(req.user) : undefined, aiCost: deps.aiCost ? deps.aiCost() : undefined, aiLocal: deps.aiLocalLeft ? deps.aiLocalLeft(req.user) : undefined, aiLocalCost: deps.aiLocalCost ? deps.aiLocalCost() : undefined });
   });
 
   // ---- 发起生成 ----
