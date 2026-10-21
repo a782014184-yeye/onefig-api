@@ -166,7 +166,7 @@ module.exports = function registerAI(app, deps) {
   // 供前端"每人免费试 1 次"提示在试用用完后自动隐藏
   app.get('/api/ai/status', authUser, (req, res) => {
 
-    res.json({ ok: true, credits: req.user.credits || 0, freeLeft: freeLeft(req.user), level: req.user.level || 'none', aiFreeLeft: deps.aiFreeLeft ? deps.aiFreeLeft(req.user) : undefined });
+    res.json({ ok: true, credits: req.user.credits || 0, freeLeft: freeLeft(req.user), level: req.user.level || 'none', aiFreeLeft: deps.aiFreeLeft ? deps.aiFreeLeft(req.user) : undefined, aiCost: deps.aiCost ? deps.aiCost() : undefined });
   });
 
   // ---- 发起生成 ----

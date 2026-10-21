@@ -937,14 +937,18 @@ require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + A
 // AI 工坊：积分体系 + 生图流水线
 const aiModule = require('./ai');
 const CREDIT_PACKAGES = aiModule.CREDIT_PACKAGES;
-aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft });
+aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST });
 // 生成记录入账：AI 工坊四个非生成类页签的成功结果统一写入 jobs（2026-10-21）
 const recordAIResult = aiModule.recordAIResult;
-// 免费试用剩余次数（edit/stylize 独立计数，读 users.aiFreeUsed）——
+// 免费试用剩余次数（edit/stylize/nobg 独立计数，读 users.aiFreeUsed）——
 // 注意：AI_EDIT_FREE 在本文件更下方才定义，本函数只在请求期被调用，届时已完成初始化（2026-10-21）
 function aiFreeLeft(u) {
   const fu = u.aiFreeUsed && typeof u.aiFreeUsed === 'object' ? u.aiFreeUsed : {};
-  return { edit: Math.max(0, AI_EDIT_FREE - (fu.edit || 0)), stylize: Math.max(0, AI_EDIT_FREE - (fu.stylize || 0)) };
+  return {
+    edit: Math.max(0, AI_EDIT_FREE - (fu.edit || 0)),
+    stylize: Math.max(0, AI_EDIT_FREE - (fu.stylize || 0)),
+    nobg: Math.max(0, AI_EDIT_FREE - (fu.nobg || 0)),
+  };
 }
 
 // 在线支付：微信 Native 扫码 + 支付宝电脑网站支付（2026-10-08；2026-10-17 起同时支持积分充值）
@@ -1105,12 +1109,19 @@ app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
   });
 });
 
-// ---- 移除背景（服务器本地 rembg 抠图，免费）----
+// ---- 移除背景（服务器本地 rembg 抠图；2026-10-21 起 1 次免费试用，之后 20 积分/次）----
 app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
     if (!req.file) return res.status(400).json({ ok: false, error: '请上传图片' });
     if (!verifyUploadedImage(req, res)) return;
+    // 费用闸门：与 AI 改图/风格转换同一套（首次免费试用，之后 AI_EDIT_COST 积分/次，失败退还）
+    const charge = chargeAIEdit(req.user.id, 'nobg');
+    if (!charge.ok) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_EDIT_COST });
+    }
+    const refund = () => refundAIEdit(req.user.id, charge.paidWith, 'nobg');
     try {
       const buf = fs.readFileSync(req.file.path);
       fs.unlinkSync(req.file.path);
@@ -1125,11 +1136,12 @@ app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
       const baseUrl = req.protocol + '://' + req.get('host');
       // 生成记录：移除背景也入账（2026-10-21）
       recordAIResult({ userId: req.user.id, kind: 'nobg', prompt: '移除背景：' + String(req.file.originalname || '图片').slice(0, 60), ext: 'png', buf: out });
-      logLine('ai-op', `remove-bg ok user=${req.user.name} ${Date.now() - t0}ms`);
-      res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName) });
+      logLine('ai-op', `remove-bg ok user=${req.user.name} paidWith=${charge.paidWith} ${Date.now() - t0}ms`);
+      res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName), paidWith: charge.paidWith, credits: charge.paidWith === 'credit' ? charge.credits : undefined });
     } catch (e) {
+      refund();
       logLine('ai-op', `remove-bg FAIL user=${req.user.name} ${e && e.message}`);
-      res.status(502).json({ ok: false, error: '抠图服务开小差了，请稍后重试' });
+      res.status(502).json({ ok: false, error: '抠图服务开小差了，请稍后重试（未扣积分）' });
     }
   });
 });
@@ -1143,7 +1155,7 @@ app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
 // 注：charge/refund 为同步 read-modify-write，单进程内天然原子（无 await 交错），无需加锁。
 const AI_EDIT_COST = Math.max(0, Number(process.env.ONEFIG_AI_EDIT_COST ?? 20));
 const AI_EDIT_FREE = Math.max(0, Number(process.env.ONEFIG_AI_EDIT_FREE ?? 1));
-// feature：'edit' | 'stylize'，免费次数按功能分别记在 users.aiFreeUsed.<feature>
+// feature：'edit' | 'stylize' | 'nobg'，免费次数按功能分别记在 users.aiFreeUsed.<feature>
 function chargeAIEdit(uid, feature) {
   const users = loadUsers();
   const u = users.find(x => x.id === uid);
