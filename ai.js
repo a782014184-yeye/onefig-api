@@ -201,10 +201,30 @@ module.exports = function registerAI(app, deps) {
     } catch { res.status(500).json({ ok: false, error: '服务器开小差了' }); }
   });
 
+  // ---- 生成记录入账：AI 工坊五个页签统一（2026-10-21，此前仅"生成素材"有记录）----
+  // edit/stylize/remove-bg/vectorize 成功后各写一条 job 记录，结果文件存
+  // AI_DIR/<id>/c0.<ext>，与生成素材共用同一套列表 / 预览 / 下载接口。
+  // 失败不入账（失败本来就不出图，也无积分损失争议）；入账失败不影响接口返回。
+  function recordAIResult({ userId, kind, prompt, ext = 'png', buf }) {
+    try {
+      if (!buf || !buf.length) return null;
+      const id = crypto.randomUUID();
+      const dir = path.join(AI_DIR, id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `c0.${ext}`), buf);
+      const jobs = loadJobs();
+      jobs.unshift({ id, userId, kind, prompt: String(prompt || '').slice(0, 200), status: 'done', candidates: [0], picked: 0, ext, cost: 0, createdAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
+      saveJobs(jobs);
+      logLine('ai-op', `record kind=${kind} user=${userId} id=${id.slice(0, 8)}`);
+      return id;
+    } catch (e) { logLine('ai-op', `record FAIL kind=${kind} ${e && e.message}`); return null; }
+  }
+  module.exports.recordAIResult = recordAIResult;
+
   // ---- 我的任务列表 ----
   app.get('/api/ai/jobs', authUser, (req, res) => {
     const list = loadJobs().filter(j => j.userId === req.user.id)
-      .map(j => ({ id: j.id, prompt: j.prompt, style: j.style, status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error }));
+      .map(j => ({ id: j.id, kind: j.kind || 'gen', prompt: j.prompt, style: j.style, ext: j.ext || 'png', status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error }));
     res.json({ ok: true, list });
   });
 
@@ -214,9 +234,10 @@ module.exports = function registerAI(app, deps) {
     if (!j || j.status !== 'done') return res.status(404).json({ ok: false });
     const n = parseInt(req.params.n, 10);
     if (!j.candidates.includes(n)) return res.status(404).json({ ok: false });
-    const f = path.join(AI_DIR, j.id, `c${n}.png`);
+    const ext = j.ext === 'svg' ? 'svg' : 'png';
+    const f = path.join(AI_DIR, j.id, `c${n}.${ext}`);
     if (!fs.existsSync(f)) return res.status(404).json({ ok: false });
-    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Type', ext === 'svg' ? 'image/svg+xml' : 'image/png');
     res.setHeader('Cache-Control', 'private, max-age=3600');
     fs.createReadStream(f).pipe(res);
   });
@@ -234,17 +255,20 @@ module.exports = function registerAI(app, deps) {
     res.json({ ok: true });
   });
 
-  // ---- 下载选定的透明底 PNG（可反复下载；注入 AIGC 元数据隐式标识，内容编号 = AI-任务号） ----
+  // ---- 下载选定的透明底 PNG（可反复下载；注入 AIGC 元数据隐式标识，内容编号 = AI-任务号）----
+  // 2026-10-21：兼容五类记录（edit/style/nobg/vec），SVG 记录不注入 PNG 元数据
   app.get('/api/ai/job/:id/download', authUser, (req, res) => {
     const j = loadJobs().find(x => x.id === req.params.id && x.userId === req.user.id);
     if (!j || j.picked == null) return res.status(404).json({ ok: false, error: '还没有选定素材' });
-    const f = path.join(AI_DIR, j.id, `c${j.picked}.png`);
+    const ext = j.ext === 'svg' ? 'svg' : 'png';
+    const f = path.join(AI_DIR, j.id, `c${j.picked}.${ext}`);
     if (!fs.existsSync(f)) return res.status(404).json({ ok: false });
-    const name = (j.prompt.slice(0, 20).replace(/[\\/:*?"<>|\s]/g, '') || 'onefig') + '.png';
-    const buf = injectAigcMeta(fs.readFileSync(f), 'AI-' + j.id.slice(0, 8).toUpperCase());
-    logLine('ai-op', `download user=${req.user.name} prompt="${j.prompt.slice(0, 40)}"`);
+    const name = (j.prompt.slice(0, 20).replace(/[\\/:*?"<>|\s]/g, '') || 'onefig') + '.' + ext;
+    const raw = fs.readFileSync(f);
+    const buf = ext === 'png' ? injectAigcMeta(raw, 'AI-' + j.id.slice(0, 8).toUpperCase()) : raw;
+    logLine('ai-op', `download user=${req.user.name} kind=${j.kind || 'gen'} prompt="${j.prompt.slice(0, 40)}"`);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
-    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Type', ext === 'svg' ? 'image/svg+xml' : 'image/png');
     res.send(buf);
   });
 

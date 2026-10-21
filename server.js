@@ -935,8 +935,11 @@ app.get('/api/my/submissions', authUser, (req, res) => {
 require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + ADMIN_PATH, readSubmissions: readDB, getOnlineCount });
 
 // AI 工坊：积分体系 + 生图流水线
-const CREDIT_PACKAGES = require('./ai').CREDIT_PACKAGES;
-require('./ai')(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine });
+const aiModule = require('./ai');
+const CREDIT_PACKAGES = aiModule.CREDIT_PACKAGES;
+aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine });
+// 生成记录入账：AI 工坊四个非生成类页签的成功结果统一写入 jobs（2026-10-21）
+const recordAIResult = aiModule.recordAIResult;
 
 // 在线支付：微信 Native 扫码 + 支付宝电脑网站支付（2026-10-08；2026-10-17 起同时支持积分充值）
 require('./pay')(app, { authUser, DATA_DIR, PLANS, CREDIT_PACKAGES, loadUsers, saveUsers, logLine });
@@ -1085,6 +1088,8 @@ app.post('/api/vectorize', authUser, aiLocalRateLimit, (req, res) => {
       const outName = 'ai-vec-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.svg';
       fs.writeFileSync(path.join(FILES_DIR, outName), out);
       const baseUrl = req.protocol + '://' + req.get('host');
+      // 生成记录：位图转矢量也入账（2026-10-21）
+      recordAIResult({ userId: req.user.id, kind: 'vec', prompt: '位图转矢量：' + String(req.file.originalname || '图片').slice(0, 60), ext: 'svg', buf: out });
       logLine('ai-op', `vectorize ok user=${req.user.name} ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName) });
     } catch (e) {
@@ -1112,6 +1117,8 @@ app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
       const outName = 'ai-nobg-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       fs.writeFileSync(path.join(FILES_DIR, outName), out);
       const baseUrl = req.protocol + '://' + req.get('host');
+      // 生成记录：移除背景也入账（2026-10-21）
+      recordAIResult({ userId: req.user.id, kind: 'nobg', prompt: '移除背景：' + String(req.file.originalname || '图片').slice(0, 60), ext: 'png', buf: out });
       logLine('ai-op', `remove-bg ok user=${req.user.name} ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName) });
     } catch (e) {
@@ -1163,6 +1170,7 @@ function refundAIEdit(uid, paidWith, feature) {
 }
 
 // ---- AI 风格转换（照片/其他图 → 指定插画风）----
+const STY_NAMES = { flat: '矢量插画风', matte: 'OneFig 风格', threed: '3D 立体质感' };
 const STYLE_PROMPTS = {
   flat: '把这张图重绘成扁平矢量插画风格：色块平涂、柔和渐变、简洁流畅的轮廓线条，类似 Figdraw 科研示意图，保持原有构图和主体不变，纯色干净背景',
   matte: '把这张图重绘成柔和奶油质感插画：水彩般的渐变晕染、哑光柔和色彩、边缘圆润，保持原有构图和主体不变，纯色干净背景',
@@ -1208,6 +1216,8 @@ app.post('/api/ai-stylize', authUser, aiEditRateLimit, (req, res) => {
       const outName = 'ai-sty-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       // 注入 AIGC 元数据隐式标识（GB 45438-2025），内容编号即文件名
       fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(buf, outName.replace(/\.png$/, '')));
+      // 生成记录：风格转换也入账（2026-10-21，存原始字节，下载时再注入元数据避免重复）
+      recordAIResult({ userId: req.user.id, kind: 'style', prompt: custom ? custom.slice(0, 80) : `风格转换：${STY_NAMES[style] || style}`, ext: 'png', buf });
       logLine('ai-op', `stylize ok user=${req.user.name} style=${style}${custom ? ' custom="' + custom.slice(0, 30) + '"' : ''} paidWith=${charge.paidWith} ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName), paidWith: charge.paidWith, credits: charge.paidWith === 'credit' ? charge.credits : undefined });
     } catch (e) {
@@ -1260,6 +1270,8 @@ app.post('/api/ai-edit', authUser, aiEditRateLimit, (req, res) => {
       const outName = 'ai-out-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       // 注入 AIGC 元数据隐式标识（GB 45438-2025），内容编号即文件名
       fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(buf, outName.replace(/\.png$/, '')));
+      // 生成记录：AI 改图也入账（2026-10-21，存原始字节，下载时再注入元数据避免重复）
+      recordAIResult({ userId: req.user.id, kind: 'edit', prompt: 'AI 改图：' + prompt.slice(0, 80), ext: 'png', buf });
       logLine('ai-op', `edit ok user=${req.user.name} prompt="${prompt.slice(0, 40)}" paidWith=${charge.paidWith} ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName), paidWith: charge.paidWith, credits: charge.paidWith === 'credit' ? charge.credits : undefined });
     } catch (e) {
