@@ -8,6 +8,7 @@ const MODEL = process.env.ARK_MODEL || 'doubao-seedream-4-5-251128';
 const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
 const CANDIDATES = 1; // 每次生成 = 1 张候选 = 10 积分（成本约 0.26 元/张，定价 1 元/张，毛利约 74%）；不满意再生成再扣 10 积分，无免费重抽
 const COST = 10; // 每次生成消耗积分（2026-10-21 按反馈统一定价 10）
+const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // 生成素材每人免费试用次数（2026-10-21 按反馈：1 次终身，与改图/风格转换同记 users.aiFreeUsed；0 = 纯积分制）
 const CREDIT_PACKAGES = [
   { id: 'p100', credits: 100, price: 9.9 },
   { id: 'p800', credits: 800, price: 59.9 },
@@ -140,7 +141,9 @@ module.exports = function registerAI(app, deps) {
       const users = loadUsers();
       const u = users.find(x => x.id === j.userId);
       if (u) {
+        // 全部失败 → 原路退还：积分退回，或恢复免费试用次数（2026-10-21 生成素材新增试用）
         if (j.paidWith === 'credit') u.credits = (u.credits || 0) + COST;
+        else if (j.paidWith === 'free' && u.aiFreeUsed) u.aiFreeUsed.gen = Math.max(0, (u.aiFreeUsed.gen || 0) - 1);
         saveUsers(users);
       }
     } else {
@@ -182,20 +185,27 @@ module.exports = function registerAI(app, deps) {
 
       const users = loadUsers();
       const u = users.find(x => x.id === req.user.id);
-      const paidWith = 'credit';
-      if ((u.credits || 0) < COST) return res.status(403).json({ ok: false, error: 'no-credit', credits: u.credits || 0 });
-      u.credits -= COST;
+      // 免费试用（2026-10-21 按反馈：每人 1 次终身免费，与改图/风格转换同记 users.aiFreeUsed）
+      const fu = u.aiFreeUsed && typeof u.aiFreeUsed === 'object' ? u.aiFreeUsed : (u.aiFreeUsed = {});
+      let paidWith = 'credit';
+      if ((fu.gen || 0) < GEN_FREE) { fu.gen = (fu.gen || 0) + 1; paidWith = 'free'; }
+      else if ((u.credits || 0) < COST) return res.status(403).json({ ok: false, error: 'no-credit', credits: u.credits || 0 });
+      else u.credits -= COST;
 
       // 简易限流：每用户同时只能跑 1 个任务
       const jobs = loadJobs();
-      if (jobs.some(j => j.userId === u.id && j.status === 'running'))
+      if (jobs.some(j => j.userId === u.id && j.status === 'running')) {
+        // 不放行：把刚扣的免费试用 / 积分原路退回（2026-10-21 与免费试用同加）
+        if (paidWith === 'free') fu.gen = Math.max(0, fu.gen - 1); else u.credits += COST;
+        saveUsers(users);
         return res.status(429).json({ ok: false, error: '上一个生成任务还在跑，等它出图后再试～' });
+      }
 
       const job = { id: crypto.randomUUID(), userId: u.id, prompt, style, status: 'running', candidates: [], picked: null, paidWith, cost: COST, createdAt: new Date().toISOString() };
       jobs.unshift(job);
       saveJobs(jobs);
       saveUsers(users);
-      logLine('ai-op', `generate start user=${u.name} prompt="${prompt.slice(0, 40)}" style=${style} cost=${COST}`);
+      logLine('ai-op', `generate start user=${u.name} prompt="${prompt.slice(0, 40)}" style=${style} paidWith=${paidWith} cost=${paidWith === 'credit' ? COST : 0}`);
       res.json({ ok: true, jobId: job.id, paidWith });
       setImmediate(() => runJob(job).catch(() => {
         const js = loadJobs(); const jj = js.find(x => x.id === job.id);
@@ -354,3 +364,5 @@ module.exports = function registerAI(app, deps) {
 
 // 供 server.js / pay.js 共享同一份套餐定义（在线支付下单时校验用）
 module.exports.CREDIT_PACKAGES = CREDIT_PACKAGES;
+// 生成素材免费试用次数（server.js 的 aiFreeLeft 注入 status 用）
+module.exports.GEN_FREE = GEN_FREE;

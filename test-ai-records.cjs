@@ -11,7 +11,7 @@ const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'onefig-ai-records-'));
 const AI_DIR = path.join(DATA_DIR, 'ai');
 fs.mkdirSync(AI_DIR, { recursive: true });
 
-const USER = { id: 'u-test-1', name: '测试用户', credits: 100, pwdVer: 1, aiFreeUsed: { edit: 1, stylize: 0 }, aiDailyUsed: { nobg: { date: new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10), count: 1 }, vec: { date: '2026-01-01', count: 9 } } };
+const USER = { id: 'u-test-1', name: '测试用户', credits: 100, pwdVer: 1, aiFreeUsed: { gen: 0, edit: 1, stylize: 0 }, aiDailyUsed: { nobg: { date: new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10), count: 1 }, vec: { date: '2026-01-01', count: 9 } } };
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 fs.writeFileSync(USERS_FILE, JSON.stringify([USER]));
 const loadUsers = () => JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
@@ -24,7 +24,7 @@ const injectAigcMeta = (buf) => buf;
 
 const app = express();
 app.use(express.json({ limit: '12mb' }));
-const aiFreeLeft = u => ({ edit: Math.max(0, 1 - ((u.aiFreeUsed || {}).edit || 0)), stylize: Math.max(0, 1 - ((u.aiFreeUsed || {}).stylize || 0)) });
+const aiFreeLeft = u => ({ gen: Math.max(0, 1 - ((u.aiFreeUsed || {}).gen || 0)), edit: Math.max(0, 1 - ((u.aiFreeUsed || {}).edit || 0)), stylize: Math.max(0, 1 - ((u.aiFreeUsed || {}).stylize || 0)) });
 const aiLocalLeft = u => {
   if (['pro', 'team'].includes(u.level)) return { unlimited: true, nobg: null, vec: null };
   const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
@@ -93,7 +93,7 @@ const get = (port, p, headers = {}) => new Promise((resolve, reject) => {
     const stRes = await get(port, '/api/ai/status');
     const st = JSON.parse(stRes.body.toString());
     ok(stRes.status === 200
-      && st.aiFreeLeft && st.aiFreeLeft.edit === 0 && st.aiFreeLeft.stylize === 1 && st.aiCost === 10
+      && st.aiFreeLeft && st.aiFreeLeft.gen === 1 && st.aiFreeLeft.edit === 0 && st.aiFreeLeft.stylize === 1 && st.aiCost === 10
       && st.aiLocal && st.aiLocal.unlimited === false && st.aiLocal.nobg === 4 && st.aiLocal.vec === 5 && st.aiLocalCost && st.aiLocalCost.nobg === 5 && st.aiLocalCost.vec === 10,
       `status 返回计费体系字段（实际 ${JSON.stringify({ aiFreeLeft: st.aiFreeLeft, aiCost: st.aiCost, aiLocal: st.aiLocal, aiLocalCost: st.aiLocalCost })}）`);
 
