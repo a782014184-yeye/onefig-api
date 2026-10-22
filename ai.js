@@ -48,7 +48,7 @@ const SCIENCE_RULES = '严格遵循真实解剖学与形态学：结构与比例
 const CELL_COLOR_RULES = '微观主体按教科书规范着色：细胞质浅黄或米色、细胞核蓝色、线粒体绿色、内质网紫色、高尔基体粉色，同类细胞器颜色保持统一；';
 const isCellular = t => /细胞|线粒体|内质网|高尔基|溶酶体|核糖体|中心体|伪足|吞噬泡|囊泡/.test(t);
 const PROMPT_TMPL = (topic, style) =>
-  `${topic}，形态科学准确。${SCIENCE_RULES}${isCellular(topic) ? CELL_COLOR_RULES : ''}结构完整、细节到位：面部特征齐全（眼睛、鼻子、嘴巴都要清晰），动物主体必须画出胡须，四肢和脚趾分明；只画描述中提到的结构，不要擅自添加乳头、乳房等多余解剖结构。${STYLE_SUFFIX[style] || STYLE_SUFFIX.matte}，轮廓圆润干净，类似 BioRender 的现代科研示意图，干净专业、辨识度高。配色低饱和但颜色必须科学准确：严格遵循描述中的颜色——描述为白色就是纯白（可配极轻阴影表现体积，但整体观感必须仍是白色），不要发灰、不要偏米色、不要擅自改色；裸露的皮肤部位（尾巴、耳朵、口鼻、脚掌等）按真实生理结构呈肉粉色，不要画成被毛同色。透明背景，无任何文字和标注，主体板正居中，极简专业`;
+  `${topic}，形态科学准确。${SCIENCE_RULES}${isCellular(topic) ? CELL_COLOR_RULES : ''}结构完整、细节到位：面部特征齐全（眼睛、鼻子、嘴巴都要清晰），动物主体必须画出胡须，四肢和脚趾分明；只画描述中提到的结构，不要擅自添加乳头、乳房等多余解剖结构。${STYLE_SUFFIX[style] || STYLE_SUFFIX.matte}，轮廓圆润干净，类似 BioRender 的现代科研示意图，干净专业、辨识度高。颜色必须严格按描述：主体被毛/主体是什么颜色就是什么颜色——描述为黑色就是黑色、白色就是纯白（仅可配极轻阴影表现体积，整体观感必须仍是描述的颜色），严禁擅自更改主体颜色，不要发灰、不要偏米色；裸露的皮肤部位（尾巴、耳朵、口鼻、脚掌等）按真实生理结构呈肉粉色，不要画成被毛同色。透明背景，无任何文字和标注，主体板正居中，极简专业`;
 
 module.exports = function registerAI(app, deps) {
   const { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine } = deps;
