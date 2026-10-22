@@ -295,6 +295,8 @@ module.exports = function registerAI(app, deps) {
   async function runSplitJob(job, imgBuf) {
     const dir = path.join(AI_DIR, job.id);
     fs.mkdirSync(dir, { recursive: true });
+    // 原图一并保存：生成结果区主预览显示"拆分前的大图"（2026-10-22 按反馈）
+    try { fs.writeFileSync(path.join(dir, 'orig.png'), ensurePng(imgBuf)); } catch {}
     try {
       const items = await arkSplitLayers(imgBuf, job.prompt);
       // data[0] 底图 → c0.png；图层按 z_index 从底到顶 → c1..cN.png
@@ -556,6 +558,17 @@ module.exports = function registerAI(app, deps) {
     const f = path.join(AI_DIR, j.id, `c${n}.${ext}`);
     if (!fs.existsSync(f)) return res.status(404).json({ ok: false });
     res.setHeader('Content-Type', ext === 'svg' ? 'image/svg+xml' : 'image/png');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    fs.createReadStream(f).pipe(res);
+  });
+
+  // 拆分原图预览（2026-10-22）：生成结果区主图显示拆分前的大图
+  app.get('/api/ai/job/:id/orig', authUser, (req, res) => {
+    const j = loadJobs().find(x => x.id === req.params.id && x.userId === req.user.id);
+    if (!j || j.kind !== 'split') return res.status(404).json({ ok: false });
+    const f = path.join(AI_DIR, j.id, 'orig.png');
+    if (!fs.existsSync(f)) return res.status(404).json({ ok: false });
+    res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'private, max-age=3600');
     fs.createReadStream(f).pipe(res);
   });
