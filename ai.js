@@ -464,6 +464,76 @@ module.exports = function registerAI(app, deps) {
     res.json({ ok: true, list });
   });
 
+  // ---- 图层打包下载：ZIP（store 无压缩——PNG 本已压缩；免依赖手写 ZIP，2026-10-22）----
+  function crc32(buf) {
+    let table = crc32.table;
+    if (!table) {
+      table = crc32.table = new Int32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+        table[n] = c;
+      }
+    }
+    let c = -1;
+    for (let i = 0; i < buf.length; i++) c = table[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ -1) >>> 0;
+  }
+  function buildZip(entries) { // entries: [{name, buf}]（store 方式，CRC-32 + UTF-8 文件名）
+    const encoder = new TextEncoder();
+    const chunks = []; const central = [];
+    let offset = 0;
+    for (const e of entries) {
+      const nameBuf = encoder.encode(e.name);
+      const crc = crc32(e.buf);
+      const head = Buffer.alloc(30);
+      head.writeUInt32LE(0x04034b50, 0);
+      head.writeUInt16LE(20, 4); head.writeUInt16LE(0x0800, 6); // UTF-8 文件名标志
+      head.writeUInt16LE(0, 8); // 存储方式 = store
+      head.writeUInt16LE(0, 10); head.writeUInt16LE(0x21, 12); // 时间/日期
+      head.writeUInt32LE(crc, 14);
+      head.writeUInt32LE(e.buf.length, 18); head.writeUInt32LE(e.buf.length, 22);
+      head.writeUInt16LE(nameBuf.length, 26); head.writeUInt16LE(0, 28);
+      chunks.push(head, nameBuf, e.buf);
+      const c = Buffer.alloc(46);
+      c.writeUInt32LE(0x02014b50, 0);
+      c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(0x0800, 8);
+      c.writeUInt16LE(0, 10); c.writeUInt16LE(0x21, 12);
+      c.writeUInt32LE(crc, 16);
+      c.writeUInt32LE(e.buf.length, 20); c.writeUInt32LE(e.buf.length, 24);
+      c.writeUInt16LE(nameBuf.length, 28);
+      c.writeUInt32LE(0, 30); c.writeUInt16LE(0, 34); c.writeUInt16LE(0, 36); c.writeUInt16LE(0, 38);
+      c.writeUInt32LE(0, 40); c.writeUInt32LE(offset, 42);
+      central.push(c, nameBuf);
+      offset += 30 + nameBuf.length + e.buf.length;
+    }
+    let cdSize = 0; for (const b of central) cdSize += b.length;
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(0, 4); eocd.writeUInt16LE(0, 6);
+    eocd.writeUInt16LE(entries.length, 8); eocd.writeUInt16LE(entries.length, 10);
+    eocd.writeUInt32LE(cdSize, 12); eocd.writeUInt32LE(offset, 16); eocd.writeUInt16LE(0, 20);
+    return Buffer.concat([...chunks, ...central, eocd]);
+  }
+
+  // 拆分记录整包下载：底图 + 全部图层打成一个 ZIP
+  app.get('/api/ai/job/:id/zip', authUser, (req, res) => {
+    const j = loadJobs().find(x => x.id === req.params.id && x.userId === req.user.id);
+    if (!j || j.status !== 'done' || j.kind !== 'split') return res.status(404).json({ ok: false, error: '记录不存在或未完成的拆分' });
+    const entries = (j.candidates || []).map(i => {
+      const f = path.join(AI_DIR, j.id, `c${i}.png`);
+      if (!fs.existsSync(f)) return null;
+      const meta = (j.layers || []).find(l => l.i === i);
+      const raw = ((meta ? meta.name : (i === 0 ? '底图-背景' : `图层${i}`)).replace(/[\\/:*?"<>|\s]/g, '') || `图层${i}`).slice(0, 40);
+      return { name: `${String(i).padStart(2, '0')}-${raw}.png`, buf: fs.readFileSync(f) };
+    }).filter(Boolean);
+    if (!entries.length) return res.status(404).json({ ok: false, error: '图层文件缺失' });
+    logLine('ai-op', `zip download user=${req.user.name} job=${j.id.slice(0, 8)} files=${entries.length}`);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent('OneFig-layers-' + j.id.slice(0, 8) + '.zip')}`);
+    res.send(buildZip(entries));
+  });
+
   // ---- 删除一条生成记录（2026-10-22 按反馈：卡片悬停删除，需弹窗确认）----
   // 记录与结果文件一并删除，不可恢复；只能删自己的
   app.delete('/api/ai/job/:id', authUser, (req, res) => {
