@@ -10,8 +10,8 @@ const crypto = require('crypto');
 const MODEL = process.env.ARK_MODEL || 'doubao-seedream-5-0-pro-260628';
 const SIZE = process.env.ARK_SIZE || '1728x1728'; // 生成素材出图尺寸（2026-10-22 按反馈升高清档 1728²=298 万像素 >261 万，单价 0.60 元/张）
 const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
-const CANDIDATES = 1; // 每次生成 = 1 张候选 = 10 积分（Seedream 5.0 Pro 1536² 成本 0.30 元/张，定价 1 元/张，毛利约 70%）；不满意再生成再扣 10 积分，无免费重抽
-const COST = 10; // 每次生成消耗积分（2026-10-21 按反馈统一定价 10）
+const CANDIDATES = 1; // 每次生成 = 1 张候选 = 30 积分（Seedream 5.0 Pro 1728² 成本 0.60 元/张，定价 3 元/张，毛利约 80%）；不满意再生成再扣 30 积分，无免费重抽
+const COST = 30; // 每次生成消耗积分（2026-10-22 晚按反馈调价 10→30）
 const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // 生成素材每人免费试用次数（2026-10-21 按反馈：1 次终身，与改图/风格转换同记 users.aiFreeUsed；0 = 纯积分制）
 
 // ---- 生成大图（2026-10-22 新增）：期刊封面 / 文内摘要图 / 文内机制图 ----
@@ -20,13 +20,13 @@ const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // �
 const BIG_COST = Math.max(0, Number(process.env.ONEFIG_AI_BIG_COST ?? 30)); // 30 积分/张
 const BIG_FREE = Math.max(0, Number(process.env.ONEFIG_AI_BIG_FREE ?? 1));   // 每人免费试用 1 次
 // 图层拆分单价（2026-10-22；Seedream 5.0 pro 原生能力，按底图+图层张数计费，成本约为单图数倍）
-const SPLIT_COST = Math.max(0, Number(process.env.ONEFIG_AI_SPLIT_COST ?? 60));
+const SPLIT_COST = Math.max(0, Number(process.env.ONEFIG_AI_SPLIT_COST ?? 100)); // 2026-10-22 晚按反馈调价 60→100
 const CREDIT_PACKAGES = [
   { id: 'p100', credits: 100, price: 9.9 },
   { id: 'p800', credits: 800, price: 59.9 },
   { id: 'p2000', credits: 2000, price: 99.9 },
 ];
-const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制一次性赠送（按 10 积分/张约 15/90/300 张图）
+const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制一次性赠送（按素材 30 积分/张约 5/30/100 张图）
 // 平台安全策略会 403 的词，提前拦截并友好提示（不扣积分）
 const BLOCKWORDS = ['肾小球', '肾小囊', '肾单位', '髓袢', '肾小管'];
 

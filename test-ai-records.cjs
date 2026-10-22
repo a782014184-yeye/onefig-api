@@ -32,7 +32,7 @@ const aiLocalLeft = u => {
   return { unlimited: false, nobg: left('nobg'), vec: left('vec') };
 };
 const aiModule = require('./ai');
-aiModule(app, { consoleAuth: (req, res, next) => next(), DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => 10, aiBigCost: () => 30, aiLocalLeft, aiLocalCost: () => ({ nobg: 5, vec: 10 }) });
+aiModule(app, { consoleAuth: (req, res, next) => next(), DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => 30, aiBigCost: () => 30, aiSplitCost: () => 100, aiLocalLeft, aiLocalCost: () => ({ nobg: 5, vec: 10 }) });
 
 const PNG_1PX = Buffer.from('89504e470d0a1a0a0000000d49484452' + '000000010000000108060000001f15c489' + '0000000a49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082', 'hex');
 const SVG_MINI = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>');
@@ -100,7 +100,7 @@ const httpReq = (port, method, p) => new Promise((resolve, reject) => {
     const stRes = await get(port, '/api/ai/status');
     const st = JSON.parse(stRes.body.toString());
     ok(stRes.status === 200
-      && st.aiFreeLeft && st.aiFreeLeft.gen === 1 && st.aiFreeLeft.big === 1 && st.aiFreeLeft.edit === 0 && st.aiFreeLeft.stylize === 1 && st.aiCost === 10 && st.aiBigCost === 30
+      && st.aiFreeLeft && st.aiFreeLeft.gen === 1 && st.aiFreeLeft.big === 1 && st.aiFreeLeft.edit === 0 && st.aiFreeLeft.stylize === 1 && st.aiCost === 30 && st.aiBigCost === 30 && st.aiSplitCost === 100
       && st.aiLocal && st.aiLocal.unlimited === false && st.aiLocal.nobg === 4 && st.aiLocal.vec === 5 && st.aiLocalCost && st.aiLocalCost.nobg === 5 && st.aiLocalCost.vec === 10,
       `status 返回计费体系字段（实际 ${JSON.stringify({ aiFreeLeft: st.aiFreeLeft, aiCost: st.aiCost, aiLocal: st.aiLocal, aiLocalCost: st.aiLocalCost })}）`);
 
