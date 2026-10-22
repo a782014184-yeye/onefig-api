@@ -25,9 +25,10 @@ const BLOCKWORDS = ['肾小球', '肾小囊', '肾单位', '髓袢', '肾小管'
 const STYLE_SUFFIX = {
   flat: '二维扁平矢量插画风格，类似Adobe Illustrator绘制的科研示意图，色块平涂加柔和线性渐变，完全没有3D效果、没有写实感、没有光泽高光、没有阴影渲染',
   matte: '柔和的二维插画，色块内有细腻柔和的渐变晕染，质感像水彩和哑光奶油的结合，轻微柔和体积感；但绝对不要玻璃光泽、不要塑料感、不要强烈高光、不要3D渲染感、不要写实照片感',
+  threed: '柔和的3D渲染插画：立体光影、柔和材质、类似Blender卡通渲染，圆润干净、轻微体积感，但绝对不要写实照片感、不要塑料感',
 };
 const PROMPT_TMPL = (topic, style) =>
-  `${topic}，形态科学准确。${STYLE_SUFFIX[style] || STYLE_SUFFIX.matte}，轮廓圆润干净，类似现代科研示意图。紫色粉色橙色系低饱和配色，透明背景，无任何文字和标注，主体板正居中，极简专业`;
+  `${topic}，形态科学准确。${STYLE_SUFFIX[style] || STYLE_SUFFIX.matte}，轮廓圆润干净，类似现代科研示意图。低饱和和谐配色（以主体为准，不限定具体色相），透明背景，无任何文字和标注，主体板正居中，极简专业`;
 
 module.exports = function registerAI(app, deps) {
   const { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine } = deps;
@@ -212,7 +213,7 @@ module.exports = function registerAI(app, deps) {
   app.post('/api/ai/generate', authUser, (req, res) => {
     try {
       const prompt = String((req.body || {}).prompt || '').trim().slice(0, 500);
-      const style = (req.body || {}).style === 'flat' ? 'flat' : 'matte';
+      const style = ['flat', 'matte', 'threed'].includes((req.body || {}).style) ? req.body.style : 'matte';
       if (!prompt) return res.status(400).json({ ok: false, error: '先描述一下想要什么素材吧' });
       if (prompt.length < 4) return res.status(400).json({ ok: false, error: '描述再具体一点点，太简短容易画歪' });
       const hit = BLOCKWORDS.find(w => prompt.includes(w));
