@@ -431,17 +431,28 @@ module.exports = function registerConsole(app, deps) {
     res.setHeader('Cache-Control', 'private, max-age=3600');
     fs.createReadStream(f).pipe(res);
   });
-  // 画板导出记录（仅元数据：图在用户浏览器本地生成，服务器本无图像）
+  // 画板导出图（2026-10-22 起导出时浏览器上传存档；此前只有 downloads.json 元数据，无图）
   app.get('/console/api/export-records', consoleAuth, (req, res) => {
     try {
       const users = readJSON(path.join(DATA_DIR, 'users.json'), []);
       const umap = Object.fromEntries(users.map(u => [u.id, { name: u.name || u.email || u.id, email: u.email || '' }]));
-      let logs = readJSON(path.join(DATA_DIR, 'console', 'downloads.json'), []).filter(l => l.kind === 'export');
+      let logs = readJSON(path.join(DATA_DIR, 'console', 'exports.json'), []);
       const q = String(req.query.q || '').trim().toLowerCase();
       if (q) logs = logs.filter(l => { const u = umap[l.userId] || { name: l.userId, email: '' }; return (u.name || '').toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q) || (l.boardTitle || '').toLowerCase().includes(q); });
       logs.sort((a, b) => String(b.time).localeCompare(String(a.time)));
       res.json({ ok: true, total: logs.length, list: logs.slice(0, 100).map(l => ({ ...l, userName: (umap[l.userId] || {}).name || l.userId, userEmail: (umap[l.userId] || {}).email || '' })) });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  // 导出图取图（tif 浏览器无法预览，只有 PNG/JPG 能显示）
+  app.get('/console/api/export-records/img', consoleAuth, (req, res) => {
+    const logs = readJSON(path.join(DATA_DIR, 'console', 'exports.json'), []);
+    const l = logs.find(x => x.id === req.query.id);
+    if (!l) return res.status(404).json({ ok: false });
+    const f = path.join(DATA_DIR, 'exports', path.basename(String(l.file || '')));
+    if (!fs.existsSync(f)) return res.status(404).json({ ok: false });
+    res.setHeader('Content-Type', l.fmt === 'jpg' || f.endsWith('.jpg') ? 'image/jpeg' : (l.fmt === 'tif' || f.endsWith('.tif') ? 'image/tiff' : 'image/png'));
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    fs.createReadStream(f).pipe(res);
   });
 
   app.delete('/console/api/orders/:id', consoleAuth, (req, res) => {
@@ -1183,13 +1194,15 @@ H.gallery=async()=>{
   const d=await api('/console/api/ai-gallery?q='+encodeURIComponent(g.q)+'&sort='+g.sort+'&offset=0&limit='+g.limit);
   g.total=d.total; g.items=d.list; g.offset=d.list.length;
   const html=renderGallery();
-  // 画板导出记录（只有元数据，图在用户本地生成）
+  // 画板导出图（2026-10-22 起上传存档；TIF 浏览器无法预览显示占位）
   api('/console/api/export-records?q='+encodeURIComponent(g.q)).then(e=>{
     const el=document.getElementById('g-export'); if(!el)return;
-    el.innerHTML='<div class="panel" style="margin-top:18px"><h3 style="font-size:15px;margin-bottom:8px">🎨 画板导出记录（'+e.total+' 条，仅元数据——导出图在用户浏览器本地生成，服务器不存档）</h3>'+
-      (e.list.length?'<div style="max-height:240px;overflow:auto"><table><tr><th>用户</th><th>画板</th><th>授权码</th><th>导出时间</th></tr>'+
-      e.list.map(r=>'<tr><td>'+esc(r.userName)+(r.userEmail?' <span style="color:#b0aac4;font-size:12px">'+esc(r.userEmail)+'</span>':'')+'</td><td>'+esc(r.boardTitle||'—')+'</td><td><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+esc(r.code)+'\\')">'+esc(r.code)+'</button></td><td style="font-size:12px">'+fmtT(r.time)+'</td></tr>').join('')+
-      '</table></div>':'<div class="sub" style="text-align:center;padding:10px">暂无导出记录</div>')+'</div>';
+    const cards=e.list.map(r=>'<div class="mat"><img loading="lazy" src="/console/api/export-records/img?id='+r.id+'" alt="" onerror="this.parentElement.innerHTML=\'<div class=&quot;noimg&quot; style=&quot;height:96px&quot;>'+(r.fmt==='tif'?'TIF 无法预览':(r.fmt||'').toUpperCase())+'</div>\'">'+
+      '<div class="t" title="'+esc(r.boardTitle||'')+'">'+esc((r.boardTitle||'画板导出').slice(0,16))+'</div>'+
+      '<div class="dl">'+esc(r.userName)+(r.userEmail?' · '+esc(r.userEmail):'')+'<br>'+esc((r.fmt||'').toUpperCase())+' · '+fmtSize(r.size)+' · '+fmtT(r.time)+'</div></div>').join('');
+    el.innerHTML='<div style="margin-top:22px"><h3 style="font-size:16px;margin-bottom:4px">🎨 画板导出图（'+e.total+' 条）</h3>'+
+      '<div class="sub" style="margin-bottom:12px">2026-10-22 起导出时自动上传存档（PDF/SVG 矢量格式不上传）；搜索与上方图库联动。</div>'+
+      (e.list.length?'<div class="grid">'+cards+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3">暂无导出记录（旧记录为本地导出，无图）</div>')+'</div>';
   }).catch(()=>{});
   return html;
 };

@@ -660,6 +660,43 @@ app.post('/api/export/permit', authUser, (req, res) => {
   }
 });
 
+// ---- 画板导出图存档（2026-10-22）：导出时浏览器上传 PNG/JPG/TIF，后台"生成图库"可见 ----
+// PDF/SVG 为浏览器端矢量管线产物，不上传；存档失败静默（绝不阻塞用户下载）
+const EXPORT_DIR = path.join(DATA_DIR, 'exports');
+fs.mkdirSync(EXPORT_DIR, { recursive: true });
+const EXPORT_INDEX = path.join(CONSOLE_DIR, 'exports.json');
+const uploadExport = multer({
+  storage,
+  limits: { fileSize: 45 * 1024 * 1024, files: 1 },   // 600dpi 位图可能很大，放宽到 45MB
+  fileFilter: (req, file, cb) => {
+    if (['image/png', 'image/jpeg', 'image/tiff'].includes(file.mimetype)) return cb(null, true);
+    cb(new Error('只支持 PNG / JPG / TIF'));
+  },
+});
+app.post('/api/export/archive', authUser, (req, res) => {
+  uploadExport.single('file')(req, res, (err) => {
+    if (err || !req.file) return res.status(400).json({ ok: false });
+    try {
+      const ext = path.extname(req.file.filename) || '.png';
+      const fname = Date.now() + '-' + crypto.randomBytes(4).toString('hex') + ext;
+      fs.renameSync(req.file.path, path.join(EXPORT_DIR, fname));
+      const logs = loadJSON(EXPORT_INDEX, []);
+      logs.push({
+        id: crypto.randomUUID(), file: fname, userId: req.user.id,
+        boardId: String((req.body || {}).boardId || '').slice(0, 40),
+        boardTitle: String((req.body || {}).boardTitle || '').slice(0, 80),
+        fmt: String((req.body || {}).fmt || 'png').slice(0, 6),
+        code: String((req.body || {}).code || '').slice(0, 20),
+        size: req.file.size,
+        time: new Date().toISOString(),
+      });
+      saveJSON(EXPORT_INDEX, logs);
+      logLine('ai-op', `export archive user=${req.user.name} fmt=${(req.body || {}).fmt} size=${req.file.size}`);
+      res.json({ ok: true });
+    } catch { res.status(500).json({ ok: false }); }
+  });
+});
+
 // 导出核销：确认下载时调用——扣额度/单次权益 + 生成授权码记流水（验真页可查）
 // 2026-10-20 权益分级：PDF/SVG 矢量格式与 600dpi 高清为红果/金果专享（客户端已置灰，此为服务端硬墙）
 app.post('/api/export/commit', authUser, (req, res) => {
