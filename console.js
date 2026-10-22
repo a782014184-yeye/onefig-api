@@ -379,6 +379,19 @@ module.exports = function registerConsole(app, deps) {
     res.json({ ok: true });
   });
 
+  // ---- AI 提示词集中管理（2026-10-22）：读取/保存，保存即生效、无需重启 ----
+  app.get('/console/api/ai-prompts', consoleAuth, (req, res) => {
+    try { res.json({ ok: true, prompts: deps.promptStore.get() }); }
+    catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.put('/console/api/ai-prompts', consoleAuth, (req, res) => {
+    try {
+      const saved = deps.promptStore.save((req.body || {}).prompts);
+      (deps.logLine || (() => {}))('ai-op', 'AI 提示词已在后台更新');
+      res.json({ ok: true, prompts: saved });
+    } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+  });
+
   app.delete('/console/api/orders/:id', consoleAuth, (req, res) => {
     save('orders.json', load('orders.json', []).filter(o => o.id !== req.params.id));
     res.json({ ok: true });
@@ -702,6 +715,7 @@ select:focus,input:focus{border-color:#a78bfa}
   <a href="#/materials" data-r="materials"><span class="ic">🎨</span>素材管理</a>
   <a href="#/users" data-r="users"><span class="ic">👥</span>账号管理</a>
   <a href="#/requests" data-r="requests"><span class="ic">💌</span>素材请求</a>
+  <a href="#/aiprompts" data-r="aiprompts"><span class="ic">🤖</span>AI 提示词</a>
   <a href="#/logs" data-r="logs"><span class="ic">📝</span>操作日志</a>
   <a href="#/health" data-r="health"><span class="ic">🩺</span>网站体检</a>
   <div class="acct"><span>👤</span><span id="acct-name" style="overflow:hidden;text-overflow:ellipsis">管理员</span><button onclick="logout()">退出</button></div>
@@ -1046,6 +1060,53 @@ H.health=async()=>{
     +'<div class="banner '+d.overall+'"><div style="font-size:19px;font-weight:700">'+ov[0]+'</div><div style="font-size:13px;opacity:.92;margin-top:4px">'+ov[1]+'</div></div>'
     +rows
     +'<div class="sub" style="text-align:center;margin-top:10px">体检时间：'+fmtT(d.checkedAt)+' · 本页数据来自服务器实时检查，打开自动更新，无需任何操作</div>';
+};
+
+/* ---------- AI 提示词（2026-10-22）：全部 AI 生成提示词集中在此，保存即生效 ---------- */
+H.aiprompts=async()=>{
+  const {prompts:P}=await api('/console/api/ai-prompts');
+  const ta=(id,label,val,rows,hint)=>'<div class="row"><label>'+label+(hint?' <span style="color:#b0aac4;font-weight:400">'+hint+'</span>':'')+'</label><textarea id="'+id+'" rows="'+(rows||3)+'" style="width:100%;resize:vertical;line-height:1.6">'+esc(val||'')+'</textarea></div>';
+  const bigRow=(key,name)=>'<div class="panel"><h3 style="font-size:15px;margin-bottom:10px">'+name+'</h3>'
+    +ta('p-big-'+key+'-prompt','提示词模板（{topic} = 用户描述）',P.big&&P.big[key]&&P.big[key].prompt,4)
+    +'<div class="row"><label>尺寸（宽x高，像素）</label><input id="p-big-'+key+'-size" value="'+esc(P.big&&P.big[key]&&P.big[key].size||'')+'" style="width:180px"></div></div>';
+  return '<h2>🤖 AI 提示词</h2><div class="sub">全部 AI 生成提示词集中管理：修改后点保存<strong>立即生效</strong>，无需重启服务。占位符：{topic}=用户描述，{styleSuffix}/{scienceRules}/{cellColorRules}=对应规则（生成素材模板内使用）。</div>'
+    +'<div class="toolbar"><button class="btn btn-p" onclick="savePrompts()">💾 保存全部修改</button><span class="sub" id="p-hint">修改后记得保存</span></div>'
+    +'<div class="panel"><h3 style="font-size:15px;margin-bottom:10px">📐 通用科学约束（生成素材）</h3>'
+    +ta('p-sci','科学约束 scienceRules',P.scienceRules,3)
+    +ta('p-cellcolor','微观配色 cellColorRules（仅细胞类描述自动插入）',P.cellColorRules,2)
+    +ta('p-cellkw','细胞类关键词（正则）',P.cellularKeywords,1)
+    +'</div>'
+    +'<div class="panel"><h3 style="font-size:15px;margin-bottom:10px">✨ 生成素材总模板 genTmpl</h3>'
+    +ta('p-gentmpl','模板（可用占位符：{topic} {styleSuffix} {scienceRules} {cellColorRules}）',P.genTmpl,7)
+    +'<h3 style="font-size:14px;margin:14px 0 10px">三种风格描述 styleSuffix</h3>'
+    +ta('p-suffix-flat','矢量插画风格 flat',P.styleSuffix&&P.styleSuffix.flat,3)
+    +ta('p-suffix-matte','OneFig 风格 matte',P.styleSuffix&&P.styleSuffix.matte,3)
+    +ta('p-suffix-threed','3D 立体质感 threed',P.styleSuffix&&P.styleSuffix.threed,3)
+    +'</div>'
+    +'<h3 style="font-size:15px;margin:4px 0 12px">🖌️ 生成大图（三种类型）</h3>'
+    +bigRow('cover','期刊封面（竖版）')+bigRow('abstract','文内摘要图（横版）')+bigRow('mechanism','文内机制图（横版）')
+    +'<div class="panel"><h3 style="font-size:15px;margin-bottom:10px">🖼️ 风格转换指令 stylize（qwen-image 图生图）</h3>'
+    +ta('p-sty-flat','矢量插画风格 flat',P.stylize&&P.stylize.flat,2)
+    +ta('p-sty-matte','OneFig 风格 matte',P.stylize&&P.stylize.matte,2)
+    +ta('p-sty-threed','3D 立体质感 threed',P.stylize&&P.stylize.threed,2)
+    +'</div>'
+    +'<div class="toolbar"><button class="btn btn-p" onclick="savePrompts()">💾 保存全部修改</button></div>';
+};
+window.savePrompts=async()=>{
+  const v=id=>document.getElementById(id).value;
+  const prompts={
+    scienceRules:v('p-sci').trim(),cellColorRules:v('p-cellcolor').trim(),cellularKeywords:v('p-cellkw').trim(),
+    genTmpl:v('p-gentmpl').trim(),
+    styleSuffix:{flat:v('p-suffix-flat').trim(),matte:v('p-suffix-matte').trim(),threed:v('p-suffix-threed').trim()},
+    big:{
+      cover:{prompt:v('p-big-cover-prompt').trim(),size:v('p-big-cover-size').trim()},
+      abstract:{prompt:v('p-big-abstract-prompt').trim(),size:v('p-big-abstract-size').trim()},
+      mechanism:{prompt:v('p-big-mechanism-prompt').trim(),size:v('p-big-mechanism-size').trim()},
+    },
+    stylize:{flat:v('p-sty-flat').trim(),matte:v('p-sty-matte').trim(),threed:v('p-sty-threed').trim()},
+  };
+  try{await api('/console/api/ai-prompts',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompts})});toast('已保存，立即生效 ✅');document.getElementById('p-hint').textContent='已保存 ✓ 下次生成即用新提示词'}
+  catch(e){toast(e.message)}
 };
 
 /* ---------- 路由 ---------- */

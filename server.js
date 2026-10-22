@@ -931,15 +931,19 @@ app.get('/api/my/submissions', authUser, (req, res) => {
   } catch { res.status(500).json({ ok: false, error: '读取失败' }); }
 });
 
+// AI 提示词集中存储（后台可视可改、保存即生效，见 ai-prompts.js）
+// 必须在挂载 console / ai 模块之前初始化（它们的 deps 要引用它）
+const promptStore = require('./ai-prompts')(DATA_DIR);
+
 // 挂载四页管理控制台
-require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + ADMIN_PATH, readSubmissions: readDB, getOnlineCount });
+require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + ADMIN_PATH, readSubmissions: readDB, getOnlineCount, promptStore });
 
 // AI 工坊：积分体系 + 生图流水线
 const aiModule = require('./ai');
 const CREDIT_PACKAGES = aiModule.CREDIT_PACKAGES;
 const GEN_FREE = aiModule.GEN_FREE; // 生成素材每人免费试用次数（ai.js 定义，env ONEFIG_AI_GEN_FREE 可调）
 const AI_BIG = aiModule.BIG;        // 生成大图定价（ai.js 定义，env ONEFIG_AI_BIG_COST / ONEFIG_AI_BIG_FREE 可调）
-aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST, aiBigCost: () => AI_BIG.COST, aiLocalLeft, aiLocalCost: () => ({ nobg: AI_NOBG_COST, vec: AI_VEC_COST }) });
+aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST, aiBigCost: () => AI_BIG.COST, aiLocalLeft, aiLocalCost: () => ({ nobg: AI_NOBG_COST, vec: AI_VEC_COST }), prompts: promptStore });
 // 生成记录入账：AI 工坊四个非生成类页签的成功结果统一写入 jobs（2026-10-21）
 const recordAIResult = aiModule.recordAIResult;
 // 免费试用剩余次数（gen/edit/stylize 独立计数，读 users.aiFreeUsed）——
@@ -1245,12 +1249,8 @@ function refundAIEdit(uid, paidWith, feature) {
 }
 
 // ---- AI 风格转换（照片/其他图 → 指定插画风）----
+// 提示词模板已迁入 ai-prompts.js（后台"AI 提示词"页可改，保存即生效）
 const STY_NAMES = { flat: '矢量插画风', matte: 'OneFig 风格', threed: '3D 立体质感' };
-const STYLE_PROMPTS = {
-  flat: '把这张图重绘成扁平矢量插画风格：色块平涂、柔和渐变、简洁流畅的轮廓线条，类似 Figdraw 科研示意图，保持原有构图和主体不变，纯色干净背景',
-  matte: '把这张图重绘成柔和奶油质感插画：水彩般的渐变晕染、哑光柔和色彩、边缘圆润，保持原有构图和主体不变，纯色干净背景',
-  threed: '把这张图重绘成 3D 渲染风格：立体光影、柔和材质、类似 Blender 卡通渲染，保持原有构图和主体不变，纯色干净背景',
-};
 app.post('/api/ai-stylize', authUser, aiEditRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
@@ -1260,7 +1260,8 @@ app.post('/api/ai-stylize', authUser, aiEditRateLimit, (req, res) => {
     const style = (req.body.style || 'flat').trim();
     const custom = (req.body.prompt || '').trim();
     const t0 = Date.now();
-    const prompt = custom || STYLE_PROMPTS[style] || STYLE_PROMPTS.flat;
+    const styP = promptStore.get().stylize || {};
+    const prompt = custom || styP[style] || styP.flat || '保持原有构图和主体不变，重绘成科研插画风，纯色干净背景';
     // 费用闸门：先扣后用，失败退还（2026-10-20）
     const charge = chargeAIEdit(req.user.id, 'stylize');
     if (!charge.ok) {

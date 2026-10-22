@@ -16,18 +16,9 @@ const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // �
 
 // ---- 生成大图（2026-10-22 新增）：期刊封面 / 文内摘要图 / 文内机制图 ----
 // 面向科研用户的"大图"场景：保留背景（非透明底）、更高分辨率、单独定价
+// 提示词模板与尺寸已迁入 ai-prompts.js（后台可视可改、保存即生效）；此处只留定价
 const BIG_COST = Math.max(0, Number(process.env.ONEFIG_AI_BIG_COST ?? 30)); // 30 积分/张
 const BIG_FREE = Math.max(0, Number(process.env.ONEFIG_AI_BIG_FREE ?? 1));   // 每人免费试用 1 次
-const BIG_SIZES = {
-  cover: process.env.ARK_BIG_COVER_SIZE || '1728x2304',       // 期刊封面 3:4 竖版
-  abstract: process.env.ARK_BIG_ABSTRACT_SIZE || '2560x1440', // 文内摘要图 16:9 横版
-  mechanism: process.env.ARK_BIG_MECH_SIZE || '2304x1728',    // 文内机制图 4:3 横版
-};
-const BIG_PROMPTS = {
-  cover: t => `${t}。这是一幅学术期刊封面级插画（journal cover quality）：竖版构图，主体突出、视觉焦点集中，艺术表现力与科学内涵结合，配色专业和谐，可用柔和的渐变色背景烘托氛围，画面完整、细节丰富，不要出现任何文字或字母`,
-  abstract: t => `${t}。这是一幅论文摘要图（graphical abstract）：横向构图，研究核心逻辑一眼可懂，元素排布疏朗有层次，元素之间用箭头或流程关系连接，风格简洁专业，学术蓝绿色系配色和谐，不要出现任何文字或字母`,
-  mechanism: t => `${t}。这是一幅论文机制示意图（mechanism diagram）：科学逻辑准确，分子、细胞、组织等层级关系清晰，箭头与流程式布局，风格干净专业（类似 BioRender 机制图），配色低饱和和谐，结构边界清晰便于后续标注，不要出现任何文字或字母`,
-};
 const CREDIT_PACKAGES = [
   { id: 'p100', credits: 100, price: 9.9 },
   { id: 'p800', credits: 800, price: 59.9 },
@@ -37,21 +28,25 @@ const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制一次性�
 // 平台安全策略会 403 的词，提前拦截并友好提示（不扣积分）
 const BLOCKWORDS = ['肾小球', '肾小囊', '肾单位', '髓袢', '肾小管'];
 
-const STYLE_SUFFIX = {
-  flat: '二维扁平矢量插画风格，类似Adobe Illustrator绘制的科研示意图，色块平涂加柔和线性渐变，完全没有3D效果、没有写实感、没有光泽高光、没有阴影渲染。构图简洁克制、元素数量适中：只画描述中明确提到的结构，不要堆砌多余的细胞器、表面抗体或分子、装饰性元素（2026-10-22 按反馈：避免复杂化）',
-  matte: '柔和的二维插画，色块内有细腻柔和的渐变晕染，质感像水彩和哑光奶油的结合，轻微柔和体积感；但绝对不要玻璃光泽、不要塑料感、不要强烈高光、不要3D渲染感、不要写实照片感',
-  threed: '柔和的3D渲染插画：立体光影、柔和材质、类似Blender卡通渲染，圆润干净、轻微体积感，但绝对不要写实照片感、不要塑料感',
-};
-// 科学性通用约束（2026-10-22 按反馈：科研素材站，准确度优先）
-const SCIENCE_RULES = '严格遵循真实解剖学与形态学：结构与比例正确、位置关系正确，不省略关键鉴别特征，不添加不存在的结构；主体完整入镜不被裁切（含附肢、尾巴末端），经典侧面全身科学示意图视角，姿态自然；';
-// 微观主体（细胞/细胞器）按素材库教科书颜色规范着色，与素材库风格统一
-const CELL_COLOR_RULES = '微观主体按教科书规范着色：细胞质浅黄或米色、细胞核蓝色、线粒体绿色、内质网紫色、高尔基体粉色，同类细胞器颜色保持统一；';
-const isCellular = t => /细胞|线粒体|内质网|高尔基|溶酶体|核糖体|中心体|伪足|吞噬泡|囊泡/.test(t);
-const PROMPT_TMPL = (topic, style) =>
-  `${topic}，形态科学准确。${SCIENCE_RULES}${isCellular(topic) ? CELL_COLOR_RULES : ''}结构完整、细节到位：面部特征齐全（眼睛、鼻子、嘴巴都要清晰），动物主体必须画出胡须，四肢和脚趾分明；只画描述中提到的结构，不要擅自添加乳头、乳房等多余解剖结构。${STYLE_SUFFIX[style] || STYLE_SUFFIX.matte}，轮廓圆润干净，类似 BioRender 的现代科研示意图，干净专业、辨识度高。颜色必须严格按描述：主体被毛/主体是什么颜色就是什么颜色——描述为黑色就是黑色、白色就是纯白（仅可配极轻阴影表现体积，整体观感必须仍是描述的颜色），严禁擅自更改主体颜色，不要发灰、不要偏米色；裸露的皮肤部位（尾巴、耳朵、口鼻、脚掌等）按真实生理结构呈肉粉色，不要画成被毛同色。透明背景，无任何文字和标注，主体板正居中，极简专业`;
-
 module.exports = function registerAI(app, deps) {
   const { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine } = deps;
+  // 提示词存储：后台可改、保存即生效；未注入时用纯内存默认值（测试/降级）
+  const prompts = deps.prompts || require('./ai-prompts')(null);
+  // 生成素材提示词组装：模板占位符替换（模板内容见 ai-prompts.js，后台可改）
+  const buildGenPrompt = (topic, style) => {
+    const P = prompts.get();
+    const cellular = new RegExp(P.cellularKeywords).test(topic);
+    return P.genTmpl
+      .split('{topic}').join(topic)
+      .split('{styleSuffix}').join(P.styleSuffix[style] || P.styleSuffix.matte || '')
+      .split('{scienceRules}').join(P.scienceRules || '')
+      .split('{cellColorRules}').join(cellular ? (P.cellColorRules || '') : '');
+  };
+  const buildBigPrompt = (topic, bigType) => {
+    const b = prompts.get().big[bigType];
+    if (!b) throw new Error('未知的大图类型');
+    return { prompt: String(b.prompt || '').split('{topic}').join(topic), size: b.size };
+  };
   const AI_DIR = path.join(DATA_DIR, 'ai');
   const JOBS_FILE = path.join(AI_DIR, 'jobs.json');
   const CREDIT_ORDERS_FILE = path.join(AI_DIR, 'credit-orders.json');
@@ -212,11 +207,13 @@ module.exports = function registerAI(app, deps) {
     const dir = path.join(AI_DIR, job.id);
     fs.mkdirSync(dir, { recursive: true });
     const isBig = !!job.bigType;
-    const prompt = isBig ? BIG_PROMPTS[job.bigType](job.prompt) : PROMPT_TMPL(job.prompt, job.style);
+    let prompt, size;
+    if (isBig) ({ prompt, size } = buildBigPrompt(job.prompt, job.bigType));
+    else { prompt = buildGenPrompt(job.prompt, job.style); size = undefined; }
     const results = [];
     for (let i = 0; i < CANDIDATES; i++) {
       try {
-        const buf = await generateImage(prompt, isBig ? BIG_SIZES[job.bigType] : undefined);
+        const buf = await generateImage(prompt, size);
         const out = isBig ? ensurePng(buf) : await matteImage(buf);
         const f = path.join(dir, `c${i}.png`);
         fs.writeFileSync(f, out);
