@@ -943,7 +943,7 @@ const aiModule = require('./ai');
 const CREDIT_PACKAGES = aiModule.CREDIT_PACKAGES;
 const GEN_FREE = aiModule.GEN_FREE; // 生成素材每人免费试用次数（ai.js 定义，env ONEFIG_AI_GEN_FREE 可调）
 const AI_BIG = aiModule.BIG;        // 生成大图定价（ai.js 定义，env ONEFIG_AI_BIG_COST / ONEFIG_AI_BIG_FREE 可调）
-aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST, aiBigCost: () => AI_BIG.COST, aiLocalLeft, aiLocalCost: () => ({ nobg: AI_NOBG_COST, vec: AI_VEC_COST }), prompts: promptStore });
+aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST, aiBigCost: () => AI_BIG.COST, aiSplitCost: () => aiModule.SPLIT.COST, aiLocalLeft, aiLocalCost: () => ({ nobg: AI_NOBG_COST, vec: AI_VEC_COST }), prompts: promptStore, upload });
 // 生成记录入账：AI 工坊四个非生成类页签的成功结果统一写入 jobs（2026-10-21）
 const recordAIResult = aiModule.recordAIResult;
 // 免费试用剩余次数（gen/edit/stylize 独立计数，读 users.aiFreeUsed）——

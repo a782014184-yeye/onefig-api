@@ -19,6 +19,8 @@ const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // �
 // 提示词模板与尺寸已迁入 ai-prompts.js（后台可视可改、保存即生效）；此处只留定价
 const BIG_COST = Math.max(0, Number(process.env.ONEFIG_AI_BIG_COST ?? 30)); // 30 积分/张
 const BIG_FREE = Math.max(0, Number(process.env.ONEFIG_AI_BIG_FREE ?? 1));   // 每人免费试用 1 次
+// 图层拆分单价（2026-10-22；Seedream 5.0 pro 原生能力，按底图+图层张数计费，成本约为单图数倍）
+const SPLIT_COST = Math.max(0, Number(process.env.ONEFIG_AI_SPLIT_COST ?? 60));
 const CREDIT_PACKAGES = [
   { id: 'p100', credits: 100, price: 9.9 },
   { id: 'p800', credits: 800, price: 59.9 },
@@ -254,6 +256,126 @@ module.exports = function registerAI(app, deps) {
       : `generate${isBig ? '-big' : ''} done user=${uname} kind=${j.kind || 'gen'} bigType=${j.bigType || '-'} prompt="${job.prompt.slice(0, 40)}" ok=${okCount}/${CANDIDATES} cost=${job.cost}`);
   }
 
+  // ---- 图层拆分：单图 → 1 张底图 + N 个透明图层（Seedream 5.0 pro 原生 layer_decomposition）----
+  // 响应约定（2026-10-22 真机验证）：data[0]=底图（output_format 控制格式），data[1:]=图层
+  // （恒为 PNG 带透明通道，附 name/description/bounding_box/z_index），按 z_index 升序=从底到顶。
+  function arkSplitLayers(imageBuf, instruction) {
+    return new Promise((resolve, reject) => {
+      const key = arkKey();
+      if (!key) return reject(new Error('生图服务未配置'));
+      const isJpg = imageBuf.length > 3 && imageBuf[0] === 0xFF && imageBuf[1] === 0xD8;
+      const body = JSON.stringify({
+        model: MODEL, prompt: instruction,
+        image: ['data:image/' + (isJpg ? 'jpeg' : 'png') + ';base64,' + imageBuf.toString('base64')],
+        layer_decomposition: true, size: 'auto', response_format: 'b64_json', watermark: false,
+      });
+      const req = https.request(ARK_URL, {
+        method: 'POST', timeout: 300000,
+        headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          try {
+            const j = JSON.parse(Buffer.concat(chunks).toString());
+            if (res.statusCode === 200 && Array.isArray(j.data) && j.data.length)
+              return resolve(j.data.map(it => ({ b64: it.b64_json || '', fmt: it.output_format, name: it.name, description: it.description, z_index: it.z_index, size: it.size })));
+            reject(new Error((j.error && j.error.message) || ('图层拆分服务报错 ' + res.statusCode)));
+          } catch (e) { reject(e); }
+        });
+      });
+      req.on('timeout', () => req.destroy(new Error('图层拆分超时，请重试')));
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+  }
+
+  async function runSplitJob(job, imgBuf) {
+    const dir = path.join(AI_DIR, job.id);
+    fs.mkdirSync(dir, { recursive: true });
+    try {
+      const items = await arkSplitLayers(imgBuf, job.prompt);
+      // data[0] 底图 → c0.png；图层按 z_index 从底到顶 → c1..cN.png
+      fs.writeFileSync(path.join(dir, 'c0.png'), ensurePng(Buffer.from(items[0].b64, 'base64')));
+      const layers = items.slice(1)
+        .sort((a, b) => (a.z_index || 0) - (b.z_index || 0))
+        .map((it, k) => {
+          const i = k + 1;
+          fs.writeFileSync(path.join(dir, `c${i}.png`), Buffer.from(it.b64, 'base64'));
+          return { i, name: it.name || `图层 ${i}`, description: String(it.description || '').slice(0, 100), z_index: it.z_index };
+        });
+      const jobs = loadJobs();
+      const j = jobs.find(x => x.id === job.id);
+      if (!j) return;
+      j.status = 'done';
+      j.candidates = [0, ...layers.map(l => l.i)];
+      j.layers = layers;
+      j.finishedAt = new Date().toISOString();
+      saveJobs(jobs);
+      logLine('ai-op', `split done user=${(loadUsers().find(x => x.id === job.userId) || {}).name || job.userId} layers=${layers.length} cost=${job.cost}`);
+    } catch (e) {
+      const jobs = loadJobs();
+      const j = jobs.find(x => x.id === job.id);
+      if (j) { j.status = 'failed'; j.error = e.message; j.finishedAt = new Date().toISOString(); saveJobs(jobs); }
+      // 失败全额退还
+      const users = loadUsers();
+      const u = users.find(x => x.id === job.userId);
+      if (u && job.paidWith === 'credit') { u.credits = (u.credits || 0) + (job.cost || SPLIT_COST); saveUsers(users); }
+      logLine('ai-op', `split FAIL user=${job.userId} err=${e && e.message} cost=${job.cost} refund`);
+    }
+  }
+
+  // ---- 发起图层拆分：上传图片或传入生成记录 jobId；先扣后拆，失败全额退还 ----
+  app.post('/api/ai/split-layers', authUser, (req, res) => {
+    if (!deps.upload) return res.status(500).json({ ok: false, error: '服务器未配置文件上传' });
+    deps.upload.single('image')(req, res, (err) => {
+      if (err) return res.status(400).json({ ok: false, error: err.message });
+      try {
+        let imgBuf = null;
+        let srcDesc = '上传图片';
+        if (req.file) {
+          imgBuf = fs.readFileSync(req.file.path);
+          fs.unlinkSync(req.file.path);
+        } else if ((req.body || {}).jobId) {
+          const src = loadJobs().find(x => x.id === req.body.jobId && x.userId === req.user.id);
+          const idx = src && src.status === 'done' ? (src.picked ?? src.candidates[0]) : null;
+          const f = idx != null ? path.join(AI_DIR, src.id, `c${idx}.png`) : null;
+          if (!f || !fs.existsSync(f)) return res.status(404).json({ ok: false, error: '没有找到要拆分的生成结果，请直接上传图片' });
+          imgBuf = fs.readFileSync(f);
+          srcDesc = '记录:' + src.prompt.slice(0, 20);
+        } else {
+          return res.status(400).json({ ok: false, error: '请先上传图片' });
+        }
+        const instruction = String((req.body || {}).instruction || '').trim().slice(0, 500)
+          || ((prompts.get().layerSplit || {}).instruction) || '将图片进行精确图层分离';
+
+        // 费用闸门：无免费试用（成本数倍于单图），先扣后拆
+        const users = loadUsers();
+        const u = users.find(x => x.id === req.user.id);
+        if ((u.credits || 0) < SPLIT_COST)
+          return res.status(403).json({ ok: false, error: `图层拆分每次 ${SPLIT_COST} 积分，当前余额不足`, code: 'no-credit', credits: u.credits || 0, cost: SPLIT_COST });
+        u.credits -= SPLIT_COST;
+        const jobs = loadJobs();
+        if (jobs.some(j => j.userId === u.id && j.status === 'running')) {
+          u.credits += SPLIT_COST;
+          saveUsers(users);
+          return res.status(429).json({ ok: false, error: '上一个生成任务还在跑，等它出图后再试～' });
+        }
+        const job = { id: crypto.randomUUID(), userId: u.id, prompt: instruction, kind: 'split', status: 'running', candidates: [], picked: null, paidWith: 'credit', cost: SPLIT_COST, createdAt: new Date().toISOString() };
+        jobs.unshift(job);
+        saveJobs(jobs);
+        saveUsers(users);
+        logLine('ai-op', `split start user=${u.name} src=${srcDesc} cost=${SPLIT_COST}`);
+        res.json({ ok: true, jobId: job.id, credits: u.credits });
+        setImmediate(() => runSplitJob(job, imgBuf).catch(() => {
+          const js = loadJobs(); const jj = js.find(x => x.id === job.id);
+          if (jj && jj.status === 'running') { jj.status = 'failed'; jj.error = '拆分中断'; saveJobs(js); }
+        }));
+      } catch (e) { res.status(500).json({ ok: false, error: '服务器开小差了' }); }
+    });
+  });
+
   // ---- 公开：积分套餐 ----
   app.get('/api/ai/packages', (req, res) => {
     res.json({ ok: true, packages: CREDIT_PACKAGES, perGen: COST, candidates: CANDIDATES, memberGift: MEMBER_GIFT });
@@ -265,7 +387,7 @@ module.exports = function registerAI(app, deps) {
   // aiLocal（2026-10-21）：移除背景/位图转矢量的今日剩余免费次数（会员返回 unlimited），aiLocalCost 为其超出单价
   app.get('/api/ai/status', authUser, (req, res) => {
 
-    res.json({ ok: true, credits: req.user.credits || 0, freeLeft: freeLeft(req.user), level: req.user.level || 'none', aiFreeLeft: deps.aiFreeLeft ? deps.aiFreeLeft(req.user) : undefined, aiCost: deps.aiCost ? deps.aiCost() : undefined, aiBigCost: deps.aiBigCost ? deps.aiBigCost() : undefined, aiLocal: deps.aiLocalLeft ? deps.aiLocalLeft(req.user) : undefined, aiLocalCost: deps.aiLocalCost ? deps.aiLocalCost() : undefined });
+    res.json({ ok: true, credits: req.user.credits || 0, freeLeft: freeLeft(req.user), level: req.user.level || 'none', aiFreeLeft: deps.aiFreeLeft ? deps.aiFreeLeft(req.user) : undefined, aiCost: deps.aiCost ? deps.aiCost() : undefined, aiBigCost: deps.aiBigCost ? deps.aiBigCost() : undefined, aiSplitCost: deps.aiSplitCost ? deps.aiSplitCost() : undefined, aiLocal: deps.aiLocalLeft ? deps.aiLocalLeft(req.user) : undefined, aiLocalCost: deps.aiLocalCost ? deps.aiLocalCost() : undefined });
   });
 
   // ---- 发起生成（含"生成大图"：bigType = cover 期刊封面 / abstract 摘要图 / mechanism 机制图）----
@@ -336,7 +458,7 @@ module.exports = function registerAI(app, deps) {
   // ---- 我的任务列表 ----
   app.get('/api/ai/jobs', authUser, (req, res) => {
     const list = loadJobs().filter(j => j.userId === req.user.id)
-      .map(j => ({ id: j.id, kind: j.kind || 'gen', bigType: j.bigType, prompt: j.prompt, style: j.style, ext: j.ext || 'png', status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error }));
+      .map(j => ({ id: j.id, kind: j.kind || 'gen', bigType: j.bigType, layers: j.layers, prompt: j.prompt, style: j.style, ext: j.ext || 'png', status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error }));
     res.json({ ok: true, list });
   });
 
@@ -479,3 +601,5 @@ module.exports.CREDIT_PACKAGES = CREDIT_PACKAGES;
 module.exports.GEN_FREE = GEN_FREE;
 // 生成大图定价与试用次数（server.js 注入 status 用）
 module.exports.BIG = { COST: BIG_COST, FREE: BIG_FREE };
+// 图层拆分单价（server.js 注入 status 用）
+module.exports.SPLIT = { COST: SPLIT_COST };
