@@ -13,6 +13,21 @@ const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
 const CANDIDATES = 1; // 每次生成 = 1 张候选 = 10 积分（Seedream 5.0 Pro 1536² 成本 0.30 元/张，定价 1 元/张，毛利约 70%）；不满意再生成再扣 10 积分，无免费重抽
 const COST = 10; // 每次生成消耗积分（2026-10-21 按反馈统一定价 10）
 const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // 生成素材每人免费试用次数（2026-10-21 按反馈：1 次终身，与改图/风格转换同记 users.aiFreeUsed；0 = 纯积分制）
+
+// ---- 生成大图（2026-10-22 新增）：期刊封面 / 文内摘要图 / 文内机制图 ----
+// 面向科研用户的"大图"场景：保留背景（非透明底）、更高分辨率、单独定价
+const BIG_COST = Math.max(0, Number(process.env.ONEFIG_AI_BIG_COST ?? 30)); // 30 积分/张
+const BIG_FREE = Math.max(0, Number(process.env.ONEFIG_AI_BIG_FREE ?? 1));   // 每人免费试用 1 次
+const BIG_SIZES = {
+  cover: process.env.ARK_BIG_COVER_SIZE || '1728x2304',       // 期刊封面 3:4 竖版
+  abstract: process.env.ARK_BIG_ABSTRACT_SIZE || '2560x1440', // 文内摘要图 16:9 横版
+  mechanism: process.env.ARK_BIG_MECH_SIZE || '2304x1728',    // 文内机制图 4:3 横版
+};
+const BIG_PROMPTS = {
+  cover: t => `${t}。这是一幅学术期刊封面级插画（journal cover quality）：竖版构图，主体突出、视觉焦点集中，艺术表现力与科学内涵结合，配色专业和谐，可用柔和的渐变色背景烘托氛围，画面完整、细节丰富，不要出现任何文字或字母`,
+  abstract: t => `${t}。这是一幅论文摘要图（graphical abstract）：横向构图，研究核心逻辑一眼可懂，元素排布疏朗有层次，元素之间用箭头或流程关系连接，风格简洁专业，学术蓝绿色系配色和谐，不要出现任何文字或字母`,
+  mechanism: t => `${t}。这是一幅论文机制示意图（mechanism diagram）：科学逻辑准确，分子、细胞、组织等层级关系清晰，箭头与流程式布局，风格干净专业（类似 BioRender 机制图），配色低饱和和谐，结构边界清晰便于后续标注，不要出现任何文字或字母`,
+};
 const CREDIT_PACKAGES = [
   { id: 'p100', credits: 100, price: 9.9 },
   { id: 'p800', credits: 800, price: 59.9 },
@@ -124,11 +139,12 @@ module.exports = function registerAI(app, deps) {
   }
 
   // ---- 供应商适配层：换成别的生图服务只需改这个函数 ----
-  function generateImage(prompt) {
+  // size：可选，默认素材尺寸 ARK_SIZE；生成大图时传对应构图尺寸
+  function generateImage(prompt, size) {
     return new Promise((resolve, reject) => {
       const key = arkKey();
       if (!key) return reject(new Error('生图服务未配置'));
-      const body = JSON.stringify({ model: MODEL, prompt, size: SIZE, response_format: 'b64_json', watermark: false });
+      const body = JSON.stringify({ model: MODEL, prompt, size: size || SIZE, response_format: 'b64_json', watermark: false });
       const req = https.request(ARK_URL, {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
@@ -181,18 +197,30 @@ module.exports = function registerAI(app, deps) {
     catch (e) { logLine('ai-op', 'rembg 不可用，回退洪泛抠底：' + e.message); return whiteToTransparent(buf); }
   }
 
+  // ---- 生成大图：保留背景（不抠透明底），仅把 JPEG 字节统一转成 PNG 存储 ----
+  function ensurePng(buf) {
+    if (buf.length > 3 && buf[0] === 0xFF && buf[1] === 0xD8) {
+      const jpeg = require('jpeg-js');
+      const { PNG } = require('pngjs');
+      const d = jpeg.decode(buf, { useTArray: true, maxMemoryUsageInMB: 1024 });
+      return PNG.sync.write({ width: d.width, height: d.height, data: d.data });
+    }
+    return buf; // 已是 PNG
+  }
+
   async function runJob(job) {
     const dir = path.join(AI_DIR, job.id);
     fs.mkdirSync(dir, { recursive: true });
-    const prompt = PROMPT_TMPL(job.prompt, job.style);
+    const isBig = !!job.bigType;
+    const prompt = isBig ? BIG_PROMPTS[job.bigType](job.prompt) : PROMPT_TMPL(job.prompt, job.style);
     const results = [];
     for (let i = 0; i < CANDIDATES; i++) {
       try {
-        const buf = await generateImage(prompt);
-        const transparent = await matteImage(buf);
+        const buf = await generateImage(prompt, isBig ? BIG_SIZES[job.bigType] : undefined);
+        const out = isBig ? ensurePng(buf) : await matteImage(buf);
         const f = path.join(dir, `c${i}.png`);
-        fs.writeFileSync(f, transparent);
-        results.push({ i, ok: true, size: transparent.length });
+        fs.writeFileSync(f, out);
+        results.push({ i, ok: true, size: out.length });
       } catch (e) {
         results.push({ i, ok: false, err: e.message });
       }
@@ -204,13 +232,16 @@ module.exports = function registerAI(app, deps) {
     if (okCount === 0) {
       j.status = 'failed';
       j.error = results[0] && results[0].err;
-      // 全部失败 → 退还消耗（积分退回，或恢复当日免费次数）
+      // 全部失败 → 退还消耗（积分退回，或恢复免费试用次数）
       const users = loadUsers();
       const u = users.find(x => x.id === j.userId);
       if (u) {
-        // 全部失败 → 原路退还：积分退回，或恢复免费试用次数（2026-10-21 生成素材新增试用）
-        if (j.paidWith === 'credit') u.credits = (u.credits || 0) + COST;
-        else if (j.paidWith === 'free' && u.aiFreeUsed) u.aiFreeUsed.gen = Math.max(0, (u.aiFreeUsed.gen || 0) - 1);
+        // 原路退还：积分退回（按实际扣费），或恢复对应功能的免费试用次数
+        if (j.paidWith === 'credit') u.credits = (u.credits || 0) + (j.cost || COST);
+        else if (j.paidWith === 'free' && u.aiFreeUsed) {
+          const fk = j.kind === 'big' ? 'big' : 'gen';
+          u.aiFreeUsed[fk] = Math.max(0, (u.aiFreeUsed[fk] || 0) - 1);
+        }
         saveUsers(users);
       }
     } else {
@@ -222,8 +253,8 @@ module.exports = function registerAI(app, deps) {
     // AI 操作语义日志（2026-10-15）：谁、什么时间、什么描述、成败与原因
     const uname = (loadUsers().find(x => x.id === job.userId) || {}).name || job.userId;
     logLine('ai-op', okCount === 0
-      ? `generate FAIL user=${uname} prompt="${job.prompt.slice(0, 40)}" err=${j.error} cost=${job.cost}`
-      : `generate done user=${uname} prompt="${job.prompt.slice(0, 40)}" ok=${okCount}/${CANDIDATES} cost=${job.cost}`);
+      ? `generate${isBig ? '-big' : ''} FAIL user=${uname} kind=${j.kind || 'gen'} prompt="${job.prompt.slice(0, 40)}" err=${j.error} cost=${job.cost}`
+      : `generate${isBig ? '-big' : ''} done user=${uname} kind=${j.kind || 'gen'} bigType=${j.bigType || '-'} prompt="${job.prompt.slice(0, 40)}" ok=${okCount}/${CANDIDATES} cost=${job.cost}`);
   }
 
   // ---- 公开：积分套餐 ----
@@ -237,42 +268,46 @@ module.exports = function registerAI(app, deps) {
   // aiLocal（2026-10-21）：移除背景/位图转矢量的今日剩余免费次数（会员返回 unlimited），aiLocalCost 为其超出单价
   app.get('/api/ai/status', authUser, (req, res) => {
 
-    res.json({ ok: true, credits: req.user.credits || 0, freeLeft: freeLeft(req.user), level: req.user.level || 'none', aiFreeLeft: deps.aiFreeLeft ? deps.aiFreeLeft(req.user) : undefined, aiCost: deps.aiCost ? deps.aiCost() : undefined, aiLocal: deps.aiLocalLeft ? deps.aiLocalLeft(req.user) : undefined, aiLocalCost: deps.aiLocalCost ? deps.aiLocalCost() : undefined });
+    res.json({ ok: true, credits: req.user.credits || 0, freeLeft: freeLeft(req.user), level: req.user.level || 'none', aiFreeLeft: deps.aiFreeLeft ? deps.aiFreeLeft(req.user) : undefined, aiCost: deps.aiCost ? deps.aiCost() : undefined, aiBigCost: deps.aiBigCost ? deps.aiBigCost() : undefined, aiLocal: deps.aiLocalLeft ? deps.aiLocalLeft(req.user) : undefined, aiLocalCost: deps.aiLocalCost ? deps.aiLocalCost() : undefined });
   });
 
-  // ---- 发起生成 ----
+  // ---- 发起生成（含"生成大图"：bigType = cover 期刊封面 / abstract 摘要图 / mechanism 机制图）----
   app.post('/api/ai/generate', authUser, (req, res) => {
     try {
       const prompt = String((req.body || {}).prompt || '').trim().slice(0, 500);
       const style = ['flat', 'matte', 'threed'].includes((req.body || {}).style) ? req.body.style : 'matte';
-      if (!prompt) return res.status(400).json({ ok: false, error: '先描述一下想要什么素材吧' });
+      const bigType = ['cover', 'abstract', 'mechanism'].includes((req.body || {}).bigType) ? req.body.bigType : null;
+      if (!prompt) return res.status(400).json({ ok: false, error: bigType ? '先描述一下想要什么大图吧' : '先描述一下想要什么素材吧' });
       if (prompt.length < 4) return res.status(400).json({ ok: false, error: '描述再具体一点点，太简短容易画歪' });
       const hit = BLOCKWORDS.find(w => prompt.includes(w));
       if (hit) return res.status(400).json({ ok: false, error: `「${hit}」相关描述容易被平台安全策略拦截，试试换个说法（比如用泛指的上级名称），就不会浪费你的积分啦` });
 
       const users = loadUsers();
       const u = users.find(x => x.id === req.user.id);
-      // 免费试用（2026-10-21 按反馈：每人 1 次终身免费，与改图/风格转换同记 users.aiFreeUsed）
+      // 免费试用（2026-10-21 生成素材每人 1 次；2026-10-22 生成大图每人 1 次；同记 users.aiFreeUsed）
       const fu = u.aiFreeUsed && typeof u.aiFreeUsed === 'object' ? u.aiFreeUsed : (u.aiFreeUsed = {});
+      const freeKey = bigType ? 'big' : 'gen';
+      const freeLimit = bigType ? BIG_FREE : GEN_FREE;
+      const cost = bigType ? BIG_COST : COST;
       let paidWith = 'credit';
-      if ((fu.gen || 0) < GEN_FREE) { fu.gen = (fu.gen || 0) + 1; paidWith = 'free'; }
-      else if ((u.credits || 0) < COST) return res.status(403).json({ ok: false, error: 'no-credit', credits: u.credits || 0 });
-      else u.credits -= COST;
+      if ((fu[freeKey] || 0) < freeLimit) { fu[freeKey] = (fu[freeKey] || 0) + 1; paidWith = 'free'; }
+      else if ((u.credits || 0) < cost) return res.status(403).json({ ok: false, error: 'no-credit', credits: u.credits || 0 });
+      else u.credits -= cost;
 
       // 简易限流：每用户同时只能跑 1 个任务
       const jobs = loadJobs();
       if (jobs.some(j => j.userId === u.id && j.status === 'running')) {
-        // 不放行：把刚扣的免费试用 / 积分原路退回（2026-10-21 与免费试用同加）
-        if (paidWith === 'free') fu.gen = Math.max(0, fu.gen - 1); else u.credits += COST;
+        // 不放行：把刚扣的免费试用 / 积分原路退回
+        if (paidWith === 'free') fu[freeKey] = Math.max(0, (fu[freeKey] || 0) - 1); else u.credits += cost;
         saveUsers(users);
         return res.status(429).json({ ok: false, error: '上一个生成任务还在跑，等它出图后再试～' });
       }
 
-      const job = { id: crypto.randomUUID(), userId: u.id, prompt, style, status: 'running', candidates: [], picked: null, paidWith, cost: COST, createdAt: new Date().toISOString() };
+      const job = { id: crypto.randomUUID(), userId: u.id, prompt, style: bigType ? undefined : style, bigType, kind: bigType ? 'big' : 'gen', status: 'running', candidates: [], picked: null, paidWith, cost, createdAt: new Date().toISOString() };
       jobs.unshift(job);
       saveJobs(jobs);
       saveUsers(users);
-      logLine('ai-op', `generate start user=${u.name} prompt="${prompt.slice(0, 40)}" style=${style} paidWith=${paidWith} cost=${paidWith === 'credit' ? COST : 0}`);
+      logLine('ai-op', `generate start user=${u.name} kind=${bigType ? 'big' : 'gen'} bigType=${bigType || '-'} prompt="${prompt.slice(0, 40)}" style=${style} paidWith=${paidWith} cost=${paidWith === 'credit' ? cost : 0}`);
       res.json({ ok: true, jobId: job.id, paidWith });
       setImmediate(() => runJob(job).catch(() => {
         const js = loadJobs(); const jj = js.find(x => x.id === job.id);
@@ -304,7 +339,7 @@ module.exports = function registerAI(app, deps) {
   // ---- 我的任务列表 ----
   app.get('/api/ai/jobs', authUser, (req, res) => {
     const list = loadJobs().filter(j => j.userId === req.user.id)
-      .map(j => ({ id: j.id, kind: j.kind || 'gen', prompt: j.prompt, style: j.style, ext: j.ext || 'png', status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error }));
+      .map(j => ({ id: j.id, kind: j.kind || 'gen', bigType: j.bigType, prompt: j.prompt, style: j.style, ext: j.ext || 'png', status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error }));
     res.json({ ok: true, list });
   });
 
@@ -445,3 +480,5 @@ module.exports = function registerAI(app, deps) {
 module.exports.CREDIT_PACKAGES = CREDIT_PACKAGES;
 // 生成素材免费试用次数（server.js 的 aiFreeLeft 注入 status 用）
 module.exports.GEN_FREE = GEN_FREE;
+// 生成大图定价与试用次数（server.js 注入 status 用）
+module.exports.BIG = { COST: BIG_COST, FREE: BIG_FREE };

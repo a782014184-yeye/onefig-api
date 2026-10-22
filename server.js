@@ -938,7 +938,8 @@ require('./console')(app, { consoleAuth, esc, DATA_DIR, ADMIN_PATH_FULL: '/' + A
 const aiModule = require('./ai');
 const CREDIT_PACKAGES = aiModule.CREDIT_PACKAGES;
 const GEN_FREE = aiModule.GEN_FREE; // 生成素材每人免费试用次数（ai.js 定义，env ONEFIG_AI_GEN_FREE 可调）
-aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST, aiLocalLeft, aiLocalCost: () => ({ nobg: AI_NOBG_COST, vec: AI_VEC_COST }) });
+const AI_BIG = aiModule.BIG;        // 生成大图定价（ai.js 定义，env ONEFIG_AI_BIG_COST / ONEFIG_AI_BIG_FREE 可调）
+aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST, aiBigCost: () => AI_BIG.COST, aiLocalLeft, aiLocalCost: () => ({ nobg: AI_NOBG_COST, vec: AI_VEC_COST }) });
 // 生成记录入账：AI 工坊四个非生成类页签的成功结果统一写入 jobs（2026-10-21）
 const recordAIResult = aiModule.recordAIResult;
 // 免费试用剩余次数（gen/edit/stylize 独立计数，读 users.aiFreeUsed）——
@@ -946,7 +947,7 @@ const recordAIResult = aiModule.recordAIResult;
 // 注：移除背景/位图转矢量 2026-10-21 起改用每日免费额度模型（chargeAILocal / aiLocalLeft），不在此列
 function aiFreeLeft(u) {
   const fu = u.aiFreeUsed && typeof u.aiFreeUsed === 'object' ? u.aiFreeUsed : {};
-  return { gen: Math.max(0, GEN_FREE - (fu.gen || 0)), edit: Math.max(0, AI_EDIT_FREE - (fu.edit || 0)), stylize: Math.max(0, AI_EDIT_FREE - (fu.stylize || 0)) };
+  return { gen: Math.max(0, GEN_FREE - (fu.gen || 0)), big: Math.max(0, AI_BIG.FREE - (fu.big || 0)), edit: Math.max(0, AI_EDIT_FREE - (fu.edit || 0)), stylize: Math.max(0, AI_EDIT_FREE - (fu.stylize || 0)) };
 }
 
 // 在线支付：微信 Native 扫码 + 支付宝电脑网站支付（2026-10-08；2026-10-17 起同时支持积分充值）

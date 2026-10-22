@@ -11,7 +11,7 @@ const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'onefig-ai-records-'));
 const AI_DIR = path.join(DATA_DIR, 'ai');
 fs.mkdirSync(AI_DIR, { recursive: true });
 
-const USER = { id: 'u-test-1', name: '测试用户', credits: 100, pwdVer: 1, aiFreeUsed: { gen: 0, edit: 1, stylize: 0 }, aiDailyUsed: { nobg: { date: new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10), count: 1 }, vec: { date: '2026-01-01', count: 9 } } };
+const USER = { id: 'u-test-1', name: '测试用户', credits: 100, pwdVer: 1, aiFreeUsed: { gen: 0, big: 0, edit: 1, stylize: 0 }, aiDailyUsed: { nobg: { date: new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10), count: 1 }, vec: { date: '2026-01-01', count: 9 } } };
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 fs.writeFileSync(USERS_FILE, JSON.stringify([USER]));
 const loadUsers = () => JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
@@ -24,7 +24,7 @@ const injectAigcMeta = (buf) => buf;
 
 const app = express();
 app.use(express.json({ limit: '12mb' }));
-const aiFreeLeft = u => ({ gen: Math.max(0, 1 - ((u.aiFreeUsed || {}).gen || 0)), edit: Math.max(0, 1 - ((u.aiFreeUsed || {}).edit || 0)), stylize: Math.max(0, 1 - ((u.aiFreeUsed || {}).stylize || 0)) });
+const aiFreeLeft = u => ({ gen: Math.max(0, 1 - ((u.aiFreeUsed || {}).gen || 0)), big: Math.max(0, 1 - ((u.aiFreeUsed || {}).big || 0)), edit: Math.max(0, 1 - ((u.aiFreeUsed || {}).edit || 0)), stylize: Math.max(0, 1 - ((u.aiFreeUsed || {}).stylize || 0)) });
 const aiLocalLeft = u => {
   if (['pro', 'team'].includes(u.level)) return { unlimited: true, nobg: null, vec: null };
   const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
@@ -32,7 +32,7 @@ const aiLocalLeft = u => {
   return { unlimited: false, nobg: left('nobg'), vec: left('vec') };
 };
 const aiModule = require('./ai');
-aiModule(app, { consoleAuth: (req, res, next) => next(), DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => 10, aiLocalLeft, aiLocalCost: () => ({ nobg: 5, vec: 10 }) });
+aiModule(app, { consoleAuth: (req, res, next) => next(), DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => 10, aiBigCost: () => 30, aiLocalLeft, aiLocalCost: () => ({ nobg: 5, vec: 10 }) });
 
 const PNG_1PX = Buffer.from('89504e470d0a1a0a0000000d49484452' + '000000010000000108060000001f15c489' + '0000000a49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082', 'hex');
 const SVG_MINI = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>');
@@ -100,7 +100,7 @@ const httpReq = (port, method, p) => new Promise((resolve, reject) => {
     const stRes = await get(port, '/api/ai/status');
     const st = JSON.parse(stRes.body.toString());
     ok(stRes.status === 200
-      && st.aiFreeLeft && st.aiFreeLeft.gen === 1 && st.aiFreeLeft.edit === 0 && st.aiFreeLeft.stylize === 1 && st.aiCost === 10
+      && st.aiFreeLeft && st.aiFreeLeft.gen === 1 && st.aiFreeLeft.big === 1 && st.aiFreeLeft.edit === 0 && st.aiFreeLeft.stylize === 1 && st.aiCost === 10 && st.aiBigCost === 30
       && st.aiLocal && st.aiLocal.unlimited === false && st.aiLocal.nobg === 4 && st.aiLocal.vec === 5 && st.aiLocalCost && st.aiLocalCost.nobg === 5 && st.aiLocalCost.vec === 10,
       `status 返回计费体系字段（实际 ${JSON.stringify({ aiFreeLeft: st.aiFreeLeft, aiCost: st.aiCost, aiLocal: st.aiLocal, aiLocalCost: st.aiLocalCost })}）`);
 
