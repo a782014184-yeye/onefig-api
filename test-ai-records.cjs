@@ -45,6 +45,13 @@ const get = (port, p, headers = {}) => new Promise((resolve, reject) => {
     res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
   }).on('error', reject);
 });
+const httpReq = (port, method, p) => new Promise((resolve, reject) => {
+  const req = http.request({ host: '127.0.0.1', port, path: p, method, headers: { Authorization: 'Bearer x' } }, res => {
+    const chunks = []; res.on('data', c => chunks.push(c));
+    res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+  });
+  req.on('error', reject); req.end();
+});
 
 (async () => {
   const server = app.listen(0, async () => {
@@ -96,6 +103,13 @@ const get = (port, p, headers = {}) => new Promise((resolve, reject) => {
       && st.aiFreeLeft && st.aiFreeLeft.gen === 1 && st.aiFreeLeft.edit === 0 && st.aiFreeLeft.stylize === 1 && st.aiCost === 10
       && st.aiLocal && st.aiLocal.unlimited === false && st.aiLocal.nobg === 4 && st.aiLocal.vec === 5 && st.aiLocalCost && st.aiLocalCost.nobg === 5 && st.aiLocalCost.vec === 10,
       `status 返回计费体系字段（实际 ${JSON.stringify({ aiFreeLeft: st.aiFreeLeft, aiCost: st.aiCost, aiLocal: st.aiLocal, aiLocalCost: st.aiLocalCost })}）`);
+
+    // 7) 删除记录（2026-10-22）：DELETE 后记录与文件一并消失
+    const delRes = await httpReq(port, 'DELETE', `/api/ai/job/${idEdit}`);
+    ok(delRes.status === 200, 'DELETE 记录返回 200');
+    const listAfter = JSON.parse((await get(port, '/api/ai/jobs')).body.toString()).list;
+    ok(!listAfter.some(j => j.id === idEdit) && listAfter.length === 3, `删除后列表剩 3 条（实际 ${listAfter.length}）`);
+    ok(!fs.existsSync(path.join(AI_DIR, idEdit)), '删除后结果目录已清除');
 
     server.close();
     fs.rmSync(DATA_DIR, { recursive: true, force: true });

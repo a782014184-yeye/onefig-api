@@ -276,6 +276,18 @@ module.exports = function registerAI(app, deps) {
     res.json({ ok: true, list });
   });
 
+  // ---- 删除一条生成记录（2026-10-22 按反馈：卡片悬停删除，需弹窗确认）----
+  // 记录与结果文件一并删除，不可恢复；只能删自己的
+  app.delete('/api/ai/job/:id', authUser, (req, res) => {
+    const jobs = loadJobs();
+    const j = jobs.find(x => x.id === req.params.id && x.userId === req.user.id);
+    if (!j) return res.status(404).json({ ok: false, error: '记录不存在' });
+    saveJobs(jobs.filter(x => x.id !== j.id));
+    fs.rmSync(path.join(AI_DIR, j.id), { recursive: true, force: true });
+    logLine('ai-op', `record delete user=${req.user.name} kind=${j.kind || 'gen'} prompt="${j.prompt.slice(0, 40)}"`);
+    res.json({ ok: true });
+  });
+
   // ---- 任务详情（含候选图，需登录，二进制返回） ----
   app.get('/api/ai/job/:id/img/:n', authUser, (req, res) => {
     const j = loadJobs().find(x => x.id === req.params.id && x.userId === req.user.id);
