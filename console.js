@@ -392,6 +392,58 @@ module.exports = function registerConsole(app, deps) {
     } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
   });
 
+  // ---- 生成图库（2026-10-22）：全部用户的 AI 生成图，按账号/描述搜索、按时间排序 ----
+  const readJSON = (p, d) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return d; } };
+  app.get('/console/api/ai-gallery', consoleAuth, (req, res) => {
+    try {
+      const users = readJSON(path.join(DATA_DIR, 'users.json'), []);
+      const umap = Object.fromEntries(users.map(u => [u.id, { name: u.name || u.email || u.id, email: u.email || '' }]));
+      let jobs = readJSON(path.join(DATA_DIR, 'ai', 'jobs.json'), []);
+      const q = String(req.query.q || '').trim().toLowerCase();
+      const sort = req.query.sort === 'asc' ? 'asc' : 'desc';
+      if (q) jobs = jobs.filter(j => {
+        const u = umap[j.userId] || { name: j.userId, email: '' };
+        return (u.name || '').toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q) || (j.prompt || '').toLowerCase().includes(q);
+      });
+      jobs.sort((a, b) => sort === 'asc' ? String(a.createdAt).localeCompare(String(b.createdAt)) : String(b.createdAt).localeCompare(String(a.createdAt)));
+      const total = jobs.length;
+      const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+      const limit = Math.min(120, Math.max(1, parseInt(req.query.limit, 10) || 60));
+      const list = jobs.slice(offset, offset + limit).map(j => {
+        const idxs = Array.isArray(j.candidates) ? j.candidates : [];
+        // 预览图：拆分记录用首个真实图层，其余用选定/首个候选
+        const img = j.kind === 'split' ? (idxs[1] ?? idxs[0]) : (j.picked ?? idxs[0]);
+        const u = umap[j.userId] || { name: j.userId, email: '' };
+        return { id: j.id, userId: j.userId, userName: u.name, userEmail: u.email, prompt: j.prompt, kind: j.kind || 'gen', bigType: j.bigType, status: j.status, createdAt: j.createdAt, layers: (j.layers || []).length, img };
+      }).filter(j => j.status === 'done' && j.img != null);
+      res.json({ ok: true, total, list });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  // 图库取图（后台鉴权；n 为候选序号，orig 为拆分原图）
+  app.get('/console/api/ai-gallery/img', consoleAuth, (req, res) => {
+    const jobs = readJSON(path.join(DATA_DIR, 'ai', 'jobs.json'), []);
+    const j = jobs.find(x => x.id === req.query.job);
+    if (!j) return res.status(404).json({ ok: false });
+    const n = String(req.query.n || '');
+    const f = n === 'orig' ? path.join(DATA_DIR, 'ai', j.id, 'orig.png') : path.join(DATA_DIR, 'ai', j.id, `c${parseInt(n, 10)}.png`);
+    if (!fs.existsSync(f)) return res.status(404).json({ ok: false });
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    fs.createReadStream(f).pipe(res);
+  });
+  // 画板导出记录（仅元数据：图在用户浏览器本地生成，服务器本无图像）
+  app.get('/console/api/export-records', consoleAuth, (req, res) => {
+    try {
+      const users = readJSON(path.join(DATA_DIR, 'users.json'), []);
+      const umap = Object.fromEntries(users.map(u => [u.id, { name: u.name || u.email || u.id, email: u.email || '' }]));
+      let logs = readJSON(path.join(DATA_DIR, 'console', 'downloads.json'), []).filter(l => l.kind === 'export');
+      const q = String(req.query.q || '').trim().toLowerCase();
+      if (q) logs = logs.filter(l => { const u = umap[l.userId] || { name: l.userId, email: '' }; return (u.name || '').toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q) || (l.boardTitle || '').toLowerCase().includes(q); });
+      logs.sort((a, b) => String(b.time).localeCompare(String(a.time)));
+      res.json({ ok: true, total: logs.length, list: logs.slice(0, 100).map(l => ({ ...l, userName: (umap[l.userId] || {}).name || l.userId, userEmail: (umap[l.userId] || {}).email || '' })) });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   app.delete('/console/api/orders/:id', consoleAuth, (req, res) => {
     save('orders.json', load('orders.json', []).filter(o => o.id !== req.params.id));
     res.json({ ok: true });
@@ -716,6 +768,7 @@ select:focus,input:focus{border-color:#a78bfa}
   <a href="#/users" data-r="users"><span class="ic">👥</span>账号管理</a>
   <a href="#/requests" data-r="requests"><span class="ic">💌</span>素材请求</a>
   <a href="#/aiprompts" data-r="aiprompts"><span class="ic">🤖</span>AI 提示词</a>
+  <a href="#/gallery" data-r="gallery"><span class="ic">🖼️</span>生成图库</a>
   <a href="#/logs" data-r="logs"><span class="ic">📝</span>操作日志</a>
   <a href="#/health" data-r="health"><span class="ic">🩺</span>网站体检</a>
   <div class="acct"><span>👤</span><span id="acct-name" style="overflow:hidden;text-overflow:ellipsis">管理员</span><button onclick="logout()">退出</button></div>
@@ -1107,6 +1160,45 @@ window.savePrompts=async()=>{
   };
   try{await api('/console/api/ai-prompts',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompts})});toast('已保存，立即生效 ✅');document.getElementById('p-hint').textContent='已保存 ✓ 下次生成即用新提示词'}
   catch(e){toast(e.message)}
+};
+
+/* ---------- 生成图库（2026-10-22）：全部用户 AI 生成图，可搜索/排序 ---------- */
+const G_KIND={gen:'生成素材',big:'生成大图',edit:'AI 改图',style:'风格转换',nobg:'移除背景',vec:'位图转矢量',split:'拆分图层'};
+function gState(){return window._gq=window._gq||{q:'',sort:'desc',offset:0,limit:60,total:0,items:[]}}
+function renderGallery(){
+  const g=gState();
+  const cards=g.items.map(it=>'<div class="mat"><img loading="lazy" src="/console/api/ai-gallery/img?job='+it.id+'&n='+it.img+'" alt="" onerror="this.style.opacity=.2">'+
+    '<div class="t" title="'+esc(it.prompt)+'">'+esc((it.prompt||'').slice(0,20))+'</div>'+
+    '<div class="dl">'+esc(it.userName)+(it.userEmail?' · '+esc(it.userEmail):'')+'<br>'+(G_KIND[it.kind]||it.kind)+(it.kind==='split'?' · '+it.layers+' 层':'')+' · '+fmtT(it.createdAt)+'</div></div>').join('');
+  return '<h2>🖼️ 生成图库</h2><div class="sub">全部用户的 AI 生成图（AI 工坊），支持按账号 / 邮箱 / 描述搜索，按时间排序。共 '+g.total+' 条。</div>'+
+    '<div class="toolbar"><input id="g-q" placeholder="搜索账号 / 邮箱 / 描述，回车确认" value="'+esc(g.q)+'" style="width:260px" onkeydown="if(event.key===\'Enter\')gallerySearch()">'+
+    '<select id="g-sort" onchange="gallerySearch()"><option value="desc"'+(g.sort==='desc'?' selected':'')+'>最新优先</option><option value="asc"'+(g.sort==='asc'?' selected':'')+'>最早优先</option></select>'+
+    '<button class="btn btn-p btn-xs" onclick="gallerySearch()">搜索</button><div class="sp"></div><a class="btn btn-g btn-xs" href="#/logs">操作明细</a></div>'+
+    (g.items.length?'<div class="grid">'+cards+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3">没有匹配的记录</div>')+
+    (g.offset<g.total?'<div style="text-align:center;margin-top:14px"><button class="btn btn-g" onclick="galleryMore()">加载更多（还有 '+(g.total-g.offset)+' 条）</button></div>':'')+
+    '<div id="g-export"></div>';
+}
+H.gallery=async()=>{
+  const g=gState();
+  const d=await api('/console/api/ai-gallery?q='+encodeURIComponent(g.q)+'&sort='+g.sort+'&offset=0&limit='+g.limit);
+  g.total=d.total; g.items=d.list; g.offset=d.list.length;
+  const html=renderGallery();
+  // 画板导出记录（只有元数据，图在用户本地生成）
+  api('/console/api/export-records?q='+encodeURIComponent(g.q)).then(e=>{
+    const el=document.getElementById('g-export'); if(!el)return;
+    el.innerHTML='<div class="panel" style="margin-top:18px"><h3 style="font-size:15px;margin-bottom:8px">🎨 画板导出记录（'+e.total+' 条，仅元数据——导出图在用户浏览器本地生成，服务器不存档）</h3>'+
+      (e.list.length?'<div style="max-height:240px;overflow:auto"><table><tr><th>用户</th><th>画板</th><th>授权码</th><th>导出时间</th></tr>'+
+      e.list.map(r=>'<tr><td>'+esc(r.userName)+(r.userEmail?' <span style="color:#b0aac4;font-size:12px">'+esc(r.userEmail)+'</span>':'')+'</td><td>'+esc(r.boardTitle||'—')+'</td><td><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+esc(r.code)+'\\')">'+esc(r.code)+'</button></td><td style="font-size:12px">'+fmtT(r.time)+'</td></tr>').join('')+
+      '</table></div>':'<div class="sub" style="text-align:center;padding:10px">暂无导出记录</div>')+'</div>';
+  }).catch(()=>{});
+  return html;
+};
+window.gallerySearch=()=>{const g=gState();g.q=document.getElementById('g-q').value.trim();g.sort=document.getElementById('g-sort').value;g.offset=0;g.items=[];route()};
+window.galleryMore=async()=>{
+  const g=gState();
+  const d=await api('/console/api/ai-gallery?q='+encodeURIComponent(g.q)+'&sort='+g.sort+'&offset='+g.offset+'&limit='+g.limit);
+  g.items=g.items.concat(d.list); g.offset+=d.list.length;
+  document.getElementById('view').innerHTML=renderGallery();
 };
 
 /* ---------- 路由 ---------- */
