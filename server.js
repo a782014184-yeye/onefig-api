@@ -1248,6 +1248,31 @@ function refundAIEdit(uid, paidWith, feature) {
   } catch {}
 }
 
+// ---- 本地 rembg 抠图（2026-10-22：AI 改图/风格转换勾选"移除背景"时用，与 /api/remove-bg 同一路由，免费）----
+function rembgLocal(buf) {
+  return new Promise((resolve, reject) => {
+    const boundary = '----onefig' + Date.now();
+    const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="edit.png"\r\nContent-Type: image/png\r\n\r\n`);
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const req = require('http').request({
+      host: '127.0.0.1', port: 9000, path: '/remove-bg', method: 'POST',
+      headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': head.length + buf.length + tail.length },
+      timeout: 120000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        if (res.statusCode === 200 && chunks.length) return resolve(Buffer.concat(chunks));
+        reject(new Error('rembg ' + res.statusCode));
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('rembg 超时')));
+    req.on('error', reject);
+    req.write(head); req.write(buf); req.write(tail); req.end();
+  });
+}
+function wantTransparent(req) { return req.body && (req.body.transparent === '1' || req.body.transparent === 'true'); }
+
 // ---- AI 风格转换（照片/其他图 → 指定插画风）----
 // 提示词模板已迁入 ai-prompts.js（后台"AI 提示词"页可改，保存即生效）
 const STY_NAMES = { flat: '矢量插画风', matte: 'OneFig 风格', threed: '3D 立体质感' };
@@ -1289,11 +1314,13 @@ app.post('/api/ai-stylize', authUser, aiEditRateLimit, (req, res) => {
       if (!outUrl) { refund(); logLine('ai-op', `stylize FAIL user=${req.user.name} style=${style}${custom ? ' custom="' + custom.slice(0, 30) + '"' : ''} err=${(data && data.message) || 'no-image'} ${Date.now() - t0}ms`); return res.status(502).json({ ok: false, error: (data && data.message) || 'AI 处理失败，请重试（未扣积分）' }); }
       const imgRes = await fetch(outUrl);
       const buf = Buffer.from(await imgRes.arrayBuffer());
+      // 勾选"移除背景"：本地 rembg 抠透明底（失败则保留原图，不阻断流程）
+      const finalBuf = wantTransparent(req) ? await rembgLocal(buf).catch(() => buf) : buf;
       const outName = 'ai-sty-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       // 注入 AIGC 元数据隐式标识（GB 45438-2025），内容编号即文件名
-      fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(buf, outName.replace(/\.png$/, '')));
+      fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(finalBuf, outName.replace(/\.png$/, '')));
       // 生成记录：风格转换也入账（2026-10-21，存原始字节，下载时再注入元数据避免重复）
-      recordAIResult({ userId: req.user.id, kind: 'style', prompt: custom ? custom.slice(0, 80) : `风格转换：${STY_NAMES[style] || style}`, ext: 'png', buf });
+      recordAIResult({ userId: req.user.id, kind: 'style', prompt: custom ? custom.slice(0, 80) : `风格转换：${STY_NAMES[style] || style}`, ext: 'png', buf: finalBuf });
       logLine('ai-op', `stylize ok user=${req.user.name} style=${style}${custom ? ' custom="' + custom.slice(0, 30) + '"' : ''} paidWith=${charge.paidWith} ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName), paidWith: charge.paidWith, credits: charge.paidWith === 'credit' ? charge.credits : undefined });
     } catch (e) {
@@ -1343,11 +1370,13 @@ app.post('/api/ai-edit', authUser, aiEditRateLimit, (req, res) => {
       // 结果图转存到服务器，避免 OSS 临时链接过期
       const imgRes = await fetch(outUrl);
       const buf = Buffer.from(await imgRes.arrayBuffer());
+      // 勾选"移除背景"：本地 rembg 抠透明底（失败则保留原图，不阻断流程）
+      const finalBuf = wantTransparent(req) ? await rembgLocal(buf).catch(() => buf) : buf;
       const outName = 'ai-out-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       // 注入 AIGC 元数据隐式标识（GB 45438-2025），内容编号即文件名
-      fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(buf, outName.replace(/\.png$/, '')));
+      fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(finalBuf, outName.replace(/\.png$/, '')));
       // 生成记录：AI 改图也入账（2026-10-21，存原始字节，下载时再注入元数据避免重复）
-      recordAIResult({ userId: req.user.id, kind: 'edit', prompt: 'AI 改图：' + prompt.slice(0, 80), ext: 'png', buf });
+      recordAIResult({ userId: req.user.id, kind: 'edit', prompt: 'AI 改图：' + prompt.slice(0, 80), ext: 'png', buf: finalBuf });
       logLine('ai-op', `edit ok user=${req.user.name} prompt="${prompt.slice(0, 40)}" paidWith=${charge.paidWith} ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName), paidWith: charge.paidWith, credits: charge.paidWith === 'credit' ? charge.credits : undefined });
     } catch (e) {

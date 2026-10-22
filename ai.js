@@ -216,7 +216,8 @@ module.exports = function registerAI(app, deps) {
     for (let i = 0; i < CANDIDATES; i++) {
       try {
         const buf = await generateImage(prompt, size);
-        const out = isBig ? ensurePng(buf) : await matteImage(buf);
+        // 大图勾选"移除背景"时走本地 rembg 抠透明底；否则保留背景统一转 PNG
+        const out = isBig ? (job.transparent ? await matteImage(buf) : ensurePng(buf)) : await matteImage(buf);
         const f = path.join(dir, `c${i}.png`);
         fs.writeFileSync(f, out);
         results.push({ i, ok: true, size: out.length });
@@ -396,6 +397,7 @@ module.exports = function registerAI(app, deps) {
       const prompt = String((req.body || {}).prompt || '').trim().slice(0, 500);
       const style = ['flat', 'matte', 'threed'].includes((req.body || {}).style) ? req.body.style : 'matte';
       const bigType = ['cover', 'abstract', 'mechanism'].includes((req.body || {}).bigType) ? req.body.bigType : null;
+      const transparent = !!((req.body || {}).transparent) && !!bigType; // 仅生成大图可选（生成素材本就透明底）
       if (!prompt) return res.status(400).json({ ok: false, error: bigType ? '先描述一下想要什么大图吧' : '先描述一下想要什么素材吧' });
       if (prompt.length < 4) return res.status(400).json({ ok: false, error: '描述再具体一点点，太简短容易画歪' });
       const hit = BLOCKWORDS.find(w => prompt.includes(w));
@@ -422,7 +424,7 @@ module.exports = function registerAI(app, deps) {
         return res.status(429).json({ ok: false, error: '上一个生成任务还在跑，等它出图后再试～' });
       }
 
-      const job = { id: crypto.randomUUID(), userId: u.id, prompt, style: bigType ? undefined : style, bigType, kind: bigType ? 'big' : 'gen', status: 'running', candidates: [], picked: null, paidWith, cost, createdAt: new Date().toISOString() };
+      const job = { id: crypto.randomUUID(), userId: u.id, prompt, style: bigType ? undefined : style, bigType, transparent, kind: bigType ? 'big' : 'gen', status: 'running', candidates: [], picked: null, paidWith, cost, createdAt: new Date().toISOString() };
       jobs.unshift(job);
       saveJobs(jobs);
       saveUsers(users);
@@ -458,7 +460,7 @@ module.exports = function registerAI(app, deps) {
   // ---- 我的任务列表 ----
   app.get('/api/ai/jobs', authUser, (req, res) => {
     const list = loadJobs().filter(j => j.userId === req.user.id)
-      .map(j => ({ id: j.id, kind: j.kind || 'gen', bigType: j.bigType, layers: j.layers, prompt: j.prompt, style: j.style, ext: j.ext || 'png', status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error }));
+      .map(j => ({ id: j.id, kind: j.kind || 'gen', bigType: j.bigType, transparent: j.transparent, layers: j.layers, prompt: j.prompt, style: j.style, ext: j.ext || 'png', status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error }));
     res.json({ ok: true, list });
   });
 
