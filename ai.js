@@ -28,7 +28,7 @@ const STYLE_SUFFIX = {
   threed: '柔和的3D渲染插画：立体光影、柔和材质、类似Blender卡通渲染，圆润干净、轻微体积感，但绝对不要写实照片感、不要塑料感',
 };
 const PROMPT_TMPL = (topic, style) =>
-  `${topic}，形态科学准确。${STYLE_SUFFIX[style] || STYLE_SUFFIX.matte}，轮廓圆润干净，类似现代科研示意图。低饱和和谐配色（以主体为准，不限定具体色相），透明背景，无任何文字和标注，主体板正居中，极简专业`;
+  `${topic}，形态科学准确。${STYLE_SUFFIX[style] || STYLE_SUFFIX.matte}，轮廓圆润干净，类似 BioRender 的现代科研示意图，干净专业、辨识度高。配色低饱和但颜色必须准确：严格遵循描述中的颜色——描述为白色就是纯白（可配极轻阴影表现体积，但整体观感必须仍是白色），不要发灰、不要偏米色、不要擅自改色。透明背景，无任何文字和标注，主体板正居中，极简专业`;
 
 module.exports = function registerAI(app, deps) {
   const { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine } = deps;
