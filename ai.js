@@ -49,6 +49,32 @@ module.exports = function registerAI(app, deps) {
 
   const arkKey = () => { try { return fs.readFileSync(KEY_FILE, 'utf8').trim(); } catch { return ''; } };
 
+  // 启动恢复（2026-10-22）：服务重启会中断内存中正在跑的生成任务，而任务记录仍停在
+  // running——永远转圈且用户被"上一个任务还在跑"挡住。启动时把残留 running 记录
+  // 标记为失败并原路退还（积分或免费试用次数）。
+  (function recoverStuckJobs() {
+    try {
+      const jobs = loadJobs();
+      const stuck = jobs.filter(j => j.status === 'running');
+      if (!stuck.length) return;
+      const users = loadUsers();
+      let usersDirty = false;
+      for (const j of stuck) {
+        j.status = 'failed';
+        j.error = '生成中断（服务维护），已自动退还';
+        j.finishedAt = new Date().toISOString();
+        const u = users.find(x => x.id === j.userId);
+        if (u) {
+          if (j.paidWith === 'credit') { u.credits = (u.credits || 0) + (j.cost || COST); usersDirty = true; }
+          else if (j.paidWith === 'free' && u.aiFreeUsed) { u.aiFreeUsed.gen = Math.max(0, (u.aiFreeUsed.gen || 0) - 1); usersDirty = true; }
+          logLine('ai-op', `recover stuck job user=${u.name} paidWith=${j.paidWith} refund`);
+        }
+      }
+      saveJobs(jobs);
+      if (usersDirty) saveUsers(users);
+    } catch (e) { logLine('ai-op', `recover FAIL ${e && e.message}`); }
+  })();
+
   function today() { return new Date().toISOString().slice(0, 10); }
   function freeLeft() { return 0; } // 每日免费已取消，一律走积分
 
