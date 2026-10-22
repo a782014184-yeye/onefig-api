@@ -8,7 +8,7 @@ const crypto = require('crypto');
 // （1536×1536 = 236 万像素 ≤ 261 万，卡在 0.30 元/张档；2048² 会跳进 0.60 元档）
 // 均可环境变量覆盖：ARK_MODEL / ARK_SIZE
 const MODEL = process.env.ARK_MODEL || 'doubao-seedream-5-0-pro-260628';
-const SIZE = process.env.ARK_SIZE || '1536x1536';
+const SIZE = process.env.ARK_SIZE || '1728x1728'; // 生成素材出图尺寸（2026-10-22 按反馈升高清档 1728²=298 万像素 >261 万，单价 0.60 元/张）
 const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
 const CANDIDATES = 1; // 每次生成 = 1 张候选 = 10 积分（Seedream 5.0 Pro 1536² 成本 0.30 元/张，定价 1 元/张，毛利约 70%）；不满意再生成再扣 10 积分，无免费重抽
 const COST = 10; // 每次生成消耗积分（2026-10-21 按反馈统一定价 10）
