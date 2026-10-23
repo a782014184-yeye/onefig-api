@@ -187,9 +187,13 @@ module.exports = function registerAI(app, deps) {
     const corner = (x0, y0) => { for (let y = y0; y < y0 + 6; y++) for (let x = x0; x < x0 + 6; x++) { const i = (w * y + x) << 2; br += rgb[i]; bg += rgb[i + 1]; bb += rgb[i + 2]; bn++; } };
     corner(0, 0); corner(w - 6, 0); corner(0, h - 6); corner(w - 6, h - 6);
     br /= bn; bg /= bn; bb /= bn;
-    // 与背景色的距离容差：比"纯白洪泛"更紧（34），防止浅米色主体边缘被并入背景
-    const TOL2 = 34 * 34 * 3;
-    const isBg = (i) => { const dr = rgb[i] - br, dg = rgb[i + 1] - bg, db = rgb[i + 2] - bb; return dr * dr + dg * dg + db * db < TOL2; };
+    const cornerLum = (br + bg + bb) / 3;
+    // 亮度容差（2026-10-23 v2）：按与四角背景色的"亮度差"判定——
+    // 背景渐变是"中性"的（各通道同步变化），而浅米/浅蓝主体与白色背景的差异
+    // 远大于背景自身的不均匀度（米色 lum≈234 vs 白 255，差 21），
+    // 亮度阈值 13 既能吞掉白底渐变噪点，又能让米色边缘挡住洪泛。
+    // 注意：纯白主体（白鼠）会被吃掉——由 matteImage 的"模型∪洪泛"并集兜底。
+    const isBg = (i) => Math.abs((rgb[i] + rgb[i + 1] + rgb[i + 2]) / 3 - cornerLum) < 13;
     const visited = new Uint8Array(w * h);
     const stack = [];
     for (let x = 0; x < w; x++) { stack.push(x, w * (h - 1) + x); }
@@ -235,13 +239,42 @@ module.exports = function registerAI(app, deps) {
       req.write(head); if (field.length) req.write(field); req.write(buf); req.write(tail); req.end();
     });
   }
+  // 双 alpha 并集：模型结果（ anime 会话，≤1024）与洪泛结果（原尺寸）取 max。
+  // 模型保住纯白主体/柔和过渡，洪泛保住小碎片与浅色边缘——各取所长（2026-10-23）
+  function alphaUnion(modelBuf, floodBuf) {
+    const { PNG } = require('pngjs');
+    const m = PNG.sync.read(modelBuf);
+    const f = PNG.sync.read(floodBuf);
+    const W = f.width, H = f.height;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const fi = (W * y + x) << 2;
+      if (f.data[fi + 3] > 0) continue; // 洪泛已保留，无需补
+      // 最近邻取模型 alpha（模型输出 ≤1024，缩回原尺寸）
+      const mx = Math.min(m.width - 1, Math.floor(x * m.width / W));
+      const my = Math.min(m.height - 1, Math.floor(y * m.height / H));
+      const mi = (m.width * my + mx) << 2;
+      const ma = m.data[mi + 3];
+      if (ma > 24) { // 模型认为此处有内容：回填其 RGB，避免边缘色偏
+        f.data[fi] = m.data[mi]; f.data[fi + 1] = m.data[mi + 1]; f.data[fi + 2] = m.data[mi + 2];
+        f.data[fi + 3] = ma;
+      }
+    }
+    return PNG.sync.write({ width: W, height: H, data: f.data });
+  }
+
   async function matteImage(buf) {
-    // AI 生成内容抠底策略（2026-10-23）：洪泛优先（纯色底图，完整保留小碎片元素）
-    // → ISNet-anime 会话（复杂背景时）→ 洪泛兜底，三级降级
-    try { return await floodMatte(buf); }
-    catch (e) { logLine('ai-op', 'flood-matte 不适用（' + e.message + '），转 anime 模型'); }
-    try { return await rembgTransparent(buf, 'anime'); }
-    catch (e) { logLine('ai-op', 'rembg 不可用，回退洪泛抠底：' + e.message); return whiteToTransparent(buf); }
+    // AI 生成内容抠底（2026-10-23 v3）：模型（anime 会话）与洪泛两路并行，
+    // alpha 取并集——小碎片/浅色边缘（洪泛保住）+ 纯白主体/柔和过渡（模型保住）。
+    // 两路都失败才回退旧洪泛。
+    let modelBuf = null, floodBuf = null;
+    try { modelBuf = await rembgTransparent(buf, 'anime'); }
+    catch (e) { logLine('ai-op', 'anime 模型不可用：' + e.message); }
+    try { floodBuf = floodMatte(buf); }
+    catch (e) { logLine('ai-op', 'flood-matte 不适用（' + e.message + '）'); }
+    if (modelBuf && floodBuf) return alphaUnion(modelBuf, floodBuf);
+    if (modelBuf) return modelBuf;
+    if (floodBuf) return floodBuf;
+    return whiteToTransparent(buf);
   }
 
   // ---- 生成大图：保留背景（不抠透明底），仅把 JPEG 字节统一转成 PNG 存储 ----
@@ -508,6 +541,7 @@ module.exports = function registerAI(app, deps) {
     } catch (e) { logLine('ai-op', `record FAIL kind=${kind} ${e && e.message}`); return null; }
   }
   module.exports.recordAIResult = recordAIResult;
+  module.exports.floodMatte = floodMatte; // 供合成测试与运维排障直接调用
 
   // ---- 我的任务列表 ----
   app.get('/api/ai/jobs', authUser, (req, res) => {
