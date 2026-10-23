@@ -1188,7 +1188,9 @@ function galleryTabs(g){
 }
 function renderGallery(){
   const g=gState();
-  const cards=g.items.map(it=>'<div class="mat"><img loading="lazy" src="/console/api/ai-gallery/img?job='+it.id+'&n='+it.img+'&t='+getTK()+'" alt="" onerror="this.style.opacity=.2">'+
+  // 点击小图看大图（2026-10-23 按反馈）：复用后台 viewMatList 查看器，支持左右翻页
+  window.G_LIST=g.items.map(it=>({src:'/console/api/ai-gallery/img?job='+it.id+'&n='+it.img+'&t='+getTK(),t:it.prompt||''}));
+  const cards=g.items.map((it,i)=>'<div class="mat"><img loading="lazy" src="'+window.G_LIST[i].src+'" alt="" style="cursor:zoom-in" onclick="viewMatList(G_LIST,'+i+')" onerror="this.style.opacity=.2">'+
     '<div class="t" title="'+esc(it.prompt)+'">'+esc((it.prompt||'').slice(0,20))+'</div>'+
     '<div class="dl">'+esc(it.userName)+(it.userEmail?' · '+esc(it.userEmail):'')+'<br>'+(G_KIND[it.kind]||it.kind)+(it.kind==='split'?' · '+it.layers+' 层':'')+' · '+fmtT(it.createdAt)+'</div></div>').join('');
   return '<h2>🖼️ 生成图库</h2><div class="sub">全部用户的 AI 生成图（AI 工坊），支持按账号 / 邮箱 / 描述搜索，按时间排序。</div>'+
@@ -1201,7 +1203,9 @@ function renderGallery(){
 }
 // 画板导出图（2026-10-22 起上传存档；TIF 浏览器无法预览显示占位）
 function renderExport(e){
-  const cards=e.list.map(r=>'<div class="mat"><img loading="lazy" src="/console/api/export-records/img?id='+r.id+'&t='+getTK()+'" alt="" onerror="this.parentElement.innerHTML=\\'<div class=&quot;noimg&quot; style=&quot;height:96px&quot;>'+(r.fmt==='tif'?'TIF 无法预览':(r.fmt||'').toUpperCase())+'</div>\\'">'+
+  // 点击小图看大图（2026-10-23）：TIF 浏览器看不了，占位图不挂查看器
+  window.G_EXP=e.list.map(r=>({src:'/console/api/export-records/img?id='+r.id+'&t='+getTK(),t:(r.boardTitle||'画板导出')+' · '+(r.fmt||'').toUpperCase()}));
+  const cards=e.list.map((r,i)=>'<div class="mat"><img loading="lazy" src="'+window.G_EXP[i].src+'" alt=""'+(r.fmt==='tif'?'':' style="cursor:zoom-in" onclick="viewMatList(G_EXP,'+i+')"')+' onerror="this.parentElement.innerHTML=\\'<div class=&quot;noimg&quot; style=&quot;height:96px&quot;>'+(r.fmt==='tif'?'TIF 无法预览':(r.fmt||'').toUpperCase())+'</div>\\'">'+
     '<div class="t" title="'+esc(r.boardTitle||'')+'">'+esc((r.boardTitle||'画板导出').slice(0,16))+'</div>'+
     '<div class="dl">'+esc(r.userName)+(r.userEmail?' · '+esc(r.userEmail):'')+'<br>'+esc((r.fmt||'').toUpperCase())+' · '+fmtSize(r.size)+' · '+fmtT(r.time)+'</div></div>').join('');
   return '<div class="sub" style="margin-bottom:12px">2026-10-22 起导出时自动上传存档（PDF/SVG 矢量格式不上传）。</div>'+
