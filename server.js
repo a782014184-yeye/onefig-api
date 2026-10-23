@@ -509,9 +509,10 @@ app.post('/api/submissions', submitRateLimit, (req, res) => {
       const u = optionalUser(req);
       if (!u) { cleanup(); return res.status(401).json({ ok: false, error: '请先登录后再提交需求' }); }
       // 求素材配额（2026-10-20 权益分级）：普通/青果/红果每月 5 个（自然月），金果不限量
+      // 2026-10-23：type=report（素材错误反馈）不占配额、不计入月度统计——报错是帮平台改进
       const reqMonth = new Date().toISOString().slice(0, 7);
-      const usedReq = rows.filter(r => r.userId === u.id && String(r.createdAt || '').startsWith(reqMonth)).length;
-      if ((u.level || 'none') !== 'team' && usedReq >= 5) {
+      const usedReq = rows.filter(r => r.userId === u.id && (r.type || 'request') !== 'report' && String(r.createdAt || '').startsWith(reqMonth)).length;
+      if (req.body.type !== 'report' && (u.level || 'none') !== 'team' && usedReq >= 5) {
         cleanup();
         return res.json({ ok: false, error: '本月求素材名额已用完（每月 5 个，自然月重置），金果会员不限量' });
       }
@@ -519,7 +520,7 @@ app.post('/api/submissions', submitRateLimit, (req, res) => {
         id: crypto.randomUUID(),
         desc, contact, series,
         userId: u.id,
-        type: (req.body.type === 'custom') ? 'custom' : 'request',
+        type: ['custom', 'report'].includes(req.body.type) ? req.body.type : 'request',
         image: files[0] ? path.basename(files[0].path) : null,
         images: files.map(f => path.basename(f.path)),
         createdAt: new Date().toISOString(),
@@ -1005,7 +1006,7 @@ app.post('/' + ADMIN_PATH + '/toggle', consoleAuth, (req, res) => {
   writeDB(rows);
   res.json({ ok: true });
   // 素材上新后给提交者发邮件通知（仅登录用户提交的需求有 userId；游客提交无邮箱可发）
-  if (r.status === 'done' && r.userId) {
+  if (r.status === 'done' && r.userId && r.type !== 'report') {   // 错误反馈修复后不push「上新」邮件（2026-10-23）
     const u = loadUsers().find(x => x.id === r.userId);
     const m = getMailer();
     if (u && u.email && m) {
