@@ -1174,37 +1174,49 @@ window.savePrompts=async()=>{
 };
 
 /* ---------- 生成图库（2026-10-22）：全部用户 AI 生成图，可搜索/排序 ---------- */
+/* 2026-10-23 按反馈：顶部加「AI 生图记录 / 画板导出图」切换按钮——AI 生图越来越多，导出图沉底找不到 */
 const G_KIND={gen:'生成素材',big:'生成大图',edit:'AI 改图',style:'风格转换',nobg:'移除背景',vec:'位图转矢量',split:'拆分图层'};
-function gState(){return window._gq=window._gq||{q:'',sort:'desc',offset:0,limit:60,total:0,items:[]}}
+function gState(){return window._gq=window._gq||{q:'',sort:'desc',offset:0,limit:60,total:0,items:[],tab:'ai',aiTotal:null,expTotal:null}}
+window.galleryTab=(k)=>{const g=gState();if(g.tab!==k){g.tab=k;route()}};
+function galleryTabs(g){
+  const aiN=g.aiTotal==null?'':'（'+g.aiTotal+'）';
+  const exN=g.expTotal==null?'':'（'+g.expTotal+'）';
+  return '<div class="toolbar" style="margin-bottom:14px">'+
+    '<button class="btn btn-xs '+(g.tab==='ai'?'btn-p':'btn-g')+'" onclick="galleryTab(\\'ai\\')">🖼️ AI 生图记录'+aiN+'</button>'+
+    '<button class="btn btn-xs '+(g.tab==='export'?'btn-p':'btn-g')+'" onclick="galleryTab(\\'export\\')">🎨 画板导出图'+exN+'</button>'+
+    '</div>';
+}
 function renderGallery(){
   const g=gState();
   const cards=g.items.map(it=>'<div class="mat"><img loading="lazy" src="/console/api/ai-gallery/img?job='+it.id+'&n='+it.img+'&t='+getTK()+'" alt="" onerror="this.style.opacity=.2">'+
     '<div class="t" title="'+esc(it.prompt)+'">'+esc((it.prompt||'').slice(0,20))+'</div>'+
     '<div class="dl">'+esc(it.userName)+(it.userEmail?' · '+esc(it.userEmail):'')+'<br>'+(G_KIND[it.kind]||it.kind)+(it.kind==='split'?' · '+it.layers+' 层':'')+' · '+fmtT(it.createdAt)+'</div></div>').join('');
-  return '<h2>🖼️ 生成图库</h2><div class="sub">全部用户的 AI 生成图（AI 工坊），支持按账号 / 邮箱 / 描述搜索，按时间排序。共 '+g.total+' 条。</div>'+
+  return '<h2>🖼️ 生成图库</h2><div class="sub">全部用户的 AI 生成图（AI 工坊），支持按账号 / 邮箱 / 描述搜索，按时间排序。</div>'+
+    galleryTabs(g)+
     '<div class="toolbar"><input id="g-q" placeholder="搜索账号 / 邮箱 / 描述，回车确认" value="'+esc(g.q)+'" style="width:260px" onkeydown="if(event.key===\\'Enter\\')gallerySearch()">'+
     '<select id="g-sort" onchange="gallerySearch()"><option value="desc"'+(g.sort==='desc'?' selected':'')+'>最新优先</option><option value="asc"'+(g.sort==='asc'?' selected':'')+'>最早优先</option></select>'+
     '<button class="btn btn-p btn-xs" onclick="gallerySearch()">搜索</button><div class="sp"></div><a class="btn btn-g btn-xs" href="#/logs">操作明细</a></div>'+
     (g.items.length?'<div class="grid">'+cards+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3">没有匹配的记录</div>')+
-    (g.offset<g.total?'<div style="text-align:center;margin-top:14px"><button class="btn btn-g" onclick="galleryMore()">加载更多（还有 '+(g.total-g.offset)+' 条）</button></div>':'')+
-    '<div id="g-export"></div>';
+    (g.offset<g.total?'<div style="text-align:center;margin-top:14px"><button class="btn btn-g" onclick="galleryMore()">加载更多（还有 '+(g.total-g.offset)+' 条）</button></div>':'');
+}
+// 画板导出图（2026-10-22 起上传存档；TIF 浏览器无法预览显示占位）
+function renderExport(e){
+  const cards=e.list.map(r=>'<div class="mat"><img loading="lazy" src="/console/api/export-records/img?id='+r.id+'&t='+getTK()+'" alt="" onerror="this.parentElement.innerHTML=\\'<div class=&quot;noimg&quot; style=&quot;height:96px&quot;>'+(r.fmt==='tif'?'TIF 无法预览':(r.fmt||'').toUpperCase())+'</div>\\'">'+
+    '<div class="t" title="'+esc(r.boardTitle||'')+'">'+esc((r.boardTitle||'画板导出').slice(0,16))+'</div>'+
+    '<div class="dl">'+esc(r.userName)+(r.userEmail?' · '+esc(r.userEmail):'')+'<br>'+esc((r.fmt||'').toUpperCase())+' · '+fmtSize(r.size)+' · '+fmtT(r.time)+'</div></div>').join('');
+  return '<div class="sub" style="margin-bottom:12px">2026-10-22 起导出时自动上传存档（PDF/SVG 矢量格式不上传）。</div>'+
+    (e.list.length?'<div class="grid">'+cards+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3">暂无导出记录（旧记录为本地导出，无图）</div>');
 }
 H.gallery=async()=>{
   const g=gState();
+  if(g.tab==='export'){
+    const e=await api('/console/api/export-records?q='+encodeURIComponent(g.q));
+    g.expTotal=e.total;
+    return '<h2>🖼️ 生成图库</h2>'+galleryTabs(g)+renderExport(e);
+  }
   const d=await api('/console/api/ai-gallery?q='+encodeURIComponent(g.q)+'&sort='+g.sort+'&offset=0&limit='+g.limit);
-  g.total=d.total; g.items=d.list; g.offset=d.list.length;
-  const html=renderGallery();
-  // 画板导出图（2026-10-22 起上传存档；TIF 浏览器无法预览显示占位）
-  api('/console/api/export-records?q='+encodeURIComponent(g.q)).then(e=>{
-    const el=document.getElementById('g-export'); if(!el)return;
-    const cards=e.list.map(r=>'<div class="mat"><img loading="lazy" src="/console/api/export-records/img?id='+r.id+'&t='+getTK()+'" alt="" onerror="this.parentElement.innerHTML=\\'<div class=&quot;noimg&quot; style=&quot;height:96px&quot;>'+(r.fmt==='tif'?'TIF 无法预览':(r.fmt||'').toUpperCase())+'</div>\\'">'+
-      '<div class="t" title="'+esc(r.boardTitle||'')+'">'+esc((r.boardTitle||'画板导出').slice(0,16))+'</div>'+
-      '<div class="dl">'+esc(r.userName)+(r.userEmail?' · '+esc(r.userEmail):'')+'<br>'+esc((r.fmt||'').toUpperCase())+' · '+fmtSize(r.size)+' · '+fmtT(r.time)+'</div></div>').join('');
-    el.innerHTML='<div style="margin-top:22px"><h3 style="font-size:16px;margin-bottom:4px">🎨 画板导出图（'+e.total+' 条）</h3>'+
-      '<div class="sub" style="margin-bottom:12px">2026-10-22 起导出时自动上传存档（PDF/SVG 矢量格式不上传）；搜索与上方图库联动。</div>'+
-      (e.list.length?'<div class="grid">'+cards+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3">暂无导出记录（旧记录为本地导出，无图）</div>')+'</div>';
-  }).catch(()=>{});
-  return html;
+  g.total=d.total; g.aiTotal=d.total; g.items=d.list; g.offset=d.list.length;
+  return renderGallery();
 };
 window.gallerySearch=()=>{const g=gState();g.q=document.getElementById('g-q').value.trim();g.sort=document.getElementById('g-sort').value;g.offset=0;g.items=[];route()};
 window.galleryMore=async()=>{
