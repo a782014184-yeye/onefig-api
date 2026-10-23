@@ -1178,7 +1178,7 @@ const G_KIND={gen:'生成素材',big:'生成大图',edit:'AI 改图',style:'风�
 function gState(){return window._gq=window._gq||{q:'',sort:'desc',offset:0,limit:60,total:0,items:[]}}
 function renderGallery(){
   const g=gState();
-  const cards=g.items.map(it=>'<div class="mat"><img loading="lazy" src="/console/api/ai-gallery/img?job='+it.id+'&n='+it.img+'" alt="" onerror="this.style.opacity=.2">'+
+  const cards=g.items.map(it=>'<div class="mat"><img loading="lazy" src="/console/api/ai-gallery/img?job='+it.id+'&n='+it.img+'&t='+getTK()+'" alt="" onerror="this.style.opacity=.2">'+
     '<div class="t" title="'+esc(it.prompt)+'">'+esc((it.prompt||'').slice(0,20))+'</div>'+
     '<div class="dl">'+esc(it.userName)+(it.userEmail?' · '+esc(it.userEmail):'')+'<br>'+(G_KIND[it.kind]||it.kind)+(it.kind==='split'?' · '+it.layers+' 层':'')+' · '+fmtT(it.createdAt)+'</div></div>').join('');
   return '<h2>🖼️ 生成图库</h2><div class="sub">全部用户的 AI 生成图（AI 工坊），支持按账号 / 邮箱 / 描述搜索，按时间排序。共 '+g.total+' 条。</div>'+
@@ -1197,7 +1197,7 @@ H.gallery=async()=>{
   // 画板导出图（2026-10-22 起上传存档；TIF 浏览器无法预览显示占位）
   api('/console/api/export-records?q='+encodeURIComponent(g.q)).then(e=>{
     const el=document.getElementById('g-export'); if(!el)return;
-    const cards=e.list.map(r=>'<div class="mat"><img loading="lazy" src="/console/api/export-records/img?id='+r.id+'" alt="" onerror="this.parentElement.innerHTML=\\'<div class=&quot;noimg&quot; style=&quot;height:96px&quot;>'+(r.fmt==='tif'?'TIF 无法预览':(r.fmt||'').toUpperCase())+'</div>\\'">'+
+    const cards=e.list.map(r=>'<div class="mat"><img loading="lazy" src="/console/api/export-records/img?id='+r.id+'&t='+getTK()+'" alt="" onerror="this.parentElement.innerHTML=\\'<div class=&quot;noimg&quot; style=&quot;height:96px&quot;>'+(r.fmt==='tif'?'TIF 无法预览':(r.fmt||'').toUpperCase())+'</div>\\'">'+
       '<div class="t" title="'+esc(r.boardTitle||'')+'">'+esc((r.boardTitle||'画板导出').slice(0,16))+'</div>'+
       '<div class="dl">'+esc(r.userName)+(r.userEmail?' · '+esc(r.userEmail):'')+'<br>'+esc((r.fmt||'').toUpperCase())+' · '+fmtSize(r.size)+' · '+fmtT(r.time)+'</div></div>').join('');
     el.innerHTML='<div style="margin-top:22px"><h3 style="font-size:16px;margin-bottom:4px">🎨 画板导出图（'+e.total+' 条）</h3>'+
