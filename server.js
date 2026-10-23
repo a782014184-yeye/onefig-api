@@ -1287,14 +1287,16 @@ function refundAIEdit(uid, paidWith, feature) {
 }
 
 // ---- 本地 rembg 抠图（2026-10-22：AI 改图/风格转换勾选"移除背景"时用，与 /api/remove-bg 同一路由，免费）----
-function rembgLocal(buf) {
+// model='anime' 走插画/卡通/3D 渲染专用会话（AI 生成内容误删更少，2026-10-23）
+function rembgLocal(buf, model) {
   return new Promise((resolve, reject) => {
     const boundary = '----onefig' + Date.now();
     const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="edit.png"\r\nContent-Type: image/png\r\n\r\n`);
+    const field = model ? Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${model}\r\n`) : Buffer.alloc(0);
     const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
     const req = require('http').request({
       host: '127.0.0.1', port: 9000, path: '/remove-bg', method: 'POST',
-      headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': head.length + buf.length + tail.length },
+      headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': head.length + field.length + buf.length + tail.length },
       timeout: 120000,
     }, (res) => {
       const chunks = [];
@@ -1306,7 +1308,7 @@ function rembgLocal(buf) {
     });
     req.on('timeout', () => req.destroy(new Error('rembg 超时')));
     req.on('error', reject);
-    req.write(head); req.write(buf); req.write(tail); req.end();
+    req.write(head); if (field.length) req.write(field); req.write(buf); req.write(tail); req.end();
   });
 }
 function wantTransparent(req) { return req.body && (req.body.transparent === '1' || req.body.transparent === 'true'); }
@@ -1353,7 +1355,7 @@ app.post('/api/ai-stylize', authUser, aiEditRateLimit, (req, res) => {
       const imgRes = await fetch(outUrl);
       const buf = Buffer.from(await imgRes.arrayBuffer());
       // 勾选"移除背景"：本地 rembg 抠透明底（失败则保留原图，不阻断流程）
-      const finalBuf = wantTransparent(req) ? await rembgLocal(buf).catch(() => buf) : buf;
+      const finalBuf = wantTransparent(req) ? await rembgLocal(buf, 'anime').catch(() => buf) : buf;
       const outName = 'ai-sty-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       // 注入 AIGC 元数据隐式标识（GB 45438-2025），内容编号即文件名
       fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(finalBuf, outName.replace(/\.png$/, '')));
@@ -1409,7 +1411,7 @@ app.post('/api/ai-edit', authUser, aiEditRateLimit, (req, res) => {
       const imgRes = await fetch(outUrl);
       const buf = Buffer.from(await imgRes.arrayBuffer());
       // 勾选"移除背景"：本地 rembg 抠透明底（失败则保留原图，不阻断流程）
-      const finalBuf = wantTransparent(req) ? await rembgLocal(buf).catch(() => buf) : buf;
+      const finalBuf = wantTransparent(req) ? await rembgLocal(buf, 'anime').catch(() => buf) : buf;
       const outName = 'ai-out-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '.png';
       // 注入 AIGC 元数据隐式标识（GB 45438-2025），内容编号即文件名
       fs.writeFileSync(path.join(FILES_DIR, outName), injectAigcMeta(finalBuf, outName.replace(/\.png$/, '')));

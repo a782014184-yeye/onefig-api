@@ -167,14 +167,17 @@ module.exports = function registerAI(app, deps) {
   // 服务不可用时回退到洪泛算法 whiteToTransparent。
   // 背景：Seedream 5.0 Pro 出图底色接近纯白（249-255），洪泛容差 42 会把浅蓝/浅紫主体边缘
   // （距白 <40/通道）一起抠掉，用户反馈"生成的图被扣了底色"。
-  function rembgTransparent(buf) {
+  // model：'anime'=插画/卡通/3D 渲染专用会话（对 AI 生成的科研插画分布更匹配，
+  // 浅色主体误删更少，2026-10-23）；缺省/其他值走 general（照片/通用）
+  function rembgTransparent(buf, model) {
     return new Promise((resolve, reject) => {
       const boundary = '----onefig' + crypto.randomBytes(8).toString('hex');
       const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="gen.png"\r\nContent-Type: image/png\r\n\r\n`);
+      const field = model ? Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${model}\r\n`) : Buffer.alloc(0);
       const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
       const req = require('http').request({
         host: '127.0.0.1', port: 9000, path: '/remove-bg', method: 'POST',
-        headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': head.length + buf.length + tail.length },
+        headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': head.length + field.length + buf.length + tail.length },
         timeout: 120000,
       }, (res) => {
         const chunks = [];
@@ -186,11 +189,13 @@ module.exports = function registerAI(app, deps) {
       });
       req.on('timeout', () => req.destroy(new Error('rembg 超时')));
       req.on('error', reject);
-      req.write(head); req.write(buf); req.write(tail); req.end();
+      req.write(head); if (field.length) req.write(field); req.write(buf); req.write(tail); req.end();
     });
   }
   async function matteImage(buf) {
-    try { return await rembgTransparent(buf); }
+    // AI 生成内容（素材/大图勾选移除背景/风格转换/改图）统一走 anime 会话；
+    // 失败回退洪泛抠底兜底
+    try { return await rembgTransparent(buf, 'anime'); }
     catch (e) { logLine('ai-op', 'rembg 不可用，回退洪泛抠底：' + e.message); return whiteToTransparent(buf); }
   }
 
