@@ -167,6 +167,49 @@ module.exports = function registerAI(app, deps) {
   // 服务不可用时回退到洪泛算法 whiteToTransparent。
   // 背景：Seedream 5.0 Pro 出图底色接近纯白（249-255），洪泛容差 42 会把浅蓝/浅紫主体边缘
   // （距白 <40/通道）一起抠掉，用户反馈"生成的图被扣了底色"。
+  // ---- 洪泛抠底（2026-10-23 升级）：AI 生成图背景为纯色（提示词保证），
+  // 洪泛"只删与边缘连通的背景色"能 100% 保留小碎片元素（Y 形抗体/细丝等），
+  // 这是 DL 分割模型的固有弱项。背景色取四角均值（白底/彩色纯色底都适用），
+  // 覆盖率异常（主体贴边/复杂背景）时抛错走 AI 模型兜底。----
+  function floodMatte(buf) {
+    const { PNG } = require('pngjs');
+    let rgb, w, h;
+    if (buf.length > 3 && buf[0] === 0xFF && buf[1] === 0xD8) {
+      const jpeg = require('jpeg-js');
+      const d = jpeg.decode(buf, { useTArray: true, maxMemoryUsageInMB: 1024 });
+      rgb = d.data; w = d.width; h = d.height;
+    } else {
+      const png = PNG.sync.read(buf);
+      rgb = png.data; w = png.width; h = png.height;
+    }
+    // 背景参考色 = 四角 6x6 块均值
+    let br = 0, bg = 0, bb = 0, bn = 0;
+    const corner = (x0, y0) => { for (let y = y0; y < y0 + 6; y++) for (let x = x0; x < x0 + 6; x++) { const i = (w * y + x) << 2; br += rgb[i]; bg += rgb[i + 1]; bb += rgb[i + 2]; bn++; } };
+    corner(0, 0); corner(w - 6, 0); corner(0, h - 6); corner(w - 6, h - 6);
+    br /= bn; bg /= bn; bb /= bn;
+    // 与背景色的距离容差：比"纯白洪泛"更紧（34），防止浅米色主体边缘被并入背景
+    const TOL2 = 34 * 34 * 3;
+    const isBg = (i) => { const dr = rgb[i] - br, dg = rgb[i + 1] - bg, db = rgb[i + 2] - bb; return dr * dr + dg * dg + db * db < TOL2; };
+    const visited = new Uint8Array(w * h);
+    const stack = [];
+    for (let x = 0; x < w; x++) { stack.push(x, w * (h - 1) + x); }
+    for (let y = 0; y < h; y++) { stack.push(w * y, w * y + w - 1); }
+    while (stack.length) {
+      const p = stack.pop();
+      if (visited[p] || !isBg(p << 2)) continue;
+      visited[p] = 1;
+      rgb[(p << 2) + 3] = 0;
+      const x = p % w, y = (p / w) | 0;
+      if (x > 0) stack.push(p - 1);
+      if (x < w - 1) stack.push(p + 1);
+      if (y > 0) stack.push(p - w);
+      if (y < h - 1) stack.push(p + w);
+    }
+    const cov = visited.reduce((a, b) => a + b, 0) / (w * h);
+    if (!(cov > 0.03 && cov < 0.93)) throw new Error('flood coverage abnormal: ' + cov.toFixed(3));
+    return PNG.sync.write({ width: w, height: h, data: rgb });
+  }
+
   // model：'anime'=插画/卡通/3D 渲染专用会话（对 AI 生成的科研插画分布更匹配，
   // 浅色主体误删更少，2026-10-23）；缺省/其他值走 general（照片/通用）
   function rembgTransparent(buf, model) {
@@ -193,8 +236,10 @@ module.exports = function registerAI(app, deps) {
     });
   }
   async function matteImage(buf) {
-    // AI 生成内容（素材/大图勾选移除背景/风格转换/改图）统一走 anime 会话；
-    // 失败回退洪泛抠底兜底
+    // AI 生成内容抠底策略（2026-10-23）：洪泛优先（纯色底图，完整保留小碎片元素）
+    // → ISNet-anime 会话（复杂背景时）→ 洪泛兜底，三级降级
+    try { return await floodMatte(buf); }
+    catch (e) { logLine('ai-op', 'flood-matte 不适用（' + e.message + '），转 anime 模型'); }
     try { return await rembgTransparent(buf, 'anime'); }
     catch (e) { logLine('ai-op', 'rembg 不可用，回退洪泛抠底：' + e.message); return whiteToTransparent(buf); }
   }
