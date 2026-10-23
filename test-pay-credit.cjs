@@ -166,14 +166,19 @@ function ok(name) { passed++; console.log('  ✅', name); }
   assert.strictEqual(bad.ok, false);
   ok('A2 无效积分套餐被拒绝');
 
-  const r1 = await post('/api/pay/alipay/pagepay', { creditPkg: 'p100' });
+  const noConsent = await post('/api/pay/alipay/pagepay', { creditPkg: 'p100' });
+  assert.strictEqual(noConsent.ok, false);
+  assert.match(noConsent.error, /退款/);
+  ok('A2b 积分订单未勾选退款协议被拒绝（E11/O05 全量合规）');
+
+  const r1 = await post('/api/pay/alipay/pagepay', { creditPkg: 'p100', refundConsent: true });
   assert.strictEqual(r1.ok, true);
   assert.strictEqual(r1.order.amount, 9.9);
   assert.strictEqual(r1.order.credits, 100);
   assert.ok(readCOs()[0].outTradeNo);
   ok('A3 creditPkg 下单成功，积分订单落库');
 
-  const r1b = await post('/api/pay/alipay/pagepay', { creditPkg: 'p100' });
+  const r1b = await post('/api/pay/alipay/pagepay', { creditPkg: 'p100', refundConsent: true });
   assert.strictEqual(r1b.order.id, r1.order.id);
   ok('A4 同套餐待支付订单复用（不重复建单）');
 
@@ -188,7 +193,7 @@ function ok(name) { passed++; console.log('  ✅', name); }
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(aiDir, 'credit-log.json'), 'utf8')).length, 1);
   ok('A6 重复回调幂等');
 
-  const r3 = await post('/api/pay/alipay/pagepay', { creditPkg: 'p800' });
+  const r3 = await post('/api/pay/alipay/pagepay', { creditPkg: 'p800', refundConsent: true });
   assert.strictEqual(await notify(r3.order, { total_amount: '0.01', trade_no: 'X' }), 'failure');
   assert.strictEqual(readCOs().find(o => o.id === r3.order.id).status, 'pending');
   ok('A7 回调金额不符 → 拒绝且订单保持待支付');
@@ -251,7 +256,7 @@ function ok(name) { passed++; console.log('  ✅', name); }
   { const us = loadUsers(); us[0].level = 'none'; saveUsers(us); }
   const H25 = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
   const c1 = await post('/api/pay/alipay/pagepay', { plan: 'pro', refundConsent: true });
-  const c2 = await post('/api/pay/alipay/pagepay', { creditPkg: 'p2000' });
+  const c2 = await post('/api/pay/alipay/pagepay', { creditPkg: 'p2000', refundConsent: true });
   backdate(path.join(consoleDir, 'orders.json'), c1.order.id, H25);
   backdate(path.join(aiDir, 'credit-orders.json'), c2.order.id, H25);
 
@@ -260,7 +265,7 @@ function ok(name) { passed++; console.log('  ✅', name); }
   assert.strictEqual(readOrders().find(o => o.id === c1.order.id).status, 'expired');
   ok('C1 超期待支付订单重启 → 旧单标记失效、开新单');
 
-  const c2n = await post('/api/pay/alipay/pagepay', { creditPkg: 'p2000' });
+  const c2n = await post('/api/pay/alipay/pagepay', { creditPkg: 'p2000', refundConsent: true });
   assert.notStrictEqual(c2n.order.id, c2.order.id);
   assert.strictEqual(readCOs().find(o => o.id === c2.order.id).status, 'expired');
   ok('C2 积分订单同口径过期');

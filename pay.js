@@ -525,7 +525,11 @@ module.exports = function registerPay(app, deps) {
   const saveCO = rows => saveJSON(CREDIT_ORDERS_FILE, rows);
 
   // 积分订单下单辅助：复用同套餐待支付订单；有人工确认中的订单则拒绝重复下单
-  function findOrCreateCreditOrder(req, pkgId, channel, tradeType) {
+  // E11/O05 合规（2026-10-23）：与会员/单张/导出统一，必须勾选退款协议并随单留痕
+  function findOrCreateCreditOrder(req, pkgId, channel, tradeType, body) {
+    if (!body || body.refundConsent !== true) {
+      return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
+    }
     const cos = loadCO();
     markStaleExpired(cos, req).forEach(closeWxPrepay);
     let order = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'pending' && sameTradeType(o, tradeType));
@@ -603,7 +607,7 @@ module.exports = function registerPay(app, deps) {
   function findOrCreateByTarget(req, target, channel, amount, body, tradeType) {
     if (target.materialId) return findOrCreateSingleOrder(req, target, channel, body, tradeType);
     if (target.exportBoard) return findOrCreateExportOrder(req, channel, body, tradeType);
-    if (target.creditPkg) return findOrCreateCreditOrder(req, target.creditPkg, channel, tradeType);
+    if (target.creditPkg) return findOrCreateCreditOrder(req, target.creditPkg, channel, tradeType, body);
     return findOrCreateOrder(req, target.plan, channel, amount, tradeType, body);
   }
 
