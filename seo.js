@@ -38,7 +38,7 @@ module.exports = function registerSeo(app, deps) {
     .card{background:#fff;border:1px solid #ece8f5;border-radius:16px;padding:28px;box-shadow:0 1px 3px rgba(60,45,100,.06)}
     .crumb{font-size:12px;color:#a39dbc;margin-bottom:14px}
     .crumb a{color:#a39dbc}.crumb a:hover{color:#7c5cbf}
-    .hero{display:flex;gap:28px;flex-wrap:wrap}
+    .hero{display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start}
     .hero img{width:340px;max-width:100%;border-radius:12px;background:repeating-conic-gradient(#f1eef8 0 25%,#fff 0 50%) 0 0/20px 20px;border:1px solid #ece8f5}
     .hero .info{flex:1;min-width:240px}
     h1{font-size:22px;margin-bottom:8px}
