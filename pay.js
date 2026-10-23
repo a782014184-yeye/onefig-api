@@ -956,7 +956,7 @@ module.exports = function registerPay(app, deps) {
         } catch (e) { log(`查单异常 order=${o.id} err=${e.message}`); }
       }
     }
-    res.json({ ok: true, status: o.status, plan: o.plan || null, credits: o.credits || null, materialId: o.materialId || null, kind: o.materialId ? 'single' : (o.creditPkg ? 'credit' : 'plan'), paidAt: o.paidAt || null });
+    res.json({ ok: true, status: o.status, plan: o.plan || null, credits: o.credits || null, materialId: o.materialId || null, kind: o.kind === 'export' ? 'export' : (o.materialId ? 'single' : (o.creditPkg ? 'credit' : 'plan')), paidAt: o.paidAt || null });
   });
 
   // 一键清空当前用户的已失效待支付订单（会员订单 + 积分订单，2026-10-17）
