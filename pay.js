@@ -937,7 +937,8 @@ module.exports = function registerPay(app, deps) {
         if (hit.kind === 'plan') { const all = loadJSON(ORDERS_FILE, []); const t = all.find(x => x.id === o.id); if (t) { t.lastPayQueryAt = o.lastPayQueryAt; saveJSON(ORDERS_FILE, all); } }
         else { const all = loadCO(); const t = all.find(x => x.id === o.id); if (t) { t.lastPayQueryAt = o.lastPayQueryAt; saveCO(all); } }
         try {
-          if (o.payChannel === 'alipay' && cfg.alipay) {
+          const viaAlipay = o.payChannel === 'alipay' || o.payChannel === '支付宝';
+          if (viaAlipay && cfg.alipay) {
             const r = await alipayApiCall(cfg.alipay, 'alipay.trade.query', { out_trade_no: o.outTradeNo });
             const resp = r.json && r.json.alipay_trade_query_response;
             if (resp && resp.code === '10000' && (resp.trade_status === 'TRADE_SUCCESS' || resp.trade_status === 'TRADE_FINISHED')) {
@@ -945,7 +946,7 @@ module.exports = function registerPay(app, deps) {
               o.status = 'paid';
               log(`支付宝查单补单成功 order=${o.id}（回调可能丢失）`);
             }
-          } else if (o.payChannel !== 'alipay' && cfg.wechat) {
+          } else if (!viaAlipay && cfg.wechat) {
             const r = await wxRequest(cfg.wechat, 'GET', `/v3/pay/transactions/out-trade-no/${o.outTradeNo}?mchid=${cfg.wechat.mchid}`, null);
             if (r.status === 200 && r.json && r.json.trade_state === 'SUCCESS') {
               fulfillOrder(hit, { channel: '微信支付', transactionId: r.json.transaction_id, paidAt: r.json.success_time });
