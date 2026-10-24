@@ -1158,28 +1158,37 @@ window.userDetail=async(id)=>{
   document.getElementById('modal').style.width='640px';
 };
 
-/* ---------- 4. 素材请求 ---------- */
-let reqQ='',reqFilter='all';
+/* ---------- 4. 素材请求与问题反馈 ---------- */
+let reqQ='',reqFilter='all',reqType='all';
+const subHandled=r=>r.type==='feedback'?['read','done'].includes(r.status):r.status==='done';
 H.requests=async()=>{
   const s=await api('/console/api/submissions');
   SUBS=s.list;REQ_IMGS=[];
   const q=reqQ.trim().toLowerCase();
   const flt=s.list.map((r,ci)=>({r,ci})).filter(({r})=>{
-    if(reqFilter==='new'&&r.status==='done')return false;
-    if(reqFilter==='done'&&r.status!=='done')return false;
+    const type=r.type||'request';
+    if(reqType==='request'&&!['request','custom'].includes(type))return false;
+    if(reqType==='feedback'&&type!=='feedback')return false;
+    if(reqType==='report'&&type!=='report')return false;
+    if(reqFilter==='new'&&subHandled(r))return false;
+    if(reqFilter==='done'&&!subHandled(r))return false;
     if(q&&((r.desc||'')+(r.contact||'')+(r.series||'')).toLowerCase().indexOf(q)<0)return false;
     return true});
   const cards=flt.map(({r,ci})=>{const d=new Date(r.createdAt);const when=(d.getMonth()+1)+'月'+d.getDate()+'日 '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+    const isFeedback=r.type==='feedback',handled=subHandled(r);
+    const statusTag=isFeedback?(handled?'✅ 已读':'🆕 未读'):(handled?'✅ 已上新':'🆕 新需求');
+    const actionText=isFeedback?(handled?'↩️ 标为未读':'✓ 标为已读'):(handled?'↩️ 标为未完成':'✨ 标为已上新');
     const imgs=(r.images&&r.images.length?r.images:(r.image?[r.image]:[]));
     const rimgs=imgs.map(im=>'/uploads/'+encodeURIComponent(im)+'?t='+getTK());REQ_IMGS[ci]=rimgs;
-    return '<div class="card '+(r.status==='done'?'done':'')+'"><div class="thumb">'+(rimgs.length?rimgs.map((u,j)=>'<img src="'+u+'" onclick="viewMatList(REQ_IMGS['+ci+'],'+j+')" style="cursor:zoom-in">').join(''):'<div class="noimg">🎨<br>无参考图</div>')+'</div>\
-    <div class="cbody"><div class="tags">'+(r.type==='custom'?'<span class="tag" style="background:#fdf0f6;color:#c2418e">🖌️ 定制单</span>':'')+(r.type==='report'?'<span class="tag" style="background:#fef3c7;color:#b45309">⚠️ 错误反馈</span>':'')+(r.type==='feedback'?'<span class="tag" style="background:#e0f2fe;color:#0369a1">📝 问题反馈</span>':'')+(r.status==='done'?'<span class="tag done2">✅ 已上新</span>':'<span class="tag new">🆕 新需求</span>')+(r.series?'<span class="tag">'+esc(r.series)+'</span>':'')+'<span class="time">'+when+'</span></div>\
+    return '<div class="card '+(handled?'done':'')+'"><div class="thumb">'+(rimgs.length?rimgs.map((u,j)=>'<img src="'+u+'" onclick="viewMatList(REQ_IMGS['+ci+'],'+j+')" style="cursor:zoom-in">').join(''):'<div class="noimg">🎨<br>无参考图</div>')+'</div>\
+    <div class="cbody"><div class="tags">'+(r.type==='custom'?'<span class="tag" style="background:#fdf0f6;color:#c2418e">🖌️ 定制单</span>':'')+(r.type==='report'?'<span class="tag" style="background:#fef3c7;color:#b45309">⚠️ 错误反馈</span>':'')+(r.type==='feedback'?'<span class="tag" style="background:#e0f2fe;color:#0369a1">📝 问题反馈</span>':'')+'<span class="tag '+(handled?'done2':'new')+'">'+statusTag+'</span>'+(r.series?'<span class="tag">'+esc(r.series)+'</span>':'')+'<span class="time">'+when+'</span></div>\
     <div class="desc">'+esc(r.desc).replace(/\\n/g,'<br>')+'</div>'+(r.contact?'<div class="contact">📮 '+esc(r.contact)+'</div>':'')+'</div>\
-    <div class="ops"><button class="btn btn-p" onclick="subAct(\\''+r.id+'\\',\\'toggle\\')">'+(r.status==='done'?'↩️ 标为未完成':'✨ 标为已上新')+'</button><button class="btn btn-g btn-del" onclick="subAct(\\''+r.id+'\\',\\'delete\\')">🗑 删除</button></div></div>'}).join('')
-    ||'<div class="panel" style="text-align:center;color:#b0aac4;padding:50px">'+(s.list.length?'🔍<br>没有匹配的请求':'🌷<br>还没有粉丝提交素材需求～')+'</div>';
+    <div class="ops"><button class="btn btn-p" onclick="subAct(\\''+r.id+'\\',\\'toggle\\')">'+actionText+'</button><button class="btn btn-g btn-del" onclick="subAct(\\''+r.id+'\\',\\'delete\\')">🗑 删除</button></div></div>'}).join('')
+    ||'<div class="panel" style="text-align:center;color:#b0aac4;padding:50px">'+(s.list.length?'🔍<br>没有匹配的内容':'🌷<br>还没有素材请求或问题反馈～')+'</div>';
   const fBtn=(k,t)=>'<button class="btn btn-xs '+(reqFilter===k?'btn-p':'btn-g')+'" onclick="reqFilter=\\''+k+'\\';route()">'+t+'</button>';
-  return '<div class="toolbar"><h2>💌 粉丝的素材请求</h2><div class="sp"></div>'+fBtn('all','全部')+fBtn('new','🆕 未上新')+fBtn('done','✅ 已上新')+'<input placeholder="搜索请求内容/邮箱" value="'+esc(reqQ)+'" onchange="reqQ=this.value;route()" style="width:180px"></div>\
-  <div class="sub">共 '+s.list.length+' 条'+((reqFilter!=='all'||q)?'，筛出 '+flt.length+' 条':'')+'</div>'+cards;
+  const typeSelect='<select onchange="reqType=this.value;route()"><option value="all"'+(reqType==='all'?' selected':'')+'>全部类型</option><option value="request"'+(reqType==='request'?' selected':'')+'>素材请求</option><option value="feedback"'+(reqType==='feedback'?' selected':'')+'>问题反馈</option><option value="report"'+(reqType==='report'?' selected':'')+'>错误反馈</option></select>';
+  return '<div class="toolbar"><h2>💌 素材请求与问题反馈</h2><div class="sp"></div>'+typeSelect+fBtn('all','全部状态')+fBtn('new','未处理')+fBtn('done','已处理')+'<input placeholder="搜索内容/邮箱" value="'+esc(reqQ)+'" onchange="reqQ=this.value;route()" style="width:180px"></div>\
+  <div class="sub">共 '+s.list.length+' 条'+((reqType!=='all'||reqFilter!=='all'||q)?'，筛出 '+flt.length+' 条':'')+'</div>'+cards;
 };
 window.subAct=async(id,action)=>{if(action==='delete'&&!confirm('确定删除这条吗？'))return;try{await api(location.pathname+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});route()}catch(e){toast(e.message)}};
 

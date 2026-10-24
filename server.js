@@ -1032,11 +1032,14 @@ app.post('/' + ADMIN_PATH + '/toggle', consoleAuth, (req, res) => {
   const rows = readDB();
   const r = rows.find(x => x.id === req.body.id);
   if (!r) return res.status(404).json({ ok: false });
-  r.status = r.status === 'done' ? 'new' : 'done';
+  // 问题反馈是阅读处理，不是素材上新；兼容旧数据中已标成 done 的反馈。
+  r.status = r.type === 'feedback'
+    ? (['read', 'done'].includes(r.status) ? 'new' : 'read')
+    : (r.status === 'done' ? 'new' : 'done');
   writeDB(rows);
   res.json({ ok: true });
-  // 素材上新后给提交者发邮件通知（仅登录用户提交的需求有 userId；游客提交无邮箱可发）
-  if (r.status === 'done' && r.userId && !['report', 'feedback'].includes(r.type)) {   // 反馈类修复后不push「上新」邮件（2026-10-23）
+  // 只有素材请求 / 定制单完成上新后才通知；问题反馈标为已读绝不发邮件。
+  if (r.status === 'done' && r.userId && ['request', 'custom'].includes(r.type || 'request')) {
     const u = loadUsers().find(x => x.id === r.userId);
     const m = getMailer();
     if (u && u.email && m) {
