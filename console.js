@@ -1169,7 +1169,6 @@ H.requests=async()=>{
     const type=r.type||'request';
     if(reqType==='request'&&!['request','custom'].includes(type))return false;
     if(reqType==='feedback'&&type!=='feedback')return false;
-    if(reqType==='report'&&type!=='report')return false;
     if(reqFilter==='new'&&subHandled(r))return false;
     if(reqFilter==='done'&&!subHandled(r))return false;
     if(q&&((r.desc||'')+(r.contact||'')+(r.series||'')).toLowerCase().indexOf(q)<0)return false;
@@ -1181,12 +1180,12 @@ H.requests=async()=>{
     const imgs=(r.images&&r.images.length?r.images:(r.image?[r.image]:[]));
     const rimgs=imgs.map(im=>'/uploads/'+encodeURIComponent(im)+'?t='+getTK());REQ_IMGS[ci]=rimgs;
     return '<div class="card '+(handled?'done':'')+'"><div class="thumb">'+(rimgs.length?rimgs.map((u,j)=>'<img src="'+u+'" onclick="viewMatList(REQ_IMGS['+ci+'],'+j+')" style="cursor:zoom-in">').join(''):'<div class="noimg">🎨<br>无参考图</div>')+'</div>\
-    <div class="cbody"><div class="tags">'+(r.type==='custom'?'<span class="tag" style="background:#fdf0f6;color:#c2418e">🖌️ 定制单</span>':'')+(r.type==='report'?'<span class="tag" style="background:#fef3c7;color:#b45309">⚠️ 错误反馈</span>':'')+(r.type==='feedback'?'<span class="tag" style="background:#e0f2fe;color:#0369a1">📝 问题反馈</span>':'')+'<span class="tag '+(handled?'done2':'new')+'">'+statusTag+'</span>'+(r.series?'<span class="tag">'+esc(r.series)+'</span>':'')+'<span class="time">'+when+'</span></div>\
+    <div class="cbody"><div class="tags">'+(r.type==='custom'?'<span class="tag" style="background:#fdf0f6;color:#c2418e">🖌️ 定制单</span>':'')+(r.type==='feedback'?'<span class="tag" style="background:#e0f2fe;color:#0369a1">📝 问题反馈</span>':'')+'<span class="tag '+(handled?'done2':'new')+'">'+statusTag+'</span>'+(r.series?'<span class="tag">'+esc(r.series)+'</span>':'')+'<span class="time">'+when+'</span></div>\
     <div class="desc">'+esc(r.desc).replace(/\\n/g,'<br>')+'</div>'+(r.contact?'<div class="contact">📮 '+esc(r.contact)+'</div>':'')+'</div>\
     <div class="ops"><button class="btn btn-p" onclick="subAct(\\''+r.id+'\\',\\'toggle\\')">'+actionText+'</button><button class="btn btn-g btn-del" onclick="subAct(\\''+r.id+'\\',\\'delete\\')">🗑 删除</button></div></div>'}).join('')
     ||'<div class="panel" style="text-align:center;color:#b0aac4;padding:50px">'+(s.list.length?'🔍<br>没有匹配的内容':'🌷<br>还没有素材请求或问题反馈～')+'</div>';
   const fBtn=(k,t)=>'<button class="btn btn-xs '+(reqFilter===k?'btn-p':'btn-g')+'" onclick="reqFilter=\\''+k+'\\';route()">'+t+'</button>';
-  const typeSelect='<select onchange="reqType=this.value;route()"><option value="all"'+(reqType==='all'?' selected':'')+'>全部类型</option><option value="request"'+(reqType==='request'?' selected':'')+'>素材请求</option><option value="feedback"'+(reqType==='feedback'?' selected':'')+'>问题反馈</option><option value="report"'+(reqType==='report'?' selected':'')+'>错误反馈</option></select>';
+  const typeSelect='<select onchange="reqType=this.value;route()"><option value="all"'+(reqType==='all'?' selected':'')+'>全部类型</option><option value="request"'+(reqType==='request'?' selected':'')+'>素材请求</option><option value="feedback"'+(reqType==='feedback'?' selected':'')+'>问题反馈</option></select>';
   return '<div class="toolbar"><h2>💌 素材请求与问题反馈</h2><div class="sp"></div>'+typeSelect+fBtn('all','全部状态')+fBtn('new','未处理')+fBtn('done','已处理')+'<input placeholder="搜索内容/邮箱" value="'+esc(reqQ)+'" onchange="reqQ=this.value;route()" style="width:180px"></div>\
   <div class="sub">共 '+s.list.length+' 条'+((reqType!=='all'||reqFilter!=='all'||q)?'，筛出 '+flt.length+' 条':'')+'</div>'+cards;
 };
