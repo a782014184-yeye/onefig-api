@@ -774,10 +774,18 @@ app.get('/api/download', authUser, (req, res) => {
     const data = JSON.parse(fs.readFileSync(f, 'utf8'));
     let hit = null;
     for (const s of data) for (const m of s.materials) if (m.id === id) { hit = { s, m }; break; }
-    if (!hit) return res.status(404).json({ ok: false, error: '素材不存在' });
+    const logs = loadJSON(DOWNLOADS_FILE, []);
+    if (!hit) {
+      // 清单条目被彻底删除/改名后，已有下载记录的用户仍可重下（授权码快照与原图文件保留）
+      const previous = logs.find(l => l.userId === u.id && l.materialId === id);
+      if (!previous) return res.status(404).json({ ok: false, error: '素材不存在' });
+      const parts = String(id).split('/');
+      const series = parts.length > 1 ? parts.slice(0, -1).join('/') : '';
+      const title = parts[parts.length - 1];
+      hit = { s: { folder: series }, m: { id, title, series, removed: true, file: title + '.png' } };
+    }
 
     // 记账：历史下载过的素材再次下载免费（不占用额度、不计次数）
-    const logs = loadJSON(DOWNLOADS_FILE, []);
     const already = logs.some(l => l.userId === u.id && l.materialId === id);
     // 下架只影响新用户获取；已下载/已购买的用户仍可凭原授权免费重下（2026-10-24）
     if (hit.m.removed && !already && !purchased) {
