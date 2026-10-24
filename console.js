@@ -756,6 +756,24 @@ th{color:#8b84a3;font-weight:600;text-align:left;padding:8px 10px;border-bottom:
 td{padding:10px;border-bottom:1px solid #f6f4fb;vertical-align:middle}
 select,input,textarea{font-family:inherit;font-size:13px;padding:7px 10px;border:1px solid #e3dcf2;border-radius:8px;background:#fff;color:#3d3a4b;outline:none}
 select:focus,input:focus{border-color:#a78bfa}
+/* 统一自定义下拉框：原生 select 保留在 DOM 中，继续承担值与 onchange 逻辑 */
+.select-native{display:none!important}
+.ui-select{position:relative;display:inline-flex;vertical-align:middle;max-width:100%;font-size:13px}
+.ui-select-block{display:flex;width:100%;min-width:0!important}
+.select-control{position:relative;display:flex;align-items:center;width:100%;min-height:36px;padding:8px 38px 8px 12px;border:1px solid #e0d7ef;border-radius:9px;background:#fff;color:#3d3a4b;font-family:inherit;font-size:13px;font-weight:600;line-height:1.35;text-align:left;cursor:pointer;transition:border-color .15s,box-shadow .15s,background .15s}
+.select-control:hover{border-color:#b9a4df;background:#fcfbfe}
+.select-control:focus-visible,.ui-select.open .select-control{border-color:#a78bfa;box-shadow:0 0 0 3px rgba(167,139,250,.14);outline:none}
+.select-value{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.select-arrow{position:absolute;right:12px;top:50%;width:15px;height:15px;transform:translateY(-50%);color:#8b73b7;pointer-events:none;transition:transform .16s,color .15s}
+.ui-select.open .select-arrow{transform:translateY(-50%) rotate(180deg);color:#6d4fb0}
+.select-menu{position:absolute;z-index:100;top:calc(100% + 7px);left:0;display:none;min-width:100%;max-height:248px;overflow:auto;padding:6px;border:1px solid #e5dcf2;border-radius:12px;background:#fff;box-shadow:0 14px 36px rgba(62,42,96,.16),0 3px 10px rgba(62,42,96,.06)}
+.ui-select.open .select-menu{display:block;animation:select-in .14s ease-out}
+.ui-select.up .select-menu{top:auto;bottom:calc(100% + 7px)}
+.select-option{display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%;min-height:36px;padding:8px 10px;border:0;border-radius:8px;background:transparent;color:#514a61;font-family:inherit;font-size:13px;line-height:1.35;text-align:left;white-space:nowrap;cursor:pointer}
+.select-option:hover,.select-option:focus-visible{background:#f4f0fb;color:#6d4fb0;outline:none}
+.select-option[aria-selected="true"]{background:#eee8fa;color:#6d4fb0;font-weight:600}
+.select-check{display:inline-block;min-width:14px;color:#7c5cbf;font-weight:700;text-align:right}
+@keyframes select-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 .btn{border:none;border-radius:9px;padding:8px 16px;font-size:13px;cursor:pointer;font-weight:600;transition:.15s;white-space:nowrap}
 .btn-p{background:linear-gradient(135deg,#7c5cbf,#a78bfa);color:#fff}
 .btn-p:hover{transform:translateY(-1px);box-shadow:0 4px 10px rgba(124,92,191,.35)}
@@ -1329,6 +1347,59 @@ async function route(){
   const v=document.getElementById('view');
   try{v.innerHTML=await (H[h]||H.dashboard)()}catch(e){v.innerHTML='<div class="panel">加载失败：'+esc(e.message)+'</div>'}
 }
+/* ---------- 全局下拉框增强：动态页面与弹窗中的 select 自动套用，原 onchange 不变 ---------- */
+function closeUiSelects(except){
+  document.querySelectorAll('.ui-select.open').forEach(w=>{if(w!==except){w.classList.remove('open');w.querySelector('.select-control').setAttribute('aria-expanded','false')}});
+}
+function enhanceSelects(){
+  document.querySelectorAll('select:not([data-ui-ready])').forEach(select=>{
+    select.dataset.uiReady='1';
+    const naturalWidth=select.offsetWidth;
+    const wrap=document.createElement('span');wrap.className='ui-select';
+    if(select.closest('.modal'))wrap.classList.add('ui-select-block');
+    else wrap.style.minWidth=Math.max(112,naturalWidth)+'px';
+    const control=document.createElement('button');control.type='button';control.className='select-control';control.setAttribute('aria-haspopup','listbox');control.setAttribute('aria-expanded','false');
+    control.innerHTML='<span class="select-value"></span><svg class="select-arrow" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m5 7.5 5 5 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    const menu=document.createElement('span');menu.className='select-menu';menu.setAttribute('role','listbox');
+    const buttons=[];
+    Array.from(select.options).forEach((opt,index)=>{
+      const item=document.createElement('button');item.type='button';item.className='select-option';item.setAttribute('role','option');item.disabled=opt.disabled;
+      const label=document.createElement('span');label.textContent=opt.textContent;item.appendChild(label);
+      const check=document.createElement('span');check.className='select-check';item.appendChild(check);menu.appendChild(item);buttons.push(item);
+      item.addEventListener('click',()=>{
+        select.value=opt.value;sync();closeUiSelects();control.focus();
+        select.dispatchEvent(new Event('change',{bubbles:true}));
+      });
+    });
+    function sync(){
+      const index=select.selectedIndex,opt=select.options[index];
+      control.querySelector('.select-value').textContent=opt?opt.textContent:'';
+      buttons.forEach((b,i)=>{const yes=i===index;b.setAttribute('aria-selected',yes?'true':'false');b.querySelector('.select-check').textContent=yes?'✓':''});
+    }
+    function open(focusCurrent){
+      closeUiSelects(wrap);wrap.classList.add('open');control.setAttribute('aria-expanded','true');
+      const rect=control.getBoundingClientRect();wrap.classList.toggle('up',rect.bottom+260>window.innerHeight&&rect.top>280);
+      if(focusCurrent)(buttons[select.selectedIndex]||buttons[0]||control).focus();
+    }
+    control.addEventListener('click',()=>wrap.classList.contains('open')?closeUiSelects():open(false));
+    control.addEventListener('keydown',e=>{if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();open(true)}});
+    menu.addEventListener('keydown',e=>{
+      if(!['ArrowDown','ArrowUp','Home','End'].includes(e.key))return;
+      e.preventDefault();const at=buttons.indexOf(document.activeElement);let next=at;
+      if(e.key==='Home')next=0;else if(e.key==='End')next=buttons.length-1;else next=(at+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length;
+      if(buttons[next])buttons[next].focus();
+    });
+    select.classList.add('select-native');select.after(wrap);wrap.appendChild(control);wrap.appendChild(menu);sync();
+  });
+}
+document.addEventListener('pointerdown',e=>{if(!e.target.closest('.ui-select'))closeUiSelects()});
+document.addEventListener('keydown',e=>{
+  const open=document.querySelector('.ui-select.open');if(!open||e.key!=='Escape')return;
+  e.preventDefault();e.stopPropagation();open.querySelector('.select-control').focus();closeUiSelects();
+},true);
+new MutationObserver(enhanceSelects).observe(document.body,{childList:true,subtree:true});
+enhanceSelects();
+
 window.addEventListener('hashchange',route);
 if(getTK()){document.getElementById('acct-name').textContent=localStorage.getItem(NM_KEY)||'管理员';route()}
 else{document.getElementById('loginMask').style.display='flex'}
