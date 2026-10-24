@@ -475,7 +475,12 @@ module.exports = function registerConsole(app, deps) {
     if (!s) { s = { folder: series, materials: [] }; data.push(s); }
     if (title) {
       if (s.materials.some(m => m.title === title)) return res.status(400).json({ ok: false, error: '该系列下已存在同名素材' });
-      s.materials.push({ id: `${series}/${title}`, series, file: `${title}.png`, title, downloads: 0, createdAt: new Date().toISOString() });
+      // local:true 必须与上传接口（server.js /console/api/materials/upload）保持一致：
+      // 缺了它前端会把素材当"内置"去 /previews/*.webp 取图 → 404 → 画板拖不出（2026-10-23 事故）
+      const fp = path.join(DATA_DIR, 'files', series, `${title}.png`);
+      let size = 0;
+      try { size = fs.statSync(fp).size } catch { /* 文件可能尚未上传，size 记 0，下次上传接口会刷新 */ }
+      s.materials.push({ id: `${series}/${title}`, series, file: `${title}.png`, title, downloads: 0, createdAt: new Date().toISOString(), local: true, size });
     }
     save('materials.json', data);
     res.json({ ok: true });
