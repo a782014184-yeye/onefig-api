@@ -258,16 +258,20 @@ module.exports = function registerConsole(app, deps) {
       const seen = new Map();
       for (const l of dls) {
         const hit = map.get(l.materialId);
-        if (!hit) continue;
+        // 下架/改名后仍显示在用户的下载历史里，标题用下载时快照（2026-10-24）
+        const parts = String(l.materialId || '').split('/');
+        const title = hit ? hit.m.title : (l.materialTitle || parts[parts.length - 1] || l.materialId);
+        const series = hit ? (hit.m.series || hit.s.folder) : (l.materialSeries || (parts.length > 1 ? parts.slice(0, -1).join('/') : ''));
         seen.set(l.materialId, {
           id: l.materialId,
-          title: hit.m.title,
-          folder: hit.s.folder,
-          series: hit.m.series || hit.s.folder,
-          file: hit.m.file || (hit.m.title + '.png'),
-          local: !!hit.m.local,
+          title,
+          folder: hit ? hit.s.folder : series,
+          series,
+          file: hit ? (hit.m.file || (hit.m.title + '.png')) : undefined,
+          local: hit ? !!hit.m.local : false,
           time: l.time,
           code: l.code || null,
+          removed: hit ? !!hit.m.removed : true,
         });
       }
       downloads = [...seen.values()].sort((a, b) => b.time.localeCompare(a.time));
@@ -462,9 +466,20 @@ module.exports = function registerConsole(app, deps) {
 
   app.get('/console/api/materials', consoleAuth, (req, res) => {
     const data = load('materials.json', []);
-    const flat = data.flatMap(s => s.materials);
-    if (req.query.hot) { flat.sort((a, b) => b.downloads - a.downloads); return res.json({ ok: true, list: flat.slice(0, 50) }); }
-    res.json({ ok: true, series: data, total: flat.length, totalDownloads: flat.reduce((s, m) => s + m.downloads, 0) });
+    const active = data.flatMap(s => (s.materials || []).filter(m => !m.removed));
+    if (req.query.hot) { active.sort((a, b) => b.downloads - a.downloads); return res.json({ ok: true, list: active.slice(0, 50) }); }
+    const removedTotal = data.reduce((n, s) => n + (s.materials || []).filter(m => m.removed).length, 0);
+    res.json({ ok: true, series: data, total: active.length, totalDownloads: active.reduce((s, m) => s + m.downloads, 0), removedTotal });
+  });
+
+  // 下架记录：后台单独查看/恢复/彻底删除（授权码流水不随下架删除）
+  app.get('/console/api/materials/removed', consoleAuth, (req, res) => {
+    const data = load('materials.json', []);
+    const list = data.flatMap(s => (s.materials || [])
+      .filter(m => m.removed)
+      .map(m => ({ id: m.id, series: m.series || s.folder, folder: s.folder, title: m.title, file: m.file, local: !!m.local, size: m.size || 0, downloads: m.downloads || 0, removedAt: m.removedAt || null })))
+      .sort((a, b) => String(b.removedAt || '').localeCompare(String(a.removedAt || '')));
+    res.json({ ok: true, list });
   });
 
   app.post('/console/api/materials', consoleAuth, (req, res) => {
@@ -474,29 +489,74 @@ module.exports = function registerConsole(app, deps) {
     let s = data.find(x => x.folder === series);
     if (!s) { s = { folder: series, materials: [] }; data.push(s); }
     if (title) {
-      if (s.materials.some(m => m.title === title)) return res.status(400).json({ ok: false, error: '该系列下已存在同名素材' });
-      // local:true 必须与上传接口（server.js /console/api/materials/upload）保持一致：
-      // 缺了它前端会把素材当"内置"去 /previews/*.webp 取图 → 404 → 画板拖不出（2026-10-23 事故）
+      const existing = s.materials.find(m => m.title === title);
+      if (existing && !existing.removed) return res.status(400).json({ ok: false, error: '该系列下已存在同名素材' });
       const fp = path.join(DATA_DIR, 'files', series, `${title}.png`);
       let size = 0;
       try { size = fs.statSync(fp).size } catch { /* 文件可能尚未上传，size 记 0，下次上传接口会刷新 */ }
-      s.materials.push({ id: `${series}/${title}`, series, file: `${title}.png`, title, downloads: 0, createdAt: new Date().toISOString(), local: true, size });
+      if (existing) {
+        // 下架后同名重传 = 恢复原条目与 ID，已有下载授权码不受影响（2026-10-24）
+        existing.removed = false;
+        existing.removedAt = null;
+        existing.updatedAt = new Date().toISOString();
+        existing.file = `${title}.png`;
+        existing.local = true;
+        existing.size = size;
+      } else {
+        // local:true 必须与上传接口（server.js /console/api/materials/upload）保持一致：
+        // 缺了它前端会把素材当"内置"去 /previews/*.webp 取图 → 404 → 画板拖不出（2026-10-23 事故）
+        s.materials.push({ id: `${series}/${title}`, series, file: `${title}.png`, title, downloads: 0, createdAt: new Date().toISOString(), local: true, size });
+      }
     }
     save('materials.json', data);
     res.json({ ok: true });
   });
 
   app.delete('/console/api/series/:folder', consoleAuth, (req, res) => {
-    save('materials.json', load('materials.json', []).filter(x => x.folder !== req.params.folder));
+    // 删除文件夹 = 全部素材下架留痕，不物理删除，避免历史授权码失去名称（2026-10-24）
+    const data = load('materials.json', []);
+    const now = new Date().toISOString();
+    const s = data.find(x => x.folder === req.params.folder);
+    if (s) s.materials.forEach(m => { m.removed = true; m.removedAt = now; });
+    save('materials.json', data);
     res.json({ ok: true });
   });
 
   app.delete('/console/api/materials/:series/:title', consoleAuth, (req, res) => {
     const data = load('materials.json', []);
     const s = data.find(x => x.folder === req.params.series);
-    if (s) s.materials = s.materials.filter(m => m.title !== req.params.title);
+    if (!s) return res.status(404).json({ ok: false, error: '文件夹不存在' });
+    const m = s.materials.find(x => x.title === req.params.title);
+    if (!m) return res.status(404).json({ ok: false, error: '素材不存在' });
+    // 下架而非物理删除：保留素材条目，前台隐藏，授权码与下载流水照常验真（2026-10-24）
+    m.removed = true;
+    m.removedAt = new Date().toISOString();
     save('materials.json', data);
-    res.json({ ok: true });
+    res.json({ ok: true, removed: true });
+  });
+
+  app.post('/console/api/materials/:series/:title/restore', consoleAuth, (req, res) => {
+    const data = load('materials.json', []);
+    const s = data.find(x => x.folder === req.params.series);
+    const m = s && s.materials.find(x => x.title === req.params.title);
+    if (!m) return res.status(404).json({ ok: false, error: '素材不存在' });
+    m.removed = false;
+    m.removedAt = null;
+    save('materials.json', data);
+    res.json({ ok: true, restored: true });
+  });
+
+  app.delete('/console/api/materials/:series/:title/permanent', consoleAuth, (req, res) => {
+    const data = load('materials.json', []);
+    const s = data.find(x => x.folder === req.params.series);
+    if (!s) return res.status(404).json({ ok: false, error: '文件夹不存在' });
+    const m = s.materials.find(x => x.title === req.params.title);
+    if (!m) return res.status(404).json({ ok: false, error: '素材不存在' });
+    if (!m.removed) return res.status(400).json({ ok: false, error: '请先下架，再彻底删除' });
+    // 仅删除清单条目；downloads.json 中的授权码与快照保留，旧码仍可验真
+    s.materials = s.materials.filter(x => x.title !== req.params.title);
+    save('materials.json', data);
+    res.json({ ok: true, purged: true });
   });
 
   // 排序保存：整体文件夹顺序 或 某文件夹内素材顺序（materials.json 数组顺序即前台展示顺序）
@@ -960,6 +1020,7 @@ window.mDrop=async(e,i)=>{e.preventDefault();e.stopPropagation();if(dragI<0||dra
 const sortBtn=()=>'<button class="btn '+(sortMode?'btn-p':'btn-g')+'" onclick="toggleSort()">'+(sortMode?'✅ 完成排序':'⇅ 调整顺序')+'</button>';
 H.materials=async()=>{
   const s=await api('/console/api/materials');MAT_DATA=s;
+  const activeOf = sd => (sd.materials || []).filter(m => !m.removed);
   if(matView.hot){
     const hot=await api('/console/api/materials?hot=1');CUR_IMGS=hot.list.map(m=>({src:matImg(m),t:m.title}));
     return '<div class="toolbar"><button class="btn btn-g" onclick="matView.hot=false;route()">← 返回</button><h2>🎨 热门排行</h2><div class="sp"></div></div>\
@@ -967,16 +1028,24 @@ H.materials=async()=>{
     <div class="grid">'+hot.list.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' 次 · '+fmtSize(m.size)+' · '+esc(m.series.split('-')[1]||m.series)+'</div></div>').join('')+'</div>';
   }
   if(matView.series){
-    const sd=s.series.find(x=>x.folder===matView.series);CUR_IMGS=sd.materials.map(m=>({src:matImg(m),t:m.title}));
+    const sd=s.series.find(x=>x.folder===matView.series) || {materials:[]};
+    const ms=activeOf(sd);CUR_IMGS=ms.map(m=>({src:matImg(m),t:m.title}));
     return '<div class="toolbar"><button class="btn btn-g" onclick="matView.series=null;route()">← 返回</button><h2>🎨 '+esc(matView.series)+'</h2><div class="sp"></div>'+sortBtn()+'<button class="btn btn-p" onclick="addMatModal()">＋ 添加素材</button></div>\
     '+(sortMode?'<div class="sub" style="color:#7c5cbf;font-weight:600">⇅ 排序模式：拖动素材卡片换位，松手即保存，前台同步生效。点「✅ 完成排序」退出</div>':'')+'\
-    <div class="grid">'+sd.materials.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'"'+(sortMode?' draggable="true" ondragstart="mDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="mDrop(event,'+i+')"':'')+'><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+(sortMode?'':' onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"')+'><div class="t">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" onclick="renameMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">✏️ 改名</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>';
+    <div class="grid">'+ms.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'"'+(sortMode?' draggable="true" ondragstart="mDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="mDrop(event,'+i+')"':'')+'><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+(sortMode?'':' onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"')+'><div class="t">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" onclick="renameMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">✏️ 改名</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>';
   }
+  const removed=await api('/console/api/materials/removed').catch(()=>({list:[]}));
+  const removedHtml=removed.list.length
+    ? '<div class="panel" style="margin-top:18px"><h3 style="font-size:15px;margin-bottom:10px">🗑 下架记录（'+removed.list.length+'）</h3><div class="sub" style="margin-bottom:8px">下架只影响前台展示，历史下载的授权码仍可验真；同名重传或点「恢复上架」会保留原 ID。</div><table><tr><th>素材</th><th>系列</th><th>下架时间</th><th>操作</th></tr>'+removed.list.map(m=>'<tr><td><b>'+esc(m.title)+'</b></td><td>'+esc(m.series)+'</td><td>'+fmtT(m.removedAt)+'</td><td><button class="btn btn-g btn-xs" onclick="restoreMat(\\''+m.series+'\\',\\''+m.title+'\\')">↩️ 恢复上架</button> <button class="btn btn-d btn-xs" onclick="purgeMat(\\''+m.series+'\\',\\''+m.title+'\\')">彻底删除</button></td></tr>').join('')+'</table></div>'
+    : '';
+  const folders=s.series.filter(x=>x.materials.some(m=>!m.removed));
   return '<div class="toolbar"><h2>🎨 素材管理</h2><div class="sp"></div>'+sortBtn()+'<button class="btn btn-g" onclick="matView.hot=true;route()">🏆 热门排行</button><button class="btn btn-p" onclick="addSeriesModal()">＋ 新建文件夹</button></div>\
   <div class="sub">'+(sortMode?'⇅ 排序模式：拖动文件夹换位，松手即保存，前台网站同步生效。点「✅ 完成排序」退出':'共 '+s.total+' 个素材 · 点击文件夹查看和管理')+'</div>\
-  <div class="grid">'+s.series.map((x,i)=>'<div class="folder'+(sortMode?' sorting':'')+'" '+(sortMode?'draggable="true" ondragstart="fDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="fDrop(event,'+i+')"':'onclick="matView.series=\\''+x.folder+'\\';route()"')+'>'+(sortMode?'':'<button class="btn btn-g f-edit" onclick="event.stopPropagation();renameSeriesModal(\\''+x.folder+'\\')">✏️</button>')+'<div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.length+' 个素材</div></div>').join('')+'</div>';
+  <div class="grid">'+folders.map((x,i)=>'<div class="folder'+(sortMode?' sorting':'')+'" '+(sortMode?'draggable="true" ondragstart="fDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="fDrop(event,'+i+')"':'onclick="matView.series=\\''+x.folder+'\\';route()"')+'>'+(sortMode?'':'<button class="btn btn-g f-edit" onclick="event.stopPropagation();renameSeriesModal(\\''+x.folder+'\\')">✏️</button>')+'<div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.filter(m=>!m.removed).length+' 个素材</div></div>').join('')+'</div>'+removedHtml;
 };
-window.delMat=async(series,title)=>{if(!confirm('确定从清单删除「'+title+'」吗？'))return;await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title),{method:'DELETE'});toast('已删除');route()};
+window.delMat=async(series,title)=>{if(!confirm('确定下架「'+title+'」吗？\n下架只隐藏前台展示，历史下载的授权码仍可验真。'))return;await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title),{method:'DELETE'});toast('已下架，授权码仍可验真');route()};
+window.restoreMat=async(series,title)=>{try{await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title)+'/restore',{method:'POST'});toast('已恢复上架 ✅');route()}catch(e){toast(e.message)}};
+window.purgeMat=async(series,title)=>{if(!confirm('彻底删除「'+title+'」的清单条目？\n下载流水和授权码快照会保留，旧码仍能验真。'))return;try{await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title)+'/permanent',{method:'DELETE'});toast('已彻底删除');route()}catch(e){toast(e.message)}};
 window.renameSeriesModal=f=>showModal('<h3>✏️ 重命名文件夹</h3>\
   <div class="row"><label>新名称</label><input id="m-rn" value="'+esc(f)+'"></div>\
   <div class="sub">会同步修改服务器文件目录和 OSS 预览图目录，前台立即生效</div>\

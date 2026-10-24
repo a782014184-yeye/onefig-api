@@ -315,7 +315,10 @@ function optionalUser(req) {
 // 公开：素材列表（供前台网站动态读取）
 app.get('/api/materials', (req, res) => {
   try {
-    const data = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), []);
+    // 下架素材只保留在后台留痕，不对外展示；空文件夹也不下发（2026-10-24）
+    const data = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), [])
+      .map(s => ({ ...s, materials: (s.materials || []).filter(m => !m.removed) }))
+      .filter(s => s.materials.length > 0);
     res.json({ ok: true, series: data, total: data.reduce((s, x) => s + x.materials.length, 0) });
   } catch { res.json({ ok: true, series: [], total: 0 }); }
 });
@@ -592,7 +595,7 @@ app.post('/api/track-download', trackRateLimit, (req, res) => {
     const f = path.join(DATA_DIR, 'console', 'materials.json');
     const data = JSON.parse(fs.readFileSync(f, 'utf8'));
     let hit = false;
-    for (const s of data) for (const m of s.materials) if (m.id === id) { m.downloads = (m.downloads || 0) + 1; hit = true; }
+    for (const s of data) for (const m of s.materials) if (m.id === id && !m.removed) { m.downloads = (m.downloads || 0) + 1; hit = true; }
     if (hit) fs.writeFileSync(f, JSON.stringify(data, null, 1));
     res.json({ ok: hit });
   } catch { res.json({ ok: false }); }
@@ -776,6 +779,10 @@ app.get('/api/download', authUser, (req, res) => {
     // 记账：历史下载过的素材再次下载免费（不占用额度、不计次数）
     const logs = loadJSON(DOWNLOADS_FILE, []);
     const already = logs.some(l => l.userId === u.id && l.materialId === id);
+    // 下架只影响新用户获取；已下载/已购买的用户仍可凭原授权免费重下（2026-10-24）
+    if (hit.m.removed && !already && !purchased) {
+      return res.status(403).json({ ok: false, error: '该素材已下架，暂不提供下载' });
+    }
     // 授权码：同一用户对同一素材固定一个码（重复下载沿用首个码）
     const code = (logs.find(l => l.userId === u.id && l.materialId === id && l.code) || {}).code || genLicenseCode(logs);
     if (!already) {
@@ -793,7 +800,8 @@ app.get('/api/download', authUser, (req, res) => {
       hit.m.downloads = (hit.m.downloads || 0) + 1;
       fs.writeFileSync(f, JSON.stringify(data, null, 1));
     }
-    logs.push({ userId: u.id, materialId: id, code, time: new Date().toISOString(), free: already });
+    // 授权码记录同时保存素材标题/系列快照：日后素材下架、改名或替换，验真仍能显示原始名称（2026-10-24）
+    logs.push({ userId: u.id, materialId: id, code, time: new Date().toISOString(), free: already, materialTitle: hit.m.title, materialSeries: hit.m.series || hit.s.folder });
     saveJSON(DOWNLOADS_FILE, logs);
 
     // 返回文件：优先本地原图目录（注入 AIGC 元数据 + 授权码 + 下载账号隐式标识），否则 302 到 OSS 预览图
@@ -836,15 +844,19 @@ app.get('/api/my/downloads', authUser, (req, res) => {
         continue;
       }
       const hit = map.get(l.materialId);
-      if (!hit) continue;
+      // 已下架/已改名的素材仍保留在用户的下载历史中，名称优先用下载时快照（2026-10-24）
+      const parts = String(l.materialId || '').split('/');
+      const title = hit ? hit.m.title : (l.materialTitle || parts[parts.length - 1] || l.materialId);
+      const series = hit ? (hit.m.series || hit.s.folder) : (l.materialSeries || (parts.length > 1 ? parts.slice(0, -1).join('/') : ''));
       seen.set(l.materialId, {
         id: l.materialId,
-        title: hit.m.title,
-        file: hit.m.file || (hit.m.title + '.png'),
-        folder: hit.s.folder,
-        series: hit.m.series || hit.s.folder,
+        title,
+        file: hit ? (hit.m.file || (hit.m.title + '.png')) : undefined,
+        folder: hit ? hit.s.folder : series,
+        series,
         time: l.time,
         code: l.code || null, // 授权码（旧记录无码时前端会显示临时码）
+        removed: hit ? !!hit.m.removed : true,
       });
     }
     const list = [...seen.values(), ...exports].sort((a, b) => b.time.localeCompare(a.time));
@@ -861,7 +873,11 @@ app.get('/api/verify', optionalAuth, (req, res) => {
     if (!hit) return res.json({ ok: false, error: '授权码不存在' });
     const data = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), []);
     let mat = null;
-    for (const s of data) for (const m of s.materials) if (m.id === hit.materialId) { mat = { title: m.title, series: m.series || s.folder }; break; }
+    for (const s of data) for (const m of s.materials) if (m.id === hit.materialId) { mat = { title: m.title, series: m.series || s.folder, removed: !!m.removed }; break; }
+    // 兼容历史记录：没有快照的旧下载流水也能从「系列/标题」还原出可读名称（2026-10-24）
+    const idParts = String(hit.materialId || '').split('/');
+    const fallbackTitle = hit.materialTitle || idParts[idParts.length - 1] || hit.materialId;
+    const fallbackSeries = hit.materialSeries || (idParts.length > 1 ? idParts.slice(0, -1).join('/') : '');
     // 授权归属：仅返回脱敏账号（邮箱形如 o***@163.com），供第三方核对又不泄露完整隐私（2026-10-16）
     let licensee = null;
     try {
@@ -900,11 +916,14 @@ app.get('/api/verify', optionalAuth, (req, res) => {
     } catch {}
     // 导出授权码记录（2026-10-19）：与素材下载同流水，验真页按 kind 分支展示
     const isExport = hit.kind === 'export';
+    // 下架/改名/替换不影响授权码有效性；只额外告知素材当前状态，不把"下架"误报成"授权失效"
+    const materialStatus = isExport ? 'active' : (mat ? (mat.removed ? 'removed' : 'active') : 'missing');
     res.json({
       ok: true,
       code,
-      material: isExport ? ('画板导出作品' + (hit.boardTitle ? '：' + hit.boardTitle : '')) : (mat ? mat.title : hit.materialId),
-      series: isExport ? '画板导出' : (mat ? mat.series : ''),
+      material: isExport ? ('画板导出作品' + (hit.boardTitle ? '：' + hit.boardTitle : '')) : (mat ? mat.title : fallbackTitle),
+      series: isExport ? '画板导出' : (mat ? mat.series : fallbackSeries),
+      materialStatus,
       licensee,
       qTotal, qBy,
       scope: '学术发表（期刊论文、学术会议、学位论文、学术海报、图文摘要），仅限非商业用途',
@@ -943,13 +962,16 @@ app.get('/console/api/user-licenses', consoleAuth, (req, res) => {
     const data = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), []);
     const map = new Map();
     for (const s of data) for (const m of s.materials) map.set(m.id, { title: m.title, series: m.series || s.folder });
-    const list = logs.map(l => ({
-      code: l.code || null,
-      materialId: l.materialId,
-      material: map.get(l.materialId)?.title || l.materialId,
-      series: map.get(l.materialId)?.series || '',
-      time: l.time,
-    }));
+    const list = logs.map(l => {
+      const parts = String(l.materialId || '').split('/');
+      return {
+        code: l.code || null,
+        materialId: l.materialId,
+        material: map.get(l.materialId)?.title || l.materialTitle || parts[parts.length - 1] || l.materialId,
+        series: map.get(l.materialId)?.series || l.materialSeries || (parts.length > 1 ? parts.slice(0, -1).join('/') : ''),
+        time: l.time,
+      };
+    });
     res.json({
       ok: true,
       user: { id: u.id, name: u.name, email: u.email, level: u.level, joinedAt: u.joinedAt, memberSince: u.memberSince },
@@ -1106,10 +1128,21 @@ app.post('/console/api/materials/upload', consoleAuth, (req, res) => {
       const data = JSON.parse(fs.readFileSync(f, 'utf8'));
       let s = data.find(x => x.folder === series);
       if (!s) { s = { folder: series, materials: [] }; data.push(s); }
-      if (s.materials.some(m => m.title === title)) {
+      const existing = s.materials.find(m => m.title === title);
+      if (existing && !existing.removed) {
         return res.status(400).json({ ok: false, error: '该文件夹下已存在同名素材' });
       }
-      s.materials.push({ id: `${series}/${title}`, series, file: title + ext, title, downloads: 0, createdAt: new Date().toISOString().slice(0, 10), local: true, size });
+      if (existing) {
+        // 下架后同名上传修正版 = 恢复原条目与 ID，保留已有授权码（2026-10-24）
+        existing.removed = false;
+        existing.removedAt = null;
+        existing.updatedAt = new Date().toISOString();
+        existing.file = title + ext;
+        existing.local = true;
+        existing.size = size;
+      } else {
+        s.materials.push({ id: `${series}/${title}`, series, file: title + ext, title, downloads: 0, createdAt: new Date().toISOString().slice(0, 10), local: true, size });
+      }
       fs.writeFileSync(f, JSON.stringify(data, null, 1));
       res.json({ ok: true });
     } catch (e) {
