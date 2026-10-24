@@ -1043,9 +1043,9 @@ H.materials=async()=>{
   <div class="sub">'+(sortMode?'⇅ 排序模式：拖动文件夹换位，松手即保存，前台网站同步生效。点「✅ 完成排序」退出':'共 '+s.total+' 个素材 · 点击文件夹查看和管理')+'</div>\
   <div class="grid">'+folders.map((x,i)=>'<div class="folder'+(sortMode?' sorting':'')+'" '+(sortMode?'draggable="true" ondragstart="fDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="fDrop(event,'+i+')"':'onclick="matView.series=\\''+x.folder+'\\';route()"')+'>'+(sortMode?'':'<button class="btn btn-g f-edit" onclick="event.stopPropagation();renameSeriesModal(\\''+x.folder+'\\')">✏️</button>')+'<div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.filter(m=>!m.removed).length+' 个素材</div></div>').join('')+'</div>'+removedHtml;
 };
-window.delMat=async(series,title)=>{if(!confirm('确定下架「'+title+'」吗？\n下架只隐藏前台展示，历史下载的授权码仍可验真。'))return;await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title),{method:'DELETE'});toast('已下架，授权码仍可验真');route()};
+window.delMat=async(series,title)=>{if(!confirm('确定下架「'+title+'」吗？\\n下架只隐藏前台展示，历史下载的授权码仍可验真。'))return;await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title),{method:'DELETE'});toast('已下架，授权码仍可验真');route()};
 window.restoreMat=async(series,title)=>{try{await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title)+'/restore',{method:'POST'});toast('已恢复上架 ✅');route()}catch(e){toast(e.message)}};
-window.purgeMat=async(series,title)=>{if(!confirm('彻底删除「'+title+'」的清单条目？\n下载流水和授权码快照会保留，旧码仍能验真。'))return;try{await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title)+'/permanent',{method:'DELETE'});toast('已彻底删除');route()}catch(e){toast(e.message)}};
+window.purgeMat=async(series,title)=>{if(!confirm('彻底删除「'+title+'」的清单条目？\\n下载流水和授权码快照会保留，旧码仍能验真。'))return;try{await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title)+'/permanent',{method:'DELETE'});toast('已彻底删除');route()}catch(e){toast(e.message)}};
 window.renameSeriesModal=f=>showModal('<h3>✏️ 重命名文件夹</h3>\
   <div class="row"><label>新名称</label><input id="m-rn" value="'+esc(f)+'"></div>\
   <div class="sub">会同步修改服务器文件目录和 OSS 预览图目录，前台立即生效</div>\
