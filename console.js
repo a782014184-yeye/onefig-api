@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
+const { checkConsoleInline } = require('./ops/console-inline-lib.cjs');
 
 const PLANS = { basic: '青果会员', pro: '红果会员', team: '金果会员' };
 const PLAN_PRICE = { basic: 29.9, pro: 99.9, team: 299.9 };
@@ -710,6 +711,14 @@ module.exports = function registerConsole(app, deps) {
     let ver = '';
     try { ver = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version || ''; } catch {}
     add('version', '系统版本', 'ok', ver ? 'v' + ver : '—', '反馈问题时把这个版本号一并发给 Kimi');
+
+    // 9. 后台 HTML 内嵌脚本（与部署前门禁共用同一套检查）
+    let inline;
+    try { inline = checkConsoleInline(path.join(__dirname, 'console.js')); }
+    catch (e) { inline = { ok: false, blocks: 0, error: e.message }; }
+    add('inline-script', '后台页面脚本', inline.ok ? 'ok' : 'bad',
+      inline.ok ? `${inline.blocks} 个脚本块语法正常` : '语法异常',
+      inline.ok ? '后台 HTML 内嵌 JS 可正常解析' : (inline.error || '请检查确认弹窗换行/引号转义'));
 
     const bad = items.filter(i => i.status === 'bad').length;
     const warn = items.filter(i => i.status === 'warn').length;
