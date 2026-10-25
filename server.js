@@ -276,7 +276,7 @@ function authUser(req, res, next) {
   next();
 }
 function publicUser(u) {
-  return { id: u.id, name: u.name, email: u.email || '', level: u.level || 'none', joinedAt: u.joinedAt, memberSince: u.memberSince || null, dlUsed: u.dlUsed || 0, dlMonth: u.dlMonth || '' };
+  return { id: u.id, name: u.name, email: u.email || '', level: u.level || 'none', joinedAt: u.joinedAt, memberSince: u.memberSince || null, dlUsed: u.dlUsed || 0, dlMonth: u.dlMonth || '', verified: u.verified !== false };
 }
 // 可选认证：带合法登录 token 则识别身份，不带/失效不拦截（供公开验真区分作者本人/登录用户/游客，2026-10-16）
 function optionalAuth(req, res, next) {
@@ -314,6 +314,41 @@ function optionalUser(req) {
   } catch { return null; }
 }
 
+// ---- 注册邮箱验证（2026-10-25，安全审计 ISSUE-3）：复用找回密码的验证码通道 ----
+// 设计：不硬阻断——新账号可登录可逛，仅冻结 AI 免费试用额度（薅羊毛动机根部）；
+// 老用户无 verified 字段视为已验证（向后兼容，存量无感）。
+const REGISTER_CODES_FILE = path.join(CONSOLE_DIR, 'registercodes.json');
+const loadRegCodes = () => loadJSON(REGISTER_CODES_FILE, []);
+const saveRegCodes = r => saveJSON(REGISTER_CODES_FILE, r);
+const isVerified = u => u.verified !== false;
+
+// 发送注册验证码；返回 true / false（发送失败）/ 'limited'（该邮箱 1 小时已发 3 封）
+async function sendRegisterCode(email) {
+  const now = Date.now();
+  let codes = loadRegCodes();
+  if (codes.filter(r => r.email === email && now - r.sentAt < 3600e3).length >= 3) return 'limited';
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  const salt = crypto.randomBytes(8).toString('hex');
+  codes = codes.filter(r => r.email !== email && now - r.sentAt < 24 * 3600e3);
+  codes.push({ email, salt, codeHash: crypto.scryptSync(code, salt, 32).toString('hex'), exp: now + 600e3, attempts: 0, sentAt: now });
+  saveRegCodes(codes);
+  const m = getMailer();
+  if (!m) return false;
+  try {
+    await m.mailer.sendMail({
+      from: 'OneFig 无花有果 <' + m.user + '>',
+      to: email,
+      subject: '【OneFig 无花有果】注册验证码',
+      text: '欢迎注册 OneFig 无花有果！\n\n你的验证码：' + code + '\n\n10 分钟内有效。如果这不是你本人的操作，说明有人误用了你的邮箱，忽略本邮件即可，该账号将无法使用任何免费额度。\n\n— OneFig 无花有果',
+    });
+    logLine('auth', 'register-code-sent email=' + email);
+    return true;
+  } catch (e) {
+    logLine('error', 'register-code-send-fail email=' + email + ' ' + e.message);
+    return false;
+  }
+}
+
 // 公开：素材列表（供前台网站动态读取）
 app.get('/api/materials', (req, res) => {
   try {
@@ -325,11 +360,12 @@ app.get('/api/materials', (req, res) => {
   } catch { res.json({ ok: true, series: [], total: 0 }); }
 });
 
-app.post('/api/auth/register', authRateLimit, (req, res) => {
+app.post('/api/auth/register', authRateLimit, async (req, res) => {
   const email = String((req.body || {}).email || '').trim().toLowerCase();
   const password = String((req.body || {}).password || '');
   const name = String((req.body || {}).name || '').trim().slice(0, 30);
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok: false, error: '邮箱格式不正确' });
+  // 2026-10-25：正则同时排除引号（nodemailer addressparser 中危漏洞的纵深防御，见审计 ISSUE-5 修复备注）
+  if (!/^[^@\s"']+@[^@\s"']+\.[^@\s"']+$/.test(email)) return res.status(400).json({ ok: false, error: '邮箱格式不正确' });
   // 生产环境闸：拦截 @test.com 注册，防止 e2e 联调误指生产时污染用户表（2026-10-16 事故防护）。
   // 隔离测试实例（8090 等）不设 ONEFIG_ENV，不受影响。
   if (process.env.ONEFIG_ENV === 'production' && /@test\.com$/i.test(email)) {
@@ -341,10 +377,13 @@ app.post('/api/auth/register', authRateLimit, (req, res) => {
   const users = loadUsers();
   if (users.some(u => u.email === email)) return res.status(400).json({ ok: false, error: '这个邮箱已经注册过啦，直接登录吧' });
   const salt = crypto.randomBytes(16).toString('hex');
-  const u = { id: crypto.randomUUID(), name, email, contact: email, salt, passHash: crypto.scryptSync(password, salt, 32).toString('hex'), level: 'none', joinedAt: new Date().toISOString(), memberSince: null, notes: '' };
+  const u = { id: crypto.randomUUID(), name, email, contact: email, salt, passHash: crypto.scryptSync(password, salt, 32).toString('hex'), level: 'none', joinedAt: new Date().toISOString(), memberSince: null, notes: '', verified: false };
   users.push(u);
   saveUsers(users);
-  res.json({ ok: true, token: makeToken(u.id, u.pwdVer || 0), user: publicUser(u) });
+  // 注册邮箱验证（2026-10-25 审计 ISSUE-3）：发验证码但不硬阻断——先放行登录，
+  // 未验证账号仅被冻结 AI 免费额度（见 chargeAIEdit/chargeAILocal/ai.js 的 isVerified 闸门）
+  const mailed = await sendRegisterCode(email);
+  res.json({ ok: true, token: makeToken(u.id, u.pwdVer || 0), user: publicUser(u), needVerify: true, mailSent: mailed === true });
 });
 
 app.post('/api/auth/login', loginRateLimit, (req, res) => {
@@ -436,6 +475,44 @@ app.post('/api/auth/reset', authRateLimit, (req, res) => {
   saveResets(resets);
   logLine('auth', 'password-reset-ok email=' + email + ' ip=' + clientIp(req));
   res.json({ ok: true, token: makeToken(u.id, u.pwdVer), user: publicUser(u) });
+});
+
+// 注册验证码校验（2026-10-25 审计 ISSUE-3）：标记已验证；错 5 次作废
+app.post('/api/auth/register/verify', authRateLimit, (req, res) => {
+  const email = String((req.body || {}).email || '').trim().toLowerCase();
+  const code = String((req.body || {}).code || '').trim();
+  const codes = loadRegCodes();
+  const idx = codes.findIndex(r => r.email === email);
+  if (idx < 0) return res.status(400).json({ ok: false, error: '请先获取验证码' });
+  const r = codes[idx];
+  if (r.exp < Date.now()) { codes.splice(idx, 1); saveRegCodes(codes); return res.status(400).json({ ok: false, error: '验证码已过期，请重新获取' }); }
+  if (r.attempts >= 5) { codes.splice(idx, 1); saveRegCodes(codes); return res.status(429).json({ ok: false, error: '错误次数太多，验证码已作废，请重新获取' }); }
+  if (crypto.scryptSync(code, r.salt, 32).toString('hex') !== r.codeHash) {
+    r.attempts++;
+    saveRegCodes(codes);
+    return res.status(400).json({ ok: false, error: '验证码不对，再检查一下' });
+  }
+  const users = loadUsers();
+  const u = users.find(x => x.email === email);
+  if (!u) return res.status(400).json({ ok: false, error: '账号不存在' });
+  u.verified = true;
+  saveUsers(users);
+  codes.splice(idx, 1);
+  saveRegCodes(codes);
+  logLine('auth', 'register-verified email=' + email);
+  res.json({ ok: true, token: makeToken(u.id, u.pwdVer || 0), user: publicUser(u) });
+});
+
+// 重发注册验证码（"没收到邮件"时用；已验证账号直接返回成功）
+app.post('/api/auth/register/resend', forgotRateLimit, async (req, res) => {
+  const email = String((req.body || {}).email || '').trim().toLowerCase();
+  const u = loadUsers().find(x => x.email === email);
+  if (!u) return res.status(400).json({ ok: false, error: '这个邮箱还没注册过哦' });
+  if (isVerified(u)) return res.json({ ok: true, already: true });
+  const r = await sendRegisterCode(email);
+  if (r === 'limited') return res.status(429).json({ ok: false, error: '验证码发得太勤啦，1 小时后再试' });
+  if (r === false) return res.status(502).json({ ok: false, error: '邮件发送失败，请稍后再试' });
+  res.json({ ok: true });
 });
 
 app.get('/api/me', authUser, (req, res) => {
@@ -1233,10 +1310,12 @@ function chargeAILocal(uid, feature) {
   const cost = localCostOf(feature);
   const du = u.aiDailyUsed && typeof u.aiDailyUsed === 'object' ? u.aiDailyUsed : (u.aiDailyUsed = {});
   const slot = du[feature] && du[feature].date === beijingToday() ? du[feature] : (du[feature] = { date: beijingToday(), count: 0 });
-  if (slot.count < AI_LOCAL_FREE) { slot.count++; saveUsers(users); return { ok: true, paidWith: 'free' }; }
+  if (isVerified(u) && slot.count < AI_LOCAL_FREE) { slot.count++; saveUsers(users); return { ok: true, paidWith: 'free' }; }
   if (cost <= 0) return { ok: true, paidWith: 'free' };
   if ((u.credits || 0) < cost) {
-    return { ok: false, code: 'no-credit', credits: u.credits || 0, error: `今天的 ${AI_LOCAL_FREE} 次免费已经用完啦，之后每次 ${cost} 积分——点右上角「充值积分」充一点就能继续用～` };
+    return { ok: false, code: 'no-credit', credits: u.credits || 0, error: isVerified(u)
+      ? `今天的 ${AI_LOCAL_FREE} 次免费已经用完啦，之后每次 ${cost} 积分——点右上角「充值积分」充一点就能继续用～`
+      : '验证注册邮箱后每天都有免费次数哦～验证码在注册邮箱里（没收到可在账号中心重发）' };
   }
   u.credits -= cost;
   saveUsers(users);
@@ -1315,14 +1394,16 @@ function chargeAIEdit(uid, feature) {
   const u = users.find(x => x.id === uid);
   if (!u) return { ok: false, error: '账号异常，请重新登录' };
   const fu = u.aiFreeUsed && typeof u.aiFreeUsed === 'object' ? u.aiFreeUsed : (u.aiFreeUsed = {});
-  if ((fu[feature] || 0) < AI_EDIT_FREE) {
+  if (isVerified(u) && (fu[feature] || 0) < AI_EDIT_FREE) {
     fu[feature] = (fu[feature] || 0) + 1;
     saveUsers(users);
     return { ok: true, paidWith: 'free' };
   }
   if (AI_EDIT_COST <= 0) return { ok: true, paidWith: 'free' };
   if ((u.credits || 0) < AI_EDIT_COST) {
-    return { ok: false, code: 'no-credit', credits: u.credits || 0, error: `这个功能的免费试用已用完，之后每次 ${AI_EDIT_COST} 积分——点右上角「充值积分」充一点就能继续用～` };
+    return { ok: false, code: 'no-credit', credits: u.credits || 0, error: isVerified(u)
+      ? `这个功能的免费试用已用完，之后每次 ${AI_EDIT_COST} 积分——点右上角「充值积分」充一点就能继续用～`
+      : '验证注册邮箱后即可免费试用一次～验证码在注册邮箱里（没收到可在账号中心重发）' };
   }
   u.credits -= AI_EDIT_COST;
   saveUsers(users);

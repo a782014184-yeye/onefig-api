@@ -496,8 +496,9 @@ module.exports = function registerAI(app, deps) {
       const freeLimit = bigType ? BIG_FREE : GEN_FREE;
       const cost = bigType ? BIG_COST : COST;
       let paidWith = 'credit';
-      if ((fu[freeKey] || 0) < freeLimit) { fu[freeKey] = (fu[freeKey] || 0) + 1; paidWith = 'free'; }
-      else if ((u.credits || 0) < cost) return res.status(403).json({ ok: false, error: 'no-credit', credits: u.credits || 0 });
+      // 未验证邮箱不享受免费试用（2026-10-25 审计 ISSUE-3：防批量小号薅免费额度）
+      if (req.user.verified !== false && (fu[freeKey] || 0) < freeLimit) { fu[freeKey] = (fu[freeKey] || 0) + 1; paidWith = 'free'; }
+      else if ((u.credits || 0) < cost) return res.status(403).json({ ok: false, error: 'no-credit', credits: u.credits || 0, unverified: req.user.verified === false || undefined });
       else u.credits -= cost;
 
       // 简易限流：每用户同时只能跑 1 个任务
