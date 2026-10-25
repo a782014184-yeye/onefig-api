@@ -801,7 +801,11 @@ app.post('/api/export/permit', authUser, (req, res) => {
     const used = u.exMonth === month ? (u.exUsed || 0) : 0;
     const limit = EXPORT_MONTHLY[level];
     if (limit !== undefined) {
-      if (used >= limit) return res.json({ ok: true, watermark: true, allowed: false, reason: 'quota', limit, used });
+      // 月度额度用完但持有单次导出权益 → 放行（2026-10-25 修复"会员买了单次用不了"的 bug）
+      if (used >= limit) {
+        if ((u.exportCredits || 0) > 0) return res.json({ ok: true, watermark: false, allowed: true, fallback: 'credits' });
+        return res.json({ ok: true, watermark: true, allowed: false, reason: 'quota', limit, used });
+      }
       return res.json({ ok: true, watermark: false, allowed: true });
     }
     if ((u.exportCredits || 0) <= 0) return res.json({ ok: true, watermark: true, allowed: false, reason: 'no-plan' });
@@ -873,8 +877,13 @@ app.post('/api/export/commit', authUser, (req, res) => {
     if (level !== 'team') {
       const limit = EXPORT_MONTHLY[level];
       if (limit !== undefined) {
-        if ((u.exUsed || 0) >= limit) return res.json({ ok: false, reason: 'quota', limit, used: u.exUsed });
-        u.exUsed = (u.exUsed || 0) + 1;
+        if ((u.exUsed || 0) >= limit) {
+          // 月度额度用完 → 回落单次导出权益（2026-10-25 修复"会员买了单次用不了"的 bug）
+          if ((u.exportCredits || 0) <= 0) return res.json({ ok: false, reason: 'quota', limit, used: u.exUsed });
+          u.exportCredits = (u.exportCredits || 0) - 1;
+        } else {
+          u.exUsed = (u.exUsed || 0) + 1;
+        }
       } else {
         if ((u.exportCredits || 0) <= 0) return res.json({ ok: false, reason: 'no-plan' });
         u.exportCredits = (u.exportCredits || 0) - 1;

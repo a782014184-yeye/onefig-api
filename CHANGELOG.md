@@ -27,6 +27,11 @@
 - **注册邮箱验证上线**：新注册账号标记 `verified:false`，发送 6 位验证码（复用找回密码通道，每邮箱每小时 3 封、错 5 次作废）；新增 `POST /api/auth/register/verify` 与 `/register/resend`。设计为软闸门：未验证账号可登录可浏览，仅冻结 AI 免费试用额度（`chargeAIEdit`/`chargeAILocal`/ai.js 生成三处闸门），防批量小号薅羊毛；老用户无 `verified` 字段视为已验证，存量无感
 - 注册邮箱正则同步排除引号字符（nodemailer addressparser 漏洞的纵深防御）
 
+## [1.7.2] - 2026-10-25
+
+### Fixed
+- **会员超额后单次导出权益失效（真 bug）**：`/api/export/commit` 对青果/红果月度额度用完后，回落扣单次导出权益（exportCredits）；`/api/export/permit` 同步放行并返回 `fallback:'credits'`。修复前会员购买 ¥6.9 单次导出后被额度拦截无法使用
+
 ## [1.7.1] - 2026-10-25
 
 ### Security（安全审计 ISSUE-4/5 收官）
