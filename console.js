@@ -731,9 +731,16 @@ module.exports = function registerConsole(app, deps) {
       inline.ok ? `${inline.blocks} 个脚本块语法正常` : '语法异常',
       inline.ok ? '后台 HTML 内嵌 JS 可正常解析' : (inline.error || '请检查确认弹窗换行/引号转义'));
 
+    // 每周巡检简报（2026-10-25）：本机定时任务巡检后把摘要 scp 推送到此文件；无文件则前端不显示该卡片
+    let report = null;
+    try {
+      const r = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'console', 'health-report.json'), 'utf8'));
+      if (r && r.date && r.summary) report = { date: String(r.date).slice(0, 20), overall: r.overall || 'ok', summary: String(r.summary).slice(0, 500), anomalies: Array.isArray(r.anomalies) ? r.anomalies.slice(0, 10).map(a => String(a).slice(0, 200)) : [] };
+    } catch {}
+
     const bad = items.filter(i => i.status === 'bad').length;
     const warn = items.filter(i => i.status === 'warn').length;
-    res.json({ ok: true, overall: bad ? 'bad' : warn ? 'warn' : 'ok', bad, warn, items, checkedAt: new Date().toISOString() });
+    res.json({ ok: true, overall: bad ? 'bad' : warn ? 'warn' : 'ok', bad, warn, items, report, checkedAt: new Date().toISOString() });
   });
 
   // ---------- 页面（公开访问，内含登录界面；数据接口均有 consoleAuth 保护） ----------
@@ -1240,8 +1247,11 @@ H.health=async()=>{
   const ov=ovMap[d.overall]||ovMap.ok;
   const stTxt=s=>s==='ok'?'<span style="color:#10b981">● 正常</span>':s==='warn'?'<span style="color:#f59e0b">● 注意</span>':'<span style="color:#ef4444">● 异常</span>';
   const rows=d.items.map(it=>'<div class="panel" style="margin-bottom:12px;padding:16px 20px"><div class="hl"><span class="dot '+it.status+'"></span><div style="flex:1"><div class="t">'+esc(it.name)+'<span style="float:right;font-size:12px">'+stTxt(it.status)+'</span></div><div class="v">'+esc(it.value)+'</div><div class="h">'+esc(it.hint)+'</div></div></div></div>').join('');
+  // 每周巡检简报卡（2026-10-25）：定时任务推送的最新报告，有异常时红字列出
+  const rep=d.report?'<div class="panel" style="margin-bottom:12px;padding:16px 20px"><div class="hl"><span style="font-size:18px">📋</span><div style="flex:1"><div class="t">每周巡检简报<span style="float:right;font-size:12px;color:#8b84a3">'+esc(d.report.date)+'</span></div><div class="h" style="margin-top:4px">'+esc(d.report.summary)+'</div>'+(d.report.anomalies&&d.report.anomalies.length?'<div class="h" style="color:#d6336c;margin-top:6px">🔴 '+d.report.anomalies.map(esc).join('；')+'</div>':'')+'</div></div></div>':'';
   return '<div class="toolbar"><h2>🩺 网站体检</h2><div class="sp"></div><button class="btn btn-g" onclick="route()">🔄 刷新</button></div>'
     +'<div class="banner '+d.overall+'"><div style="font-size:19px;font-weight:700">'+ov[0]+'</div><div style="font-size:13px;opacity:.92;margin-top:4px">'+ov[1]+'</div></div>'
+    +rep
     +rows
     +'<div class="sub" style="text-align:center;margin-top:10px">体检时间：'+fmtT(d.checkedAt)+' · 本页数据来自服务器实时检查，打开自动更新，无需任何操作</div>';
 };

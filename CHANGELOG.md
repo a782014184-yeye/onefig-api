@@ -27,6 +27,11 @@
 - **注册邮箱验证上线**：新注册账号标记 `verified:false`，发送 6 位验证码（复用找回密码通道，每邮箱每小时 3 封、错 5 次作废）；新增 `POST /api/auth/register/verify` 与 `/register/resend`。设计为软闸门：未验证账号可登录可浏览，仅冻结 AI 免费试用额度（`chargeAIEdit`/`chargeAILocal`/ai.js 生成三处闸门），防批量小号薅羊毛；老用户无 `verified` 字段视为已验证，存量无感
 - 注册邮箱正则同步排除引号字符（nodemailer addressparser 漏洞的纵深防御）
 
+## [1.8.0] - 2026-10-25
+
+### Added
+- 体检页新增「📋 每周巡检简报」卡片：`/console/api/health` 附带读取 `data/console/health-report.json`（由每周一定时巡检任务 scp 推送），展示最近巡检日期、一句话结论与异常列表；无文件时卡片自动隐藏
+
 ## [1.7.3] - 2026-10-25
 
 ### Security（审计 ISSUE-8/9，清单清零）
