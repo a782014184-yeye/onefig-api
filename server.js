@@ -527,6 +527,62 @@ app.post('/api/auth/register/resend', forgotRateLimit, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ---- 注销账号（2026-10-25 应所有者要求）：用户自助注销，需密码确认 ----
+// 删除：用户主体、画板与分享、AI 生成记录与文件、求素材（含联系方式）、导出存档、验证码记录、
+// 验真查询记录中的本人条目、单张购买记录。注销后邮箱立即可重新注册。
+// 保留：订单与授权码流水（orders/downloads）——仅存匿名 userId（用户记录删除后不再可识别个人），
+// 且授权码验真是对已发出证书的第三方承诺，不随注销失效。
+app.post('/api/auth/delete-account', authUser, authRateLimit, (req, res) => {
+  try {
+    const password = String((req.body || {}).password || '');
+    const u = loadUsers().find(x => x.id === req.user.id);
+    if (!u || crypto.scryptSync(password, u.salt, 32).toString('hex') !== u.passHash) {
+      logLine('auth', `delete-account-wrong-pass email=${u ? u.email : '?'} ip=${clientIp(req)}`);
+      return res.status(400).json({ ok: false, error: '密码不对，注销没有生效' });
+    }
+    const uid = u.id, email = u.email;
+    // 1. 用户主体（邮箱自此释放）
+    saveUsers(loadUsers().filter(x => x.id !== uid));
+    // 2. 画板目录 + 分享反查表 + 对应批注
+    fs.rmSync(path.join(BOARDS_DIR, String(uid)), { recursive: true, force: true });
+    const shares = loadShares();
+    let shDirty = false;
+    for (const [t, ref] of Object.entries(shares)) {
+      if (ref.uid === uid) { delete shares[t]; shDirty = true; fs.unlink(commentsFile(t), () => {}); }
+    }
+    if (shDirty) saveShares(shares);
+    // 3. AI 生成记录与结果文件
+    const jobsFile = path.join(DATA_DIR, 'ai', 'jobs.json');
+    const jobs = loadJSON(jobsFile, []);
+    jobs.filter(j => j.userId === uid).forEach(j => fs.rmSync(path.join(DATA_DIR, 'ai', j.id), { recursive: true, force: true }));
+    saveJSON(jobsFile, jobs.filter(j => j.userId !== uid));
+    // 4. 求素材/定制记录（含联系方式）
+    writeDB(readDB().filter(r => r.userId !== uid));
+    // 5. 导出存档记录与文件
+    const exIdx = loadJSON(EXPORT_INDEX, []);
+    exIdx.filter(l => l.userId === uid).forEach(l => fs.unlink(path.join(EXPORT_DIR, path.basename(String(l.file || ''))), () => {}));
+    saveJSON(EXPORT_INDEX, exIdx.filter(l => l.userId !== uid));
+    // 6. 验证码类记录（注册/找回）
+    saveRegCodes(loadRegCodes().filter(r => r.email !== email));
+    saveResets(loadResets().filter(r => r.email !== email));
+    // 7. 验真查询记录中本人的条目
+    const QLOG = path.join(CONSOLE_DIR, 'verify-log.json');
+    const qlog = loadJSON(QLOG, {});
+    let qDirty = false;
+    for (const rec of Object.values(qlog)) {
+      if (rec && rec.entries && rec.entries[uid]) { delete rec.entries[uid]; qDirty = true; }
+    }
+    if (qDirty) saveJSON(QLOG, qlog);
+    // 8. 单张购买记录
+    saveJSON(PURCHASES_FILE, loadJSON(PURCHASES_FILE, []).filter(p => p.userId !== uid));
+    logLine('auth', `account-deleted email=${email} ip=${clientIp(req)}`);
+    res.json({ ok: true });
+  } catch (e) {
+    logLine('error', 'delete-account-fail ' + (e && e.message));
+    res.status(500).json({ ok: false, error: '注销失败，请稍后再试或联系客服' });
+  }
+});
+
 app.get('/api/me', authUser, (req, res) => {
   const orders = loadOrders().filter(o => o.userId === req.user.id).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   // 积分充值订单一并返回，账号中心「积分订单」区展示（2026-10-17）

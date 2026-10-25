@@ -1,1 +1,1 @@
-{"name":"onefig-api","version":"1.6.0","private":true,"main":"server.js","dependencies":{"express":"^4.19.2","jpeg-js":"^0.4.4","multer":"^2.4.0","nodemailer":"^10.0.10","pngjs":"^7.0.0"}}
+{"name":"onefig-api","version":"1.7.0","private":true,"main":"server.js","dependencies":{"express":"^4.19.2","jpeg-js":"^0.4.4","multer":"^2.4.0","nodemailer":"^10.0.10","pngjs":"^7.0.0"}}
