@@ -30,4 +30,8 @@ find "$DEST" -name 'onefig-code-*.tar.gz' -mtime +14 -delete
 find "$DEST" -name 'onefig-full-*.tar.gz' -mtime +60 -delete
 # 清理 30 天前的访问/错误日志
 find /opt/onefig-api/data/logs -name '*.log' -mtime +30 -delete 2>/dev/null || true
+# 清理 1 天前的 AI 源图（2026-10-25 审计 ISSUE-5）：用户上传给 AI 处理的原始图片，
+# 百炼取图完成后即无用途，永久留存有隐私风险（URL 不可猜但公开）。只清 ai-src-* 源图，
+# AI 结果图（ai-out-*/ai-sty-*/ai-nobg-*/ai-vec-*）可能被画板引用，不动。
+find /opt/onefig-api/data/files -name 'ai-src-*' -mtime +1 -delete 2>/dev/null || true
 echo "[$(date '+%F %T')] backup done ($TS)"

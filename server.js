@@ -1029,7 +1029,9 @@ app.get('/api/my/downloads', authUser, (req, res) => {
 });
 
 // 公开验真：凭授权码查询授权状态（不返回完整用户信息，供期刊编辑等第三方核查）
-app.get('/api/verify', optionalAuth, (req, res) => {
+// 验真限流（2026-10-25 审计 ISSUE-4）：防查询计数被刷、限 I/O 放大
+const verifyRateLimit = makeRateLimiter(30, 10 * 60 * 1000, '查询太频繁啦，请稍后再试');
+app.get('/api/verify', verifyRateLimit, optionalAuth, (req, res) => {
   try {
     const code = String(req.query.code || '').trim();
     if (!code) return res.status(400).json({ ok: false, error: '缺少授权码' });
