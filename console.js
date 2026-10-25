@@ -22,10 +22,19 @@ module.exports = function registerConsole(app, deps) {
   // 后台一旦 XSS 或被抓包，泄露的就是全站密码哈希（可离线爆破弱密码）
   const adminUserView = (u) => { if (!u) return u; const { passHash, salt, pwdVer, ...pub } = u; return pub; };
 
+  // 测试账号过滤（2026-10-25）：users.json 里 test:true 的账号全部保留，
+  // 但其订单不计入任何金额统计，新增用户走势也不含测试号（真实用户如张天志不标记）
+  const testUserIds = () => new Set(load('users.json', []).filter(u => u.test).map(u => u.id));
+  const paidOrdersExcludingTests = () => {
+    const ids = testUserIds();
+    return load('orders.json', []).filter(o => o.status === 'paid' && !ids.has(o.userId));
+  };
+  const realUsersOnly = users => { const ids = testUserIds(); return users.filter(u => !ids.has(u.id)); };
+
   // ---------- API ----------
   app.get('/console/api/stats', consoleAuth, (req, res) => {
     const users = load('users.json', []);
-    const orders = load('orders.json', []).filter(o => o.status === 'paid');
+    const orders = paidOrdersExcludingTests();
     const totalRevenue = rmb(orders.reduce((s, o) => s + o.amount, 0));
     const levelCount = { basic: 0, pro: 0, team: 0 };
     users.forEach(u => { if (levelCount[u.level] !== undefined) levelCount[u.level]++; });
@@ -37,12 +46,13 @@ module.exports = function registerConsole(app, deps) {
     });
     const days = [];
     const now = new Date();
+    const realUsers = realUsersOnly(users);
     for (let i = 29; i >= 0; i--) {
       const d = new Date(now); d.setDate(d.getDate() - i);
       const key = d.toISOString().slice(0, 10);
       days.push({
         date: key.slice(5),
-        users: users.filter(u => (u.joinedAt || '').slice(0, 10) === key).length,
+        users: realUsers.filter(u => (u.joinedAt || '').slice(0, 10) === key).length,
         revenue: rmb(orders.filter(o => (o.paidAt || '').slice(0, 10) === key).reduce((s, o) => s + o.amount, 0)),
       });
     }
@@ -52,8 +62,8 @@ module.exports = function registerConsole(app, deps) {
   // 每日走势：新增用户 + 收入（可选 7/30/180/365 天）
   app.get('/console/api/trend', consoleAuth, (req, res) => {
     const days = Math.min(366, Math.max(1, parseInt(req.query.range, 10) || 30));
-    const users = load('users.json', []);
-    const orders = load('orders.json', []).filter(o => o.status === 'paid');
+    const users = realUsersOnly(load('users.json', []));
+    const orders = paidOrdersExcludingTests();
     const key = iso => {
       const d = new Date(iso);
       return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -117,8 +127,9 @@ module.exports = function registerConsole(app, deps) {
   // 积分统计：总收入 + 各套餐收入 + 每日购买积分数（近 N 天柱状图）
   app.get('/console/api/credit-stats', consoleAuth, (req, res) => {
     const days = Math.min(366, Math.max(7, parseInt(req.query.range, 10) || 30));
+    const testIds = testUserIds();
     const all = load(path.join('..', 'ai', 'credit-orders.json'), []);
-    const paid = all.filter(o => o.status === 'paid');
+    const paid = all.filter(o => o.status === 'paid' && !testIds.has(o.userId));
     const PKG_NAMES = { p100: '100积分', p800: '800积分', p2000: '2000积分' };
     const byPkg = {};
     paid.forEach(o => {
@@ -1012,7 +1023,7 @@ H.dashboard=async()=>{
     <div class="kpi"><div class="lbl">🟢 青果会员</div><div class="num">'+s.levelCount.basic+'</div></div>\
     <div class="kpi"><div class="lbl">🔴 红果会员</div><div class="num">'+s.levelCount.pro+'</div></div>\
     <div class="kpi"><div class="lbl">🟡 金果会员</div><div class="num">'+s.levelCount.team+'</div></div>\
-    <div class="kpi"><div class="lbl">总支付金额</div><div class="num">'+yuan(s.totalRevenue)+'</div></div>\
+    <div class="kpi"><div class="lbl">总支付金额</div><div class="num">'+yuan(s.totalRevenue)+'</div><div class="chips"><span class="chip">不含测试账号</span></div></div>\
   </div>'+aiPanel+'\
   <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">💰 每日收入走势</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'revenue','linear-gradient(180deg,#a78bfa,#7c5cbf)',v=>yuan(v))+'</div>\
   <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🌱 每日新增用户</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'users','linear-gradient(180deg,#6ee7b7,#34d399)',v=>v+'人')+'</div>'+leakPanel+creditPanel;
