@@ -174,6 +174,8 @@ function makeUserRateLimiter(max, windowMs, msg) {
 const aiEditRateLimit = makeUserRateLimiter(30, 3600e3, 'AI 调用太频繁啦，休息一下再来～（每小时最多 30 次）');
 // AI 本地服务接口（抠图/转矢量，CPU 密集）：每小时 10 次，防脚本打满服务器
 const aiLocalRateLimit = makeUserRateLimiter(10, 3600e3, '这个功能每小时最多用 10 次，稍后再试～');
+// 导出存档兜底限流（2026-10-25 安全审计 ISSUE-1）：每用户每小时 30 次，配合权益闸门防磁盘刷写
+const exportArchiveRateLimit = makeUserRateLimiter(30, 3600e3, '操作太频繁啦，稍后再试');
 
 // ---- 图片魔数校验：不信任客户端声明的 mimetype，防伪装文件上传（2026-09-21 安全加固）----
 function sniffImage(filePath) {
@@ -677,7 +679,16 @@ const uploadExport = multer({
     cb(new Error('只支持 PNG / JPG / TIF'));
   },
 });
-app.post('/api/export/archive', authUser, (req, res) => {
+app.post('/api/export/archive', authUser, exportArchiveRateLimit, (req, res) => {
+  // 权益闸门（2026-10-25 安全审计 ISSUE-1 修复）：此前只查登录，免费账号可无限上传 45MB 刷满磁盘。
+  // 会员 / 持有单次导出权益 / 有过导出记录（刚核销完最后一次权益）的账号才可存档；
+  // 闸在 multer 落盘之前，不合格请求不产生任何文件。
+  {
+    const u = req.user;
+    const hasRight = (u.level && u.level !== 'none') || (u.exportCredits || 0) > 0 ||
+      loadJSON(DOWNLOADS_FILE, []).some(l => l.userId === u.id && l.kind === 'export');
+    if (!hasRight) return res.status(403).json({ ok: false, error: '无存档权益' });
+  }
   uploadExport.single('file')(req, res, (err) => {
     if (err || !req.file) return res.status(400).json({ ok: false });
     try {
