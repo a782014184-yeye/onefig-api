@@ -79,7 +79,7 @@ ${canonical ? `<link rel="canonical" href="${esc(canonical)}">` : ''}
 <meta property="og:title" content="${esc(title)}">
 <meta property="og:description" content="${esc(desc)}">
 ${img ? `<meta property="og:image" content="${esc(img)}">` : ''}
-${jsonld ? `<script type="application/ld+json">${jsonld}</script>` : ''}
+${jsonld ? `<script type="application/ld+json">${jsonld.replace(/</g, '\\u003c')}</script>` : ''}
 <style>${CSS}</style></head><body>`;
   const topbar = `<header class="hd"><div class="hdin">
 <a class="brand" href="/"><img src="/brand/logo.png" alt="${SITE_NAME}"></a>

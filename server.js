@@ -139,11 +139,17 @@ app.use((req, res, next) => {
 });
 
 // ---- 限流工厂：每 IP 独立计数（2026-09-21 安全加固）----
+// 2026-10-25 审计 ISSUE-8：约 1% 的请求顺手全表清扫过期键，防内存 Map 只增不减（数月级慢泄漏）
+function sweepStale(hits, windowMs, now) {
+  if (Math.random() >= 0.01) return;
+  for (const [k, v] of hits) if (!v.length || now - v[v.length - 1] > windowMs) hits.delete(k);
+}
 function makeRateLimiter(max, windowMs, msg) {
   const hits = new Map();
   return function (req, res, next) {
     const ip = clientIp(req);
     const now = Date.now();
+    sweepStale(hits, windowMs, now);
     const rec = (hits.get(ip) || []).filter(t => now - t < windowMs);
     if (rec.length >= max) return res.status(429).json({ ok: false, error: msg });
     rec.push(now);
@@ -163,6 +169,7 @@ function makeUserRateLimiter(max, windowMs, msg) {
   return function (req, res, next) {
     const key = (req.user && req.user.id) || clientIp(req);
     const now = Date.now();
+    sweepStale(hits, windowMs, now);
     const rec = (hits.get(key) || []).filter(t => now - t < windowMs);
     if (rec.length >= max) return res.status(429).json({ ok: false, error: msg });
     rec.push(now);
