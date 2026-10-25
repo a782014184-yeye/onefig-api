@@ -27,6 +27,12 @@
 - **注册邮箱验证上线**：新注册账号标记 `verified:false`，发送 6 位验证码（复用找回密码通道，每邮箱每小时 3 封、错 5 次作废）；新增 `POST /api/auth/register/verify` 与 `/register/resend`。设计为软闸门：未验证账号可登录可浏览，仅冻结 AI 免费试用额度（`chargeAIEdit`/`chargeAILocal`/ai.js 生成三处闸门），防批量小号薅羊毛；老用户无 `verified` 字段视为已验证，存量无感
 - 注册邮箱正则同步排除引号字符（nodemailer addressparser 漏洞的纵深防御）
 
+## [1.6.0] - 2026-10-25
+
+### Security（应所有者要求升级硬闸门）
+- **注册必须验证邮箱才能登录**：注册接口不再返回 token；未验证账号登录返回 403 + `code:'unverified'` 并自动重发验证码；找回密码成功即视为邮箱归属已证明（自动标记 verified，防卡死循环）
+- 1.5.0 的软闸门（冻结 AI 免费额度）保留作为第二层
+
 ## [1.4.1] - 2026-10-25
 
 ### Security（安全审计 run-1 修复）

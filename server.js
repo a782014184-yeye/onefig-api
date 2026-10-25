@@ -380,19 +380,30 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
   const u = { id: crypto.randomUUID(), name, email, contact: email, salt, passHash: crypto.scryptSync(password, salt, 32).toString('hex'), level: 'none', joinedAt: new Date().toISOString(), memberSince: null, notes: '', verified: false };
   users.push(u);
   saveUsers(users);
-  // 注册邮箱验证（2026-10-25 审计 ISSUE-3）：发验证码但不硬阻断——先放行登录，
-  // 未验证账号仅被冻结 AI 免费额度（见 chargeAIEdit/chargeAILocal/ai.js 的 isVerified 闸门）
+  // 注册邮箱验证（2026-10-25 审计 ISSUE-3 → 应所有者要求升级为硬闸门）：
+  // 注册不再返回 token，必须验证邮箱后才能登录；老用户（无 verified 字段）不受影响
   const mailed = await sendRegisterCode(email);
-  res.json({ ok: true, token: makeToken(u.id, u.pwdVer || 0), user: publicUser(u), needVerify: true, mailSent: mailed === true });
+  res.json({ ok: true, needVerify: true, mailSent: mailed === true });
 });
 
-app.post('/api/auth/login', loginRateLimit, (req, res) => {
+app.post('/api/auth/login', loginRateLimit, async (req, res) => {
   const email = String((req.body || {}).email || '').trim().toLowerCase();
   const password = String((req.body || {}).password || '');
   const u = loadUsers().find(x => x.email === email);
   if (!u || !u.passHash || crypto.scryptSync(password, u.salt, 32).toString('hex') !== u.passHash) {
     logLine('auth', `user-login-fail email=${email} ip=${clientIp(req)}`);
     return res.status(401).json({ ok: false, error: '邮箱或密码不对，再检查一下' });
+  }
+  // 未验证邮箱的账号拒绝登录并自动重发验证码（硬闸门，2026-10-25）
+  if (!isVerified(u)) {
+    const r = await sendRegisterCode(email);
+    logLine('auth', `login-blocked-unverified email=${email} ip=${clientIp(req)} resend=${r}`);
+    return res.status(403).json({
+      ok: false, code: 'unverified',
+      error: r === true ? '这个邮箱还没验证哦，新验证码已重新发到邮箱（记得看看垃圾邮件）'
+        : r === 'limited' ? '这个邮箱还没验证哦，验证码 1 小时内最多发 3 封，请稍后再试或翻翻邮箱'
+        : '这个邮箱还没验证哦，验证码邮件发送失败，请稍后再试',
+    });
   }
   res.json({ ok: true, token: makeToken(u.id, u.pwdVer || 0), user: publicUser(u) });
 });
@@ -470,6 +481,7 @@ app.post('/api/auth/reset', authRateLimit, (req, res) => {
   u.salt = salt2;
   u.passHash = crypto.scryptSync(password, salt2, 32).toString('hex');
   u.pwdVer = (u.pwdVer || 0) + 1;
+  u.verified = true;   // 能收到重置邮件即证明邮箱归属（2026-10-25 硬闸门配套，防卡死循环）
   saveUsers(users);
   resets.splice(idx, 1);
   saveResets(resets);
