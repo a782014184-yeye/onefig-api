@@ -902,9 +902,13 @@ app.post('/api/export/commit', authUser, (req, res) => {
     const logs = loadJSON(DOWNLOADS_FILE, []);
     const code = genLicenseCode(logs);
     const boardTitle = String((req.body || {}).boardTitle || '').slice(0, 80);
+    const boardId = String((req.body || {}).boardId || '');
+    // 缩略图随导出快照保存：画板日后删除/重建，历史导出记录的预览图依然可用（2026-10-26）
+    const bmeta = boardId ? loadBoardIndex(u.id).boards.find(b => b.id === boardId) : null;
     logs.push({
       userId: u.id, kind: 'export', materialId: '画板导出作品',
-      boardId: String((req.body || {}).boardId || ''), boardTitle,
+      boardId, boardTitle,
+      thumb: (bmeta && bmeta.thumb) || null,
       code, time: new Date().toISOString(), free: false,
     });
     saveJSON(DOWNLOADS_FILE, logs);
@@ -1021,7 +1025,7 @@ app.get('/api/my/downloads', authUser, (req, res) => {
           kind: 'export',
           title: l.boardTitle || '画板导出作品',
           boardId: l.boardId || '',
-          thumb: thumbByBoard.get(l.boardId) || null,
+          thumb: l.thumb || thumbByBoard.get(l.boardId) || null,
           time: l.time,
           code: l.code || null,
         });
