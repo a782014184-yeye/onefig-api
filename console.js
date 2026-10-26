@@ -1338,13 +1338,14 @@ window.galleryMore=async()=>{
 
 /* ---------- 9. 发票管理：申请资料筛选与批量导出 ---------- */
 let INV_ROWS=[],INV_SELECTED=new Set();
-const INV_FILTER={status:'all',from:'',to:'',q:''};
+const INV_FILTER={status:'all',exportStatus:'all',from:'',to:'',q:''};
 const INV_STATUS={pending:['待处理','tag new'],issued:['已开具','tag done2'],rejected:['已驳回','tag'],red_flushed:['已红冲','tag']};
 function invQuery(mode){
   const p=new URLSearchParams();
   if(mode==='selected')p.set('ids',Array.from(INV_SELECTED).join(','));
   else{
     if(INV_FILTER.status!=='all')p.set('status',INV_FILTER.status);
+    if(INV_FILTER.exportStatus!=='all')p.set('exportStatus',INV_FILTER.exportStatus);
     if(INV_FILTER.from)p.set('from',INV_FILTER.from);
     if(INV_FILTER.to)p.set('to',INV_FILTER.to);
     if(INV_FILTER.q)p.set('q',INV_FILTER.q);
@@ -1360,43 +1361,49 @@ H.invoices=async()=>{
     const checked=INV_SELECTED.has(r.id)?' checked':'';
     const business=r.businessType==='MATERIAL_LICENSE'?'素材使用授权':'画板导出服务';
     const buyer=r.buyerType==='company'?'单位':'个人';
+    const exported=r.exportStatus==='exported';
     return '<tr><td><input type="checkbox" data-inv-check="'+esc(r.id)+'"'+checked+' onchange="invToggle(\\''+r.id+'\\',this.checked)"></td>'
       +'<td><b>'+esc(r.title)+'</b><div class="sub" style="margin:4px 0 0">'+esc(r.taxId||'个人抬头')+'</div><div style="font-size:12px;color:#8b84a3;margin-top:3px">'+esc(r.email)+'</div></td>'
       +'<td><b>'+esc(r.orderTitle)+'</b><div style="font-size:12px;color:#8b84a3;margin-top:4px">'+business+' · '+esc(r.orderId)+'</div></td>'
       +'<td>'+buyer+'<div style="font-size:12px;color:#8b84a3;margin-top:4px">'+(r.invoiceType==='special'?'专用发票':'普通发票')+'</div></td>'
       +'<td><b>'+yuan(r.amount)+'</b></td><td><span class="'+st[1]+'">'+esc(st[0])+'</span></td>'
+      +'<td><span class="'+(exported?'tag done2':'tag')+'">'+(exported?'已导出':'未导出')+'</span><div style="font-size:11px;color:#8b84a3;margin-top:4px">'+(exported?fmtT(r.lastExportedAt)+' · 第 '+(r.exportCount||1)+' 次':'—')+'</div></td>'
       +'<td style="white-space:nowrap">'+fmtT(r.createdAt)+'<div style="font-size:11px;color:#8b84a3;margin-top:4px">'+esc(r.id)+'</div></td></tr>';
-  }).join(''):'<tr><td colspan="7" style="text-align:center;color:#b0aac4;padding:28px">当前筛选条件下没有开票申请</td></tr>';
+  }).join(''):'<tr><td colspan="8" style="text-align:center;color:#b0aac4;padding:28px">当前筛选条件下没有开票申请</td></tr>';
   return '<div class="toolbar"><h2>🧾 发票管理</h2><div class="sp"></div><button class="btn btn-g" onclick="route()">🔄 刷新</button></div>'
     +'<div class="panel"><div class="toolbar">'
     +'<select id="inv-status"><option value="all"'+(INV_FILTER.status==='all'?' selected':'')+'>全部状态</option><option value="pending"'+(INV_FILTER.status==='pending'?' selected':'')+'>待处理</option><option value="issued"'+(INV_FILTER.status==='issued'?' selected':'')+'>已开具</option><option value="rejected"'+(INV_FILTER.status==='rejected'?' selected':'')+'>已驳回</option><option value="red_flushed"'+(INV_FILTER.status==='red_flushed'?' selected':'')+'>已红冲</option></select>'
+    +'<select id="inv-export-status"><option value="all"'+(INV_FILTER.exportStatus==='all'?' selected':'')+'>全部导出状态</option><option value="unexported"'+(INV_FILTER.exportStatus==='unexported'?' selected':'')+'>未导出</option><option value="exported"'+(INV_FILTER.exportStatus==='exported'?' selected':'')+'>已导出</option></select>'
     +'<input id="inv-from" type="date" value="'+esc(INV_FILTER.from)+'" title="开始日期"><span class="sub" style="margin:0">至</span><input id="inv-to" type="date" value="'+esc(INV_FILTER.to)+'" title="结束日期">'
     +'<input id="inv-q" placeholder="搜索抬头 / 税号 / 邮箱 / 订单号" value="'+esc(INV_FILTER.q)+'" style="width:240px" onkeydown="if(event.key===\\'Enter\\')invSearch()">'
     +'<button class="btn btn-p" onclick="invSearch()">查询</button><button class="btn btn-g" onclick="invReset()">重置</button></div>'
-    +'<div class="toolbar" style="margin-bottom:0"><span class="sub" style="margin:0">共 '+d.total+' 条申请；CSV 含完整开票资料，可用 Excel 打开</span><div class="sp"></div>'
+    +'<div class="toolbar" style="margin-bottom:0"><span class="sub" style="margin:0">共 '+d.total+' 条申请；选中导出后自动标记为已导出</span><div class="sp"></div>'
     +'<button class="btn btn-g" onclick="invExport(\\'filter\\')">下载筛选结果</button><button class="btn btn-p" id="inv-selected-btn" onclick="invExport(\\'selected\\')">'+invSelectedText()+'</button></div></div>'
-    +'<div class="panel" style="overflow:auto"><table><tr><th><input type="checkbox" onchange="invToggleAll(this.checked)" title="全选当前列表"></th><th>购买方 / 接收邮箱</th><th>订单 / 业务类型</th><th>抬头 / 发票类型</th><th>金额</th><th>状态</th><th>申请时间 / 编号</th></tr>'+rows+'</table></div>';
+    +'<div class="panel" style="overflow:auto"><table><tr><th><input type="checkbox" onchange="invToggleAll(this.checked)" title="全选当前列表"></th><th>购买方 / 接收邮箱</th><th>订单 / 业务类型</th><th>抬头 / 发票类型</th><th>金额</th><th>状态</th><th>导出状态</th><th>申请时间 / 编号</th></tr>'+rows+'</table></div>';
 };
 window.invSearch=()=>{
   INV_FILTER.status=document.getElementById('inv-status').value;
+  INV_FILTER.exportStatus=document.getElementById('inv-export-status').value;
   INV_FILTER.from=document.getElementById('inv-from').value;
   INV_FILTER.to=document.getElementById('inv-to').value;
   INV_FILTER.q=document.getElementById('inv-q').value.trim();
   route();
 };
-window.invReset=()=>{INV_FILTER.status='all';INV_FILTER.from='';INV_FILTER.to='';INV_FILTER.q='';route()};
+window.invReset=()=>{INV_FILTER.status='all';INV_FILTER.exportStatus='all';INV_FILTER.from='';INV_FILTER.to='';INV_FILTER.q='';route()};
 window.invToggle=(id,checked)=>{if(checked)INV_SELECTED.add(id);else INV_SELECTED.delete(id);document.getElementById('inv-selected-btn').textContent=invSelectedText()};
 window.invToggleAll=checked=>{INV_ROWS.forEach(r=>{if(checked)INV_SELECTED.add(r.id);else INV_SELECTED.delete(r.id)});document.querySelectorAll('[data-inv-check]').forEach(c=>{c.checked=checked});document.getElementById('inv-selected-btn').textContent=invSelectedText()};
 window.invExport=async mode=>{
   if(mode==='selected'&&!INV_SELECTED.size)return toast('请先勾选需要下载的申请');
   if(mode==='filter'&&!INV_ROWS.length)return toast('当前筛选条件下没有可下载的申请');
   try{
+    const count=mode==='selected'?INV_SELECTED.size:INV_ROWS.length;
     const r=await fetch('/console/api/invoices/export?'+invQuery(mode),{headers:{Authorization:'Bearer '+getTK()}});
     if(r.status===401){logout();throw new Error('登录已过期，请重新登录')}
     if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||'下载失败')}
     const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');
     a.href=url;a.download='开票申请资料-'+new Date().toISOString().slice(0,10)+'.csv';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
-    toast('已下载 '+(mode==='selected'?INV_SELECTED.size:INV_ROWS.length)+' 条申请资料');
+    toast('已下载 '+count+' 条申请资料'+(mode==='selected'?'，并标记为已导出':''));
+    if(mode==='selected'){INV_SELECTED.clear();await route()}
   }catch(e){toast(e.message)}
 };
 

@@ -121,12 +121,20 @@ module.exports = function registerInvoices(app, deps) {
     res.status(201).json({ ok: true, application: publicApplication(application) });
   });
 
-  // ---------- 管理后台：申请列表与批量导出（只读，不在这里改变开票状态） ----------
+  // ---------- 管理后台：申请列表与批量导出（导出状态独立，不改变发票处理状态） ----------
   if (consoleAuth) {
     const STATUSES = ['pending', 'issued', 'rejected', 'red_flushed'];
-    const consoleApplication = row => ({ ...publicApplication(row), userName: row.userName || '' });
+    const consoleApplication = row => ({
+      ...publicApplication(row),
+      userName: row.userName || '',
+      exportStatus: row.lastExportedAt ? 'exported' : 'unexported',
+      firstExportedAt: row.firstExportedAt || null,
+      lastExportedAt: row.lastExportedAt || null,
+      exportCount: Number(row.exportCount) || 0,
+    });
     const filteredApplications = query => {
       const status = clean(query.status, 30);
+      const exportStatus = clean(query.exportStatus, 20);
       const from = clean(query.from, 10);
       const to = clean(query.to, 10);
       const q = clean(query.q, 120).toLowerCase();
@@ -134,6 +142,7 @@ module.exports = function registerInvoices(app, deps) {
       return loadInvoices()
         .filter(row => !ids.size || ids.has(row.id))
         .filter(row => !STATUSES.includes(status) || row.status === status)
+        .filter(row => exportStatus === 'exported' ? !!row.lastExportedAt : (exportStatus === 'unexported' ? !row.lastExportedAt : true))
         .filter(row => !/^\d{4}-\d{2}-\d{2}$/.test(from) || String(row.createdAt || '').slice(0, 10) >= from)
         .filter(row => !/^\d{4}-\d{2}-\d{2}$/.test(to) || String(row.createdAt || '').slice(0, 10) <= to)
         .filter(row => {
@@ -156,8 +165,26 @@ module.exports = function registerInvoices(app, deps) {
     });
 
     app.get('/console/api/invoices/export', consoleAuth, (req, res) => {
+      const selectedIds = new Set(clean((req.query || {}).ids, 12000).split(',').map(x => x.trim()).filter(Boolean).slice(0, 500));
       const rows = filteredApplications(req.query || {}).slice(0, 5000);
-      const header = ['申请编号', '申请时间', '订单号', '业务类型', '订单内容', '金额（元）', '抬头类型', '发票抬头', '纳税人识别号', '发票类型', '接收邮箱', '用户昵称', '备注', '状态', '发票号码', '开具时间'];
+      // 只有“勾选后导出”才标记；下载筛选结果不影响导出状态。
+      if (selectedIds.size && rows.length) {
+        const now = new Date().toISOString();
+        const all = loadInvoices();
+        const exportedIds = new Set(rows.map(row => row.id));
+        all.forEach(row => {
+          if (!exportedIds.has(row.id)) return;
+          if (!row.firstExportedAt) row.firstExportedAt = now;
+          row.lastExportedAt = now;
+          row.exportCount = (Number(row.exportCount) || 0) + 1;
+        });
+        saveJSON(INVOICES_FILE, all);
+        rows.forEach(row => {
+          const updated = all.find(item => item.id === row.id);
+          Object.assign(row, updated);
+        });
+      }
+      const header = ['申请编号', '申请时间', '订单号', '业务类型', '订单内容', '金额（元）', '抬头类型', '发票抬头', '纳税人识别号', '发票类型', '接收邮箱', '用户昵称', '备注', '状态', '导出状态', '最近导出时间', '导出次数', '发票号码', '开具时间'];
       const business = { MATERIAL_LICENSE: '素材使用授权', CANVAS_EXPORT: '画板导出服务' };
       const status = { pending: '待处理', issued: '已开具', rejected: '已驳回', red_flushed: '已红冲' };
       const lines = [header.map(csvCell).join(',')];
@@ -177,6 +204,9 @@ module.exports = function registerInvoices(app, deps) {
           row.userName || '',
           row.note || '',
           status[row.status] || row.status,
+          row.lastExportedAt ? '已导出' : '未导出',
+          row.lastExportedAt || '',
+          Number(row.exportCount) || 0,
           row.invoiceNumber || '',
           row.issuedAt || '',
         ].map(csvCell).join(','));
@@ -186,7 +216,7 @@ module.exports = function registerInvoices(app, deps) {
       res.setHeader('Content-Disposition', `attachment; filename="invoice-applications-${stamp}.csv"`);
       res.setHeader('Cache-Control', 'no-store');
       res.send('\ufeff' + lines.join('\r\n'));
-      if (logLine) logLine('invoice', `applications-exported count=${rows.length}`);
+      if (logLine) logLine('invoice', `applications-exported count=${rows.length} mode=${selectedIds.size ? 'selected' : 'filter'}`);
     });
   }
 };

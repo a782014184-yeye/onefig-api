@@ -104,7 +104,29 @@ assert.ok(exported.payload.startsWith('\ufeff'));
 assert.ok(exported.payload.includes('申请编号'));
 assert.ok(exported.payload.includes('91330102MAKM5NHF44'));
 assert.ok(exported.payload.includes("'=HYPERLINK"), 'CSV 公式注入必须被转义');
-assert.equal(adminChecks, 3);
+const afterFilterExport = request('GET', '/console/api/invoices', null, 'u1', { exportStatus: 'unexported' });
+assert.equal(afterFilterExport.payload.total, 2, '筛选结果导出不得改变导出状态');
+
+const selectedExport = request('GET', '/console/api/invoices/export', null, 'u1', { ids: created.payload.application.id });
+assert.ok(selectedExport.payload.includes('已导出'));
+const afterSelected = request('GET', '/console/api/invoices', null, 'u1', { ids: created.payload.application.id });
+assert.equal(afterSelected.payload.list[0].exportStatus, 'exported');
+assert.equal(afterSelected.payload.list[0].exportCount, 1);
+assert.ok(afterSelected.payload.list[0].firstExportedAt);
+assert.ok(afterSelected.payload.list[0].lastExportedAt);
+
+request('GET', '/console/api/invoices/export', null, 'u1', { ids: created.payload.application.id });
+const afterSecondSelected = request('GET', '/console/api/invoices', null, 'u1', { ids: created.payload.application.id });
+assert.equal(afterSecondSelected.payload.list[0].exportCount, 2);
+assert.equal(afterSecondSelected.payload.list[0].firstExportedAt, afterSelected.payload.list[0].firstExportedAt);
+
+const exportedOnly = request('GET', '/console/api/invoices', null, 'u1', { exportStatus: 'exported' });
+assert.equal(exportedOnly.payload.total, 1);
+assert.equal(exportedOnly.payload.list[0].id, created.payload.application.id);
+const unexportedOnly = request('GET', '/console/api/invoices', null, 'u1', { exportStatus: 'unexported' });
+assert.equal(unexportedOnly.payload.total, 1);
+assert.equal(unexportedOnly.payload.list[0].id, second.payload.application.id);
+assert.equal(adminChecks, 10);
 
 fs.rmSync(dataDir, { recursive: true, force: true });
-console.log('发票接口检查通过：订单过滤、字段校验、提交、防重复、用户隔离、后台筛选和 CSV 安全导出。');
+console.log('发票接口检查通过：订单过滤、字段校验、防重复、后台筛选、CSV 安全导出、选中导出标记与重复导出计数。');
