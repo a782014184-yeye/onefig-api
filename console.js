@@ -1068,7 +1068,7 @@ window.saveOrder=async()=>{
 };
 
 /* ---------- 2. 素材管理 ---------- */
-let matView={series:null,hot:false},sortMode=false,MAT_DATA=null,dragI=-1;
+let matView={series:null,hot:false,featured:false},sortMode=false,MAT_DATA=null,dragI=-1;
 window.toggleSort=()=>{sortMode=!sortMode;dragI=-1;route()};
 window.fDrag=(e,i)=>{dragI=i;e.dataTransfer.effectAllowed='move'};
 window.fDrop=async(e,i)=>{e.preventDefault();if(dragI<0||dragI===i){dragI=-1;return}
@@ -1090,6 +1090,17 @@ H.materials=async()=>{
     <div class="panel" style="font-size:13px;color:#8b84a3;margin-bottom:16px">🏆 热门素材 TOP（按下载量）· 全库共 '+s.total+' 个素材，总下载 '+s.totalDownloads+' 次</div>\
     <div class="grid">'+hot.list.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' 次 · '+fmtSize(m.size)+' · '+esc(m.series.split('-')[1]||m.series)+'</div></div>').join('')+'</div>';
   }
+  if(matView.featured){
+    const starredSeries=s.series.filter(x=>x.featured);
+    const starredMats=[];s.series.forEach(x=>(x.materials||[]).forEach(m=>{if(m.featured&&!m.removed)starredMats.push(Object.assign({},m,{folder:x.folder}))}));
+    CUR_IMGS=starredMats.map(m=>({src:matImg(m),t:m.title}));
+    return '<div class="toolbar"><button class="btn btn-g" onclick="matView.featured=false;route()">← 返回</button><h2>⭐ 精选管理</h2><div class="sp"></div></div>\
+    <div class="panel" style="font-size:13px;color:#8b84a3;margin-bottom:16px">这里列出所有打过星的素材和文件夹：首页「精选素材」展示打星素材（最多 18 个），「精选合集」大卡展示打星文件夹（最多 4 个）；点「⭐ 取消精选」即移出首页。一个星都没有时，首页维持默认推荐不变。</div>\
+    <h3 style="font-size:15px;margin:14px 0 10px">📁 精选文件夹（'+starredSeries.length+'）</h3>\
+    '+(starredSeries.length?'<div class="grid">'+starredSeries.map(x=>'<div class="folder"><button class="btn btn-g f-edit" style="display:inline-block;color:#b45309;background:#fef3c7" onclick="toggleFeature(\\'series\\',\\''+x.folder+'\\',null,false)">⭐</button><div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.filter(m=>!m.removed).length+' 个素材</div></div>').join('')+'</div>':'<div class="sub" style="margin-bottom:6px">暂无打星文件夹：回到素材管理，悬停文件夹卡片点左上角 ☆ 即可添加</div>')+'\
+    <h3 style="font-size:15px;margin:18px 0 10px">🎨 精选素材（'+starredMats.length+'）</h3>\
+    '+(starredMats.length?'<div class="grid">'+starredMats.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t">'+esc(m.title)+'</div><div class="dl">'+esc(m.folder)+'</div><button class="btn btn-g btn-xs mat-del" style="display:inline-block;color:#b45309;background:#fef3c7" onclick="toggleFeature(\\'material\\',\\''+m.folder+'\\',\\''+m.title+'\\',false)">⭐ 取消精选</button></div>').join('')+'</div>':'<div class="sub">暂无打星素材：回到素材管理，悬停素材卡片点「☆ 精选」即可添加</div>');
+  }
   if(matView.series){
     const sd=s.series.find(x=>x.folder===matView.series) || {materials:[]};
     const ms=activeOf(sd);CUR_IMGS=ms.map(m=>({src:matImg(m),t:m.title}));
@@ -1102,7 +1113,7 @@ H.materials=async()=>{
     ? '<div class="panel" style="margin-top:18px"><h3 style="font-size:15px;margin-bottom:10px">🗑 下架记录（'+removed.list.length+'）</h3><div class="sub" style="margin-bottom:8px">下架只影响前台展示，历史下载的授权码仍可验真；同名重传或点「恢复上架」会保留原 ID。</div><table><tr><th>素材</th><th>系列</th><th>下架时间</th><th>操作</th></tr>'+removed.list.map(m=>'<tr><td><b>'+esc(m.title)+'</b></td><td>'+esc(m.series)+'</td><td>'+fmtT(m.removedAt)+'</td><td><button class="btn btn-g btn-xs" onclick="restoreMat(\\''+m.series+'\\',\\''+m.title+'\\')">↩️ 恢复上架</button> <button class="btn btn-d btn-xs" onclick="purgeMat(\\''+m.series+'\\',\\''+m.title+'\\')">彻底删除</button></td></tr>').join('')+'</table></div>'
     : '';
   const folders=s.series.filter(x=>x.materials.some(m=>!m.removed));
-  return '<div class="toolbar"><h2>🎨 素材管理</h2><div class="sp"></div>'+sortBtn()+'<button class="btn btn-g" onclick="matView.hot=true;route()">🏆 热门排行</button><button class="btn btn-p" onclick="addSeriesModal()">＋ 新建文件夹</button></div>\
+  return '<div class="toolbar"><h2>🎨 素材管理</h2><div class="sp"></div>'+sortBtn()+'<button class="btn btn-g" onclick="matView.featured=true;route()">⭐ 精选管理</button><button class="btn btn-g" onclick="matView.hot=true;route()">🏆 热门排行</button><button class="btn btn-p" onclick="addSeriesModal()">＋ 新建文件夹</button></div>\
   <div class="sub">'+(sortMode?'⇅ 排序模式：拖动文件夹换位，松手即保存，前台网站同步生效。点「✅ 完成排序」退出':'共 '+s.total+' 个素材 · 点击文件夹查看和管理')+'</div>\
   <div class="grid">'+folders.map((x,i)=>'<div class="folder'+(sortMode?' sorting':'')+'" '+(sortMode?'draggable="true" ondragstart="fDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="fDrop(event,'+i+')"':'onclick="matView.series=\\''+x.folder+'\\';route()"')+'>'+(sortMode?'':'<button class="btn btn-g f-edit" style="right:56px;'+(x.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="event.stopPropagation();toggleFeature(\\'series\\',\\''+x.folder+'\\',null,'+!x.featured+')">'+(x.featured?'⭐':'☆')+'</button><button class="btn btn-g f-edit" onclick="event.stopPropagation();renameSeriesModal(\\''+x.folder+'\\')">✏️</button>')+'<div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.filter(m=>!m.removed).length+' 个素材</div></div>').join('')+'</div>'+removedHtml;
 };
