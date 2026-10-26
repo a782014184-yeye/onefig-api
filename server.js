@@ -1196,6 +1196,7 @@ require('./pay')(app, { authUser, DATA_DIR, PLANS, CREDIT_PACKAGES, loadUsers, s
 // 发票申请：仅收集真实订单与购买方资料，开票项目/税率由财务人员在线下核定。
 require('./invoices')(app, {
   authUser,
+  consoleAuth,
   DATA_DIR,
   logLine,
   submitRateLimit: makeUserRateLimiter(10, 3600e3, '开票申请提交太频繁，请稍后再试'),

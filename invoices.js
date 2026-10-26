@@ -5,7 +5,7 @@ const crypto = require('crypto');
 // 发票申请：只保存用户申请与处理状态，不在网站侧选择税收分类、税率或直接开具发票。
 // 可开票范围按当前业务收敛为：单个素材授权、画板单次导出；会员/积分订单暂不混入。
 module.exports = function registerInvoices(app, deps) {
-  const { authUser, DATA_DIR, logLine, submitRateLimit } = deps;
+  const { authUser, consoleAuth, DATA_DIR, logLine, submitRateLimit } = deps;
   const CONSOLE_DIR = path.join(DATA_DIR, 'console');
   const ORDERS_FILE = path.join(CONSOLE_DIR, 'orders.json');
   const INVOICES_FILE = path.join(CONSOLE_DIR, 'invoices.json');
@@ -120,4 +120,73 @@ module.exports = function registerInvoices(app, deps) {
     if (logLine) logLine('invoice', `application-created id=${application.id} user=${req.user.id} order=${orderId} kind=${application.businessType}`);
     res.status(201).json({ ok: true, application: publicApplication(application) });
   });
+
+  // ---------- 管理后台：申请列表与批量导出（只读，不在这里改变开票状态） ----------
+  if (consoleAuth) {
+    const STATUSES = ['pending', 'issued', 'rejected', 'red_flushed'];
+    const consoleApplication = row => ({ ...publicApplication(row), userName: row.userName || '' });
+    const filteredApplications = query => {
+      const status = clean(query.status, 30);
+      const from = clean(query.from, 10);
+      const to = clean(query.to, 10);
+      const q = clean(query.q, 120).toLowerCase();
+      const ids = new Set(clean(query.ids, 12000).split(',').map(x => x.trim()).filter(Boolean).slice(0, 500));
+      return loadInvoices()
+        .filter(row => !ids.size || ids.has(row.id))
+        .filter(row => !STATUSES.includes(status) || row.status === status)
+        .filter(row => !/^\d{4}-\d{2}-\d{2}$/.test(from) || String(row.createdAt || '').slice(0, 10) >= from)
+        .filter(row => !/^\d{4}-\d{2}-\d{2}$/.test(to) || String(row.createdAt || '').slice(0, 10) <= to)
+        .filter(row => {
+          if (!q) return true;
+          return [row.id, row.orderId, row.orderTitle, row.title, row.taxId, row.email, row.userName]
+            .some(value => String(value || '').toLowerCase().includes(q));
+        })
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    };
+    const csvCell = value => {
+      let text = String(value == null ? '' : value).replace(/\r\n?/g, '\n');
+      // 防止 Excel 等表格软件把用户输入当作公式执行。
+      if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
+      return '"' + text.replace(/"/g, '""') + '"';
+    };
+
+    app.get('/console/api/invoices', consoleAuth, (req, res) => {
+      const rows = filteredApplications(req.query || {});
+      res.json({ ok: true, list: rows.slice(0, 1000).map(consoleApplication), total: rows.length });
+    });
+
+    app.get('/console/api/invoices/export', consoleAuth, (req, res) => {
+      const rows = filteredApplications(req.query || {}).slice(0, 5000);
+      const header = ['申请编号', '申请时间', '订单号', '业务类型', '订单内容', '金额（元）', '抬头类型', '发票抬头', '纳税人识别号', '发票类型', '接收邮箱', '用户昵称', '备注', '状态', '发票号码', '开具时间'];
+      const business = { MATERIAL_LICENSE: '素材使用授权', CANVAS_EXPORT: '画板导出服务' };
+      const status = { pending: '待处理', issued: '已开具', rejected: '已驳回', red_flushed: '已红冲' };
+      const lines = [header.map(csvCell).join(',')];
+      rows.forEach(row => {
+        lines.push([
+          row.id,
+          row.createdAt,
+          row.orderId,
+          business[row.businessType] || row.businessType,
+          row.orderTitle,
+          Number(row.amount).toFixed(2),
+          row.buyerType === 'company' ? '单位' : '个人',
+          row.title,
+          row.taxId || '',
+          row.invoiceType === 'special' ? '增值税专用发票' : '增值税普通发票',
+          row.email,
+          row.userName || '',
+          row.note || '',
+          status[row.status] || row.status,
+          row.invoiceNumber || '',
+          row.issuedAt || '',
+        ].map(csvCell).join(','));
+      });
+      const stamp = new Date().toISOString().slice(0, 10);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="invoice-applications-${stamp}.csv"`);
+      res.setHeader('Cache-Control', 'no-store');
+      res.send('\ufeff' + lines.join('\r\n'));
+      if (logLine) logLine('invoice', `applications-exported count=${rows.length}`);
+    });
+  }
 };

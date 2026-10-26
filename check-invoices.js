@@ -22,16 +22,21 @@ const authUser = (req, res, next) => {
   req.user = { id: req.headers['x-test-user'] || 'u1', name: '测试用户' };
   next();
 };
-registerInvoices(app, { authUser, DATA_DIR: dataDir, submitRateLimit: (req, res, next) => next() });
+let adminChecks = 0;
+const consoleAuth = (req, res, next) => { adminChecks++; next(); };
+registerInvoices(app, { authUser, consoleAuth, DATA_DIR: dataDir, submitRateLimit: (req, res, next) => next() });
 
-function request(method, route, body, userId = 'u1') {
+function request(method, route, body, userId = 'u1', query = {}) {
   const handlers = routes.get(`${method} ${route}`);
   assert.ok(handlers, `missing route ${method} ${route}`);
-  const req = { headers: { 'x-test-user': userId }, body: body || {} };
+  const req = { headers: { 'x-test-user': userId }, body: body || {}, query };
   const res = {
     statusCode: 200,
+    headers: {},
     status(code) { this.statusCode = code; return this; },
     json(payload) { this.payload = payload; return this; },
+    setHeader(name, value) { this.headers[name] = value; },
+    send(payload) { this.payload = payload; return this; },
   };
   let index = 0;
   const next = () => handlers[index++](req, res, next);
@@ -75,5 +80,31 @@ const after = request('GET', '/api/invoices');
 assert.deepEqual(after.payload.orders.map(order => order.id), ['export-paid']);
 assert.equal(after.payload.applications.length, 1);
 
+const second = request('POST', '/api/invoices', {
+  ...valid,
+  orderId: 'export-paid',
+  buyerType: 'personal',
+  title: '=HYPERLINK("bad")',
+  taxId: '',
+  invoiceType: 'normal',
+});
+assert.equal(second.statusCode, 201);
+
+const adminList = request('GET', '/console/api/invoices', null, 'u1', { q: '杭州示例' });
+assert.equal(adminList.payload.total, 1);
+assert.equal(adminList.payload.list[0].title, '杭州示例科技有限公司');
+assert.equal(adminList.payload.list[0].taxId, valid.taxId);
+
+const adminFiltered = request('GET', '/console/api/invoices', null, 'u1', { status: 'issued' });
+assert.equal(adminFiltered.payload.total, 0);
+
+const exported = request('GET', '/console/api/invoices/export', null, 'u1', {});
+assert.match(exported.headers['Content-Type'], /text\/csv/);
+assert.ok(exported.payload.startsWith('\ufeff'));
+assert.ok(exported.payload.includes('申请编号'));
+assert.ok(exported.payload.includes('91330102MAKM5NHF44'));
+assert.ok(exported.payload.includes("'=HYPERLINK"), 'CSV 公式注入必须被转义');
+assert.equal(adminChecks, 3);
+
 fs.rmSync(dataDir, { recursive: true, force: true });
-console.log('发票接口检查通过：订单过滤、字段校验、提交、防重复和用户隔离。');
+console.log('发票接口检查通过：订单过滤、字段校验、提交、防重复、用户隔离、后台筛选和 CSV 安全导出。');
