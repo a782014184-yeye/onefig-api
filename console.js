@@ -1339,7 +1339,6 @@ window.galleryMore=async()=>{
 /* ---------- 9. 发票管理：申请资料筛选与批量导出 ---------- */
 let INV_ROWS=[],INV_SELECTED=new Set();
 const INV_FILTER={status:'all',exportStatus:'all',from:'',to:'',q:''};
-const INV_STATUS={pending:['待处理','tag new'],issued:['已开具','tag done2'],rejected:['已驳回','tag'],red_flushed:['已红冲','tag']};
 function invQuery(mode){
   const p=new URLSearchParams();
   if(mode==='selected')p.set('ids',Array.from(INV_SELECTED).join(','));
@@ -1357,7 +1356,6 @@ H.invoices=async()=>{
   const d=await api('/console/api/invoices?'+invQuery('filter'));
   INV_ROWS=d.list;
   const rows=INV_ROWS.length?INV_ROWS.map(r=>{
-    const st=INV_STATUS[r.status]||[r.status,'tag'];
     const checked=INV_SELECTED.has(r.id)?' checked':'';
     const business=r.businessType==='MATERIAL_LICENSE'?'素材使用授权':'画板导出服务';
     const buyer=r.buyerType==='company'?'单位':'个人';
@@ -1366,10 +1364,10 @@ H.invoices=async()=>{
       +'<td><b>'+esc(r.title)+'</b><div class="sub" style="margin:4px 0 0">'+esc(r.taxId||'个人抬头')+'</div><div style="font-size:12px;color:#8b84a3;margin-top:3px">'+esc(r.email)+'</div></td>'
       +'<td><b>'+esc(r.orderTitle)+'</b><div style="font-size:12px;color:#8b84a3;margin-top:4px">'+business+' · '+esc(r.orderId)+'</div></td>'
       +'<td>'+buyer+'<div style="font-size:12px;color:#8b84a3;margin-top:4px">'+(r.invoiceType==='special'?'专用发票':'普通发票')+'</div></td>'
-      +'<td><b>'+yuan(r.amount)+'</b></td><td><span class="'+st[1]+'">'+esc(st[0])+'</span></td>'
+      +'<td><b>'+yuan(r.amount)+'</b></td>'
       +'<td><span class="'+(exported?'tag done2':'tag')+'">'+(exported?'已导出':'未导出')+'</span><div style="font-size:11px;color:#8b84a3;margin-top:4px">'+(exported?fmtT(r.lastExportedAt)+' · 第 '+(r.exportCount||1)+' 次':'—')+'</div></td>'
       +'<td style="white-space:nowrap">'+fmtT(r.createdAt)+'<div style="font-size:11px;color:#8b84a3;margin-top:4px">'+esc(r.id)+'</div></td></tr>';
-  }).join(''):'<tr><td colspan="8" style="text-align:center;color:#b0aac4;padding:28px">当前筛选条件下没有开票申请</td></tr>';
+  }).join(''):'<tr><td colspan="7" style="text-align:center;color:#b0aac4;padding:28px">当前筛选条件下没有开票申请</td></tr>';
   return '<div class="toolbar"><h2>🧾 发票管理</h2><div class="sp"></div><button class="btn btn-g" onclick="route()">🔄 刷新</button></div>'
     +'<div class="panel"><div class="toolbar">'
     +'<select id="inv-status"><option value="all"'+(INV_FILTER.status==='all'?' selected':'')+'>全部状态</option><option value="pending"'+(INV_FILTER.status==='pending'?' selected':'')+'>待处理</option><option value="issued"'+(INV_FILTER.status==='issued'?' selected':'')+'>已开具</option><option value="rejected"'+(INV_FILTER.status==='rejected'?' selected':'')+'>已驳回</option><option value="red_flushed"'+(INV_FILTER.status==='red_flushed'?' selected':'')+'>已红冲</option></select>'
@@ -1379,7 +1377,7 @@ H.invoices=async()=>{
     +'<button class="btn btn-p" onclick="invSearch()">查询</button><button class="btn btn-g" onclick="invReset()">重置</button></div>'
     +'<div class="toolbar" style="margin-bottom:0"><span class="sub" style="margin:0">共 '+d.total+' 条申请；选中导出后自动标记为已导出</span><div class="sp"></div>'
     +'<button class="btn btn-g" onclick="invExport(\\'filter\\')">下载筛选结果</button><button class="btn btn-p" id="inv-selected-btn" onclick="invExport(\\'selected\\')">'+invSelectedText()+'</button></div></div>'
-    +'<div class="panel" style="overflow:auto"><table><tr><th><input type="checkbox" onchange="invToggleAll(this.checked)" title="全选当前列表"></th><th>购买方 / 接收邮箱</th><th>订单 / 业务类型</th><th>抬头 / 发票类型</th><th>金额</th><th>状态</th><th>导出状态</th><th>申请时间 / 编号</th></tr>'+rows+'</table></div>';
+    +'<div class="panel" style="overflow:auto"><table><tr><th><input type="checkbox" onchange="invToggleAll(this.checked)" title="全选当前列表"></th><th>购买方 / 接收邮箱</th><th>订单 / 业务类型</th><th>抬头 / 发票类型</th><th>金额</th><th>导出状态</th><th>申请时间 / 编号</th></tr>'+rows+'</table></div>';
 };
 window.invSearch=()=>{
   INV_FILTER.status=document.getElementById('inv-status').value;
