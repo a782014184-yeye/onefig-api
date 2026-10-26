@@ -1063,7 +1063,7 @@ app.get('/api/verify', verifyRateLimit, optionalAuth, (req, res) => {
     if (!hit) return res.json({ ok: false, error: '授权码不存在' });
     const data = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), []);
     let mat = null;
-    for (const s of data) for (const m of s.materials) if (m.id === hit.materialId) { mat = { title: m.title, series: m.series || s.folder, removed: !!m.removed }; break; }
+    for (const s of data) for (const m of s.materials) if (m.id === hit.materialId) { mat = { title: m.title, series: m.series || s.folder, removed: !!m.removed, file: m.file || (m.title + '.png'), folder: s.folder, local: !!m.local }; break; }
     // 兼容历史记录：没有快照的旧下载流水也能从「系列/标题」还原出可读名称（2026-10-24）
     const idParts = String(hit.materialId || '').split('/');
     const fallbackTitle = hit.materialTitle || idParts[idParts.length - 1] || hit.materialId;
@@ -1108,12 +1108,25 @@ app.get('/api/verify', verifyRateLimit, optionalAuth, (req, res) => {
     const isExport = hit.kind === 'export';
     // 下架/改名/替换不影响授权码有效性；只额外告知素材当前状态，不把"下架"误报成"授权失效"
     const materialStatus = isExport ? 'active' : (mat ? (mat.removed ? 'removed' : 'active') : 'missing');
+    // 证书配图（2026-10-26）：导出用下载时保存的缩略图快照（画板删除也可显示），素材用公开预览图
+    let image = null;
+    if (isExport) {
+      image = hit.thumb || null;
+      if (!image && hit.boardId) {
+        try { image = loadBoardIndex(hit.userId).boards.find(b => b.id === hit.boardId)?.thumb || null; } catch {}
+      }
+    } else if (mat) {
+      image = mat.local
+        ? '/files/' + encodeURIComponent(mat.folder) + '/' + encodeURIComponent(mat.file)
+        : '/previews/' + encodeURIComponent(mat.folder) + '/' + encodeURIComponent(mat.file.replace(/\.png$/, '.webp'));
+    }
     res.json({
       ok: true,
       code,
       material: isExport ? ('画板导出作品' + (hit.boardTitle ? '：' + hit.boardTitle : '')) : (mat ? mat.title : fallbackTitle),
       series: isExport ? '画板导出' : (mat ? mat.series : fallbackSeries),
       materialStatus,
+      image,
       licensee,
       qTotal, qBy,
       scope: '学术发表（期刊论文、学术会议、学位论文、学术海报、图文摘要），仅限非商业用途',
