@@ -217,8 +217,23 @@ function logLine(type, line) {
   const f = path.join(LOG_DIR, `${type}-${new Date().toISOString().slice(0, 10)}.log`);
   fs.appendFile(f, new Date().toISOString() + ' ' + line + '\n', () => {});
 }
-process.on('uncaughtException', e => logLine('error', 'uncaughtException ' + (e && e.stack || e)));
-process.on('unhandledRejection', e => logLine('error', 'unhandledRejection ' + (e && e.stack || e)));
+// 未捕获异常后内部状态不再可信：停止接入新请求，短暂收尾后退出，由 systemd 拉起干净进程。
+// 不能把这类异常当普通业务 4xx/5xx 继续运行，尤其本服务涉及支付、积分和文件写入。
+let fatalShuttingDown = false;
+function fatalShutdown(kind, error) {
+  if (fatalShuttingDown) return;
+  fatalShuttingDown = true;
+  const detail = error && error.stack ? error.stack : String(error);
+  console.error(`[fatal] ${kind}: ${detail}`);
+  logLine('error', `${kind} ${detail}; draining for up to 10s before exit`);
+  const forceExit = setTimeout(() => process.exit(1), 10_000);
+  httpServer.close(() => {
+    clearTimeout(forceExit);
+    process.exit(1);
+  });
+}
+process.on('uncaughtException', error => fatalShutdown('uncaughtException', error));
+process.on('unhandledRejection', error => fatalShutdown('unhandledRejection', error));
 app.use((req, res, next) => {
   const t0 = Date.now();
   res.on('finish', () => {
@@ -1340,7 +1355,7 @@ app.post('/console/api/materials/upload', consoleAuth, (req, res) => {
   });
 });
 
-app.listen(PORT, () => console.log(`OneFig API listening on :${PORT}`));
+const httpServer = app.listen(PORT, () => console.log(`OneFig API listening on :${PORT}`));
 
 // ---- 位图转 SVG 矢量（服务器本地 vtracer；2026-10-21 规则：红果/金果免费不限次，
 //      普通/青果每天 5 次免费（北京时间 00:00 重置），超出 10 积分/次，失败退还）----
