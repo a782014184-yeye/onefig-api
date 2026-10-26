@@ -688,58 +688,17 @@ module.exports = function registerAI(app, deps) {
     res.send(buf);
   });
 
-  // ---- 积分购买订单（半自动收款：下单 → 转账 → 后台确认 → 积分到账） ----
-  app.post('/api/ai/credit-orders', authUser, (req, res) => {
-    const pkg = CREDIT_PACKAGES.find(p => p.id === (req.body || {}).pkg);
-    if (!pkg) return res.status(400).json({ ok: false, error: '无效的积分套餐' });
-    const cos = loadCO();
-    const pending = cos.find(o => o.userId === req.user.id && o.status === 'pending' && o.pkg === pkg.id);
-    if (pending) return res.json({ ok: true, order: pending, existed: true });
-    const order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, pkg: pkg.id, credits: pkg.credits, amount: pkg.price, status: 'pending', createdAt: new Date().toISOString(), paidAt: null };
-    cos.push(order);
-    saveCO(cos);
-    res.json({ ok: true, order });
-  });
-
-  app.post('/api/ai/credit-orders/:id/notify-paid', authUser, (req, res) => {
-    const cos = loadCO();
-    const o = cos.find(x => x.id === req.params.id && x.userId === req.user.id);
-    if (!o) return res.status(404).json({ ok: false });
-    if (o.status === 'pending') o.status = 'notified';
-    saveCO(cos);
-    res.json({ ok: true, order: o });
-  });
-
+  // ---- 积分购买：已全部走在线支付（pay.js creditPkg），人工转账下单/通知接口 2026-10-26 下线 ----
   app.get('/api/ai/my/credit-orders', authUser, (req, res) => {
     res.json({ ok: true, list: loadCO().filter(o => o.userId === req.user.id).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)) });
   });
 
-  // ---- 后台：积分订单管理 + 手工调积分 ----
+  // ---- 后台：积分订单管理（只读）+ 手工调积分 ----
   app.get('/console/api/credit-orders', consoleAuth, (req, res) => {
     let list = loadCO();
     if (req.query.status) list = list.filter(o => req.query.status.split(',').includes(o.status));
     list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     res.json({ ok: true, list });
-  });
-
-  app.post('/console/api/credit-orders/:id/confirm', consoleAuth, (req, res) => {
-    const cos = loadCO();
-    const o = cos.find(x => x.id === req.params.id);
-    if (!o) return res.status(404).json({ ok: false });
-    if (o.status === 'paid') return res.json({ ok: true, order: o });
-    o.status = 'paid';
-    o.paidAt = new Date().toISOString();
-    const users = loadUsers();
-    const u = users.find(x => x.id === o.userId);
-    if (u) {
-      u.credits = (u.credits || 0) + o.credits;
-      // 用户自己充值：积分流水操作者记用户本人（2026-09-23）
-      const logs = loadJSON(path.join(AI_DIR, 'credit-log.json'), []);
-      logs.push({ userId: u.id, name: u.name, delta: o.credits, reason: '积分充值', time: new Date().toISOString(), by: u.name });
-      saveJSON(path.join(AI_DIR, 'credit-log.json'), logs);
-    }
-    saveCO(cos); if (u) saveUsers(users);
-    res.json({ ok: true, order: o });
   });
 
   app.delete('/console/api/credit-orders/:id', consoleAuth, (req, res) => {

@@ -244,8 +244,6 @@ const USERS_FILE = path.join(CONSOLE_DIR, 'users.json');
 const ORDERS_FILE = path.join(CONSOLE_DIR, 'orders.json');
 const PURCHASES_FILE = path.join(CONSOLE_DIR, 'purchases.json');
 const PLANS = { basic: { name: '青果会员', price: 29.9 }, pro: { name: '红果会员', price: 99.9 }, team: { name: '金果会员', price: 299.9 } };
-// 收款信息（微信支付），后台可改
-const PAY_FILE = path.join(CONSOLE_DIR, 'payinfo.json');
 
 function loadJSON(f, d) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } }
 function saveJSON(f, rows) { const t = f + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, f); }
@@ -608,32 +606,8 @@ app.get('/api/me', authUser, (req, res) => {
   });
 });
 
-app.get('/api/payinfo', (req, res) => {
-  const p = loadJSON(PAY_FILE, { wechat: '', alipay: '', note: '转账时备注你的注册邮箱，方便确认' });
-  res.json({ ok: true, ...p });
-});
-
-// 下单（需登录），生成待支付订单
-app.post('/api/orders', authUser, (req, res) => {
-  const plan = String((req.body || {}).plan || '');
-  if (!PLANS[plan]) return res.status(400).json({ ok: false, error: '无效的会员类型' });
-  const orders = loadOrders();
-  const pending = orders.find(o => o.userId === req.user.id && o.status === 'pending' && o.plan === plan);
-  if (pending) return res.json({ ok: true, order: pending, existed: true });
-  const order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: PLANS[plan].price, status: 'pending', channel: '在线下单', createdAt: new Date().toISOString(), paidAt: null };
-  orders.push(order);
-  saveOrders(orders);
-  res.json({ ok: true, order });
-});
-
-app.post('/api/orders/:id/notify-paid', authUser, (req, res) => {
-  const orders = loadOrders();
-  const o = orders.find(x => x.id === req.params.id && x.userId === req.user.id);
-  if (!o) return res.status(404).json({ ok: false });
-  if (o.status === 'pending') o.status = 'notified';
-  saveOrders(orders);
-  res.json({ ok: true, order: o });
-});
+// 人工收款信息展示、手动下单与「我已转账」通知接口已于 2026-10-26 下线：
+// 会员与积分购买全部走 pay.js 在线下单/回调，订单状态轮询接口保留
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));
 
@@ -1219,6 +1193,13 @@ function aiFreeLeft(u) {
 
 // 在线支付：微信 Native 扫码 + 支付宝电脑网站支付（2026-10-08；2026-10-17 起同时支持积分充值）
 require('./pay')(app, { authUser, DATA_DIR, PLANS, CREDIT_PACKAGES, loadUsers, saveUsers, logLine });
+// 发票申请：仅收集真实订单与购买方资料，开票项目/税率由财务人员在线下核定。
+require('./invoices')(app, {
+  authUser,
+  DATA_DIR,
+  logLine,
+  submitRateLimit: makeUserRateLimiter(10, 3600e3, '开票申请提交太频繁，请稍后再试'),
+});
 
 // SEO 公开页：sitemap.xml + 素材详情页 /m/ + 系列页 /s/（服务端直出）
 require('./seo')(app, { esc, DATA_DIR });

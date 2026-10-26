@@ -6,7 +6,6 @@ const { execSync } = require('child_process');
 const { checkConsoleInline } = require('./ops/console-inline-lib.cjs');
 
 const PLANS = { basic: '青果会员', pro: '红果会员', team: '金果会员' };
-const PLAN_PRICE = { basic: 29.9, pro: 99.9, team: 299.9 };
 
 module.exports = function registerConsole(app, deps) {
   const { consoleAuth, esc, DATA_DIR } = deps;
@@ -349,50 +348,13 @@ module.exports = function registerConsole(app, deps) {
     res.json({ ok: true, removed: rows.length - kept.length });
   });
 
-  app.post('/console/api/orders', consoleAuth, (req, res) => {
-    const { userName, contact, plan, amount, paidAt } = req.body || {};
-    if (!userName || !PLANS[plan]) return res.status(400).json({ ok: false, error: '请填写用户昵称和会员类型' });
-    const amt = Math.max(0, Number(amount) || PLAN_PRICE[plan]);
-    const users = load('users.json', []);
-    const orders = load('orders.json', []);
-    let u = users.find(x => x.name === String(userName).trim() && (contact ? x.contact === String(contact).trim() : true));
-    if (!u) {
-      u = { id: crypto.randomUUID(), name: String(userName).trim(), contact: String(contact || '').trim(), level: 'none', joinedAt: new Date().toISOString(), memberSince: null, notes: '' };
-      users.push(u);
-    }
-    u.level = plan;
-    if (!u.memberSince) u.memberSince = new Date().toISOString();
-    const granted = grantMemberCredits(u, plan);
-    if (granted) logCredit(u, granted, '开通' + PLANS[plan] + '赠送');
-    const order = { id: crypto.randomUUID(), userId: u.id, userName: u.name, plan, amount: amt, status: 'paid', paidAt: paidAt ? new Date(paidAt).toISOString() : new Date().toISOString(), channel: '手动记录' };
-    orders.push(order);
-    save('users.json', users); save('orders.json', orders);
-    res.json({ ok: true, order });
-  });
-
-  // 在线订单：待确认列表 + 一键确认收款（自动升级会员）
+  // 在线订单列表（只读）。手动录单/确认收款/收款设置接口已于 2026-10-26 下线：
+  // 微信/支付宝在线支付回调自动开通会员与积分，不再提供人工开通入口
   app.get('/console/api/orders', consoleAuth, (req, res) => {
     let orders = load('orders.json', []);
     if (req.query.status) orders = orders.filter(o => req.query.status.split(',').includes(o.status));
     orders.sort((a, b) => (a.createdAt || '') < (b.createdAt || '') ? 1 : -1);
     res.json({ ok: true, list: orders });
-  });
-
-  app.post('/console/api/orders/:id/confirm', consoleAuth, (req, res) => {
-    // 升级逻辑与在线支付回调共用（pay.js markOrderPaid，幂等）：2026-10-08 起不再各自实现
-    const result = require('./pay').markOrderPaid(DATA_DIR, req.params.id);
-    if (!result) return res.status(404).json({ ok: false });
-    res.json({ ok: true, order: result.order });
-  });
-
-  // 收款信息设置（网站付款页展示）
-  app.get('/console/api/payinfo', consoleAuth, (req, res) => {
-    res.json({ ok: true, ...load('payinfo.json', { wechat: '', alipay: '', note: '转账时备注你的注册邮箱，方便确认' }) });
-  });
-  app.put('/console/api/payinfo', consoleAuth, (req, res) => {
-    const { wechat, alipay, note } = req.body || {};
-    save('payinfo.json', { wechat: String(wechat || '').slice(0, 100), alipay: String(alipay || '').slice(0, 100), note: String(note || '').slice(0, 200) });
-    res.json({ ok: true });
   });
 
   // ---- AI 提示词集中管理（2026-10-22）：读取/保存，保存即生效、无需重启 ----
