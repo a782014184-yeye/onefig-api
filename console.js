@@ -769,6 +769,7 @@ module.exports = function registerConsole(app, deps) {
 const OSS = 'http://onefig.oss-cn-hangzhou.aliyuncs.com/previews/';
 
 const PAGE = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>无花有果 · 管理后台</title>
+<link rel="icon" type="image/png" href="/brand/icon.png">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#f6f4fb;color:#3d3a4b;display:flex;min-height:100vh}
@@ -901,7 +902,7 @@ select:focus,input:focus{border-color:#a78bfa}
 @media(max-width:760px){.side{width:60px;padding:14px 6px}.side .brand{font-size:0}.side a{font-size:0;justify-content:center}.side a .ic{font-size:18px}.main{padding:16px}}
 </style></head><body>
 <div class="side">
-  <div class="brand" style="display:flex;align-items:center;justify-content:center;gap:8px"><img src="http://onefig.oss-cn-hangzhou.aliyuncs.com/brand/icon.png" style="width:30px;height:30px;object-fit:contain;border-radius:8px;background:#fff;padding:2px">无花有果 后台</div>
+  <div class="brand" style="display:flex;align-items:center;justify-content:center;gap:8px"><img src="/brand/icon.png" style="width:30px;height:30px;object-fit:contain;border-radius:8px;background:#fff;padding:2px">无花有果 后台</div>
   <a href="#/dashboard" data-r="dashboard"><span class="ic">📊</span>数据看板</a>
   <a href="#/materials" data-r="materials"><span class="ic">🎨</span>素材管理</a>
   <a href="#/users" data-r="users"><span class="ic">👥</span>账号管理</a>
@@ -916,7 +917,7 @@ select:focus,input:focus{border-color:#a78bfa}
 <div class="modal-mask" id="mask"><div class="modal" id="modal"></div></div>
 <div class="toast" id="toast"></div>
 <div class="login-mask" id="loginMask"><div class="login-card">
-  <img src="http://onefig.oss-cn-hangzhou.aliyuncs.com/brand/icon.png" style="width:48px;height:48px;border-radius:12px;background:#f6f4fb;padding:4px;object-fit:contain">
+  <img src="/brand/icon.png" style="width:48px;height:48px;border-radius:12px;background:#f6f4fb;padding:4px;object-fit:contain">
   <h1>无花有果 · 管理后台</h1>
   <div class="sub">请登录后使用</div>
   <div class="login-err" id="loginErr"></div>
@@ -945,13 +946,6 @@ window.doLogin=async()=>{
     document.getElementById('loginMask').style.display='none';route();
   }catch(e){err.textContent='网络错误，稍后再试'}
 };
-window.payModal=async()=>{const p=await api('/console/api/payinfo').catch(()=>({wechat:'',alipay:'',note:''}));
-  showModal('<h3>收款设置</h3>\
-  <div class="row"><label>微信号（显示给付款粉丝）</label><input id="m-wx" value="'+esc(p.wechat||'')+'" placeholder="你的微信号"></div>\
-  <div class="row"><label>支付宝账号</label><input id="m-zfb" value="'+esc(p.alipay||'')+'" placeholder="你的支付宝"></div>\
-  <div class="row"><label>转账提示语</label><input id="m-note" value="'+esc(p.note||'')+'" placeholder="例如：转账请备注注册邮箱"></div>\
-  <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="savePay()">保存</button></div>')};
-window.savePay=async()=>{try{await api('/console/api/payinfo',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({wechat:document.getElementById('m-wx').value.trim(),alipay:document.getElementById('m-zfb').value.trim(),note:document.getElementById('m-note').value.trim()})});closeModal();toast('已保存 ✅')}catch(e){toast(e.message)}};
 function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2200)}
 async function api(u,opt){
   opt=opt||{};opt.headers=Object.assign({},opt.headers,{Authorization:'Bearer '+getTK()});
@@ -1042,7 +1036,7 @@ H.dashboard=async()=>{
     '+cs.byPkg.map(p=>'<div class="kpi"><div class="lbl">💠 '+p.name+' 套餐</div><div class="num">'+yuan(p.revenue)+'</div><div class="chips"><span class="chip">'+p.count+' 笔</span><span class="chip">'+p.credits+' 积分</span></div></div>').join('')+'\
   </div>\
   <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">⚡ 每日购买积分数</h3><div class="sp"></div>'+crBtns+'</div>'+chart(cs.days,'credits','linear-gradient(180deg,#fbbf24,#f59e0b)',v=>v+'分')+'</div>'):'';
-  return '<div class="toolbar"><h2>📊 数据看板</h2><div class="sp"></div><button class="btn btn-g" onclick="payModal()">💳 收款设置</button><button class="btn btn-p" onclick="orderModal()">＋ 记一笔订单</button></div>\
+  return '<div class="toolbar"><h2>📊 数据看板</h2><div class="sp"></div></div>\
   <div class="cards">\
     <div class="kpi"><div class="lbl">总用户</div><div class="num">'+s.totalUsers+'</div><div class="chips"><span class="chip" style="color:#2f9e5f">🟢 当前在线 '+s.online+' 人</span></div></div>\
     <div class="kpi"><div class="lbl">🟢 青果会员</div><div class="num">'+s.levelCount.basic+'</div></div>\
@@ -1055,17 +1049,6 @@ H.dashboard=async()=>{
 };
 window.setRange=r=>{window._range=r;route()};
 window.setCRange=r=>{window._crange=r;route()};
-
-window.orderModal=()=>showModal('<h3>记一笔订单</h3>\
-  <div class="row"><label>用户昵称 *</label><input id="m-name" placeholder="粉丝昵称"></div>\
-  <div class="row"><label>联系方式</label><input id="m-contact" placeholder="微信/邮箱（选填）"></div>\
-  <div class="row"><label>会员类型 *</label><select id="m-plan"><option value="basic">青果会员 ¥29</option><option value="pro">红果会员 ¥99</option><option value="team">金果会员 ¥299</option></select></div>\
-  <div class="row"><label>实收金额（元）</label><input id="m-amt" type="number" placeholder="留空按标价"></div>\
-  <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="saveOrder()">保存</button></div>');
-window.saveOrder=async()=>{
-  const body={userName:document.getElementById('m-name').value.trim(),contact:document.getElementById('m-contact').value.trim(),plan:document.getElementById('m-plan').value,amount:document.getElementById('m-amt').value};
-  try{await api('/console/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});closeModal();toast('已记录 ✅');route()}catch(e){toast(e.message)}
-};
 
 /* ---------- 2. 素材管理 ---------- */
 let matView={series:null,hot:false,featured:false},sortMode=false,MAT_DATA=null,dragI=-1;
@@ -1165,8 +1148,8 @@ H.users=async()=>{
     <td>'+(u.credits||0)+' ⚡</td>\
     <td>'+(u.memberSince?esc(u.memberSince.slice(0,10)):'—')+'</td><td>'+u.orderCount+' 笔</td><td><b>'+yuan(u.totalPaid)+'</b></td>\
     <td><button class="btn btn-g btn-xs" onclick="userDetail(\\''+u.id+'\\')">详情</button></td></tr>').join('')
-    ||'<tr><td colspan="8" style="color:#b0aac4;text-align:center;padding:24px">暂无用户，点「记一笔订单」会自动创建</td></tr>';
-  return '<div class="toolbar"><h2>👥 账号管理</h2><div class="sp"></div><input placeholder="搜索昵称/邮箱" value="'+esc(userQ)+'" onchange="userQ=this.value;route()" style="width:200px"><button class="btn btn-g" onclick="creditLogModal()">⚡ 积分流水</button><button class="btn btn-p" onclick="orderModal()">＋ 记一笔订单</button></div>\
+    ||'<tr><td colspan="8" style="color:#b0aac4;text-align:center;padding:24px">暂无用户</td></tr>';
+  return '<div class="toolbar"><h2>👥 账号管理</h2><div class="sp"></div><input placeholder="搜索昵称/邮箱" value="'+esc(userQ)+'" onchange="userQ=this.value;route()" style="width:200px"><button class="btn btn-g" onclick="creditLogModal()">⚡ 积分流水</button></div>\
   <div class="panel"><table><tr><th>昵称</th><th>邮箱</th><th>会员等级</th><th>AI积分</th><th>开通时间</th><th>订单</th><th>累计付款</th><th></th></tr>'+rows+'</table></div>';
 };
 window.creditLogModal=async()=>{const d=await api('/console/api/credit-log').catch(()=>({list:[]}));const rows=d.list.map(l=>'<tr><td>'+fmtT(l.time)+'</td><td><b>'+esc(l.name||'')+'</b></td><td style="color:'+(l.delta>0?'#2f9e5f':'#d6336c')+';font-weight:600">'+(l.delta>0?'+':'')+l.delta+'</td><td>'+esc(l.reason||'')+'</td><td>'+esc(l.by||'')+'</td></tr>').join('')||'<tr><td colspan="5" style="text-align:center;color:#b0aac4;padding:20px">暂无流水</td></tr>';
