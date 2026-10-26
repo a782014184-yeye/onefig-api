@@ -1005,6 +1005,9 @@ app.get('/api/download', authUser, (req, res) => {
 app.get('/api/my/downloads', authUser, (req, res) => {
   try {
     const logs = loadJSON(DOWNLOADS_FILE, []).filter(l => l.userId === req.user.id);
+    // 画板缩略图：供「我的下载」导出记录左侧预览（2026-10-26）；画板已删除的旧记录返回 null，前端用图标兜底
+    const bidx = loadBoardIndex(req.user.id);
+    const thumbByBoard = new Map(bidx.boards.map(b => [b.id, b.thumb || null]));
     const data = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), []);
     const map = new Map();
     for (const s of data) for (const m of s.materials) map.set(m.id, { s, m });
@@ -1018,6 +1021,7 @@ app.get('/api/my/downloads', authUser, (req, res) => {
           kind: 'export',
           title: l.boardTitle || '画板导出作品',
           boardId: l.boardId || '',
+          thumb: thumbByBoard.get(l.boardId) || null,
           time: l.time,
           code: l.code || null,
         });
