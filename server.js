@@ -1058,6 +1058,7 @@ app.get('/api/my/downloads', authUser, (req, res) => {
         file: hit ? (hit.m.file || (hit.m.title + '.png')) : undefined,
         folder: hit ? hit.s.folder : series,
         series,
+        local: hit ? !!hit.m.local : false, // 本地上传素材必须用 /files，缺失此字段会误走公开预览
         time: l.time,
         code: l.code || null, // 授权码（旧记录无码时前端会显示临时码）
         removed: hit ? !!hit.m.removed : true,
