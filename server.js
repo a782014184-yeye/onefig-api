@@ -159,8 +159,33 @@ function makeRateLimiter(max, windowMs, msg) {
 }
 const submitRateLimit = makeRateLimiter(5, 10 * 60 * 1000, '提交太频繁啦，请 10 分钟后再试');
 const authRateLimit = makeRateLimiter(20, 10 * 60 * 1000, '尝试太频繁啦，请 10 分钟后再试');
-// 登录专用更严（2026-10-20 应要求收紧）：6 次/10 分钟，配合 P0-2 的真实 IP 计数，爆破基本不可行
-const loginRateLimit = makeRateLimiter(6, 10 * 60 * 1000, '密码错误次数太多，请 10 分钟后再试（忘记密码可用邮箱找回）');
+// 登录只统计密码失败：正常切换账号、成功登录不消耗失败额度。
+// 账号+IP 6 次/10 分钟，成功即清零；同 IP 合计 30 次/10 分钟，防止换邮箱喷洒。
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const loginFailures = new Map();
+const loginAccountKey = (req) => `account:${clientIp(req)}:${String((req.body || {}).email || '').trim().toLowerCase()}`;
+const loginIpKey = (req) => `ip:${clientIp(req)}`;
+const loginHitCount = (key, now) => (loginFailures.get(key) || []).filter(t => now - t < LOGIN_WINDOW_MS).length;
+function loginRateLimit(req, res, next) {
+  const now = Date.now();
+  sweepStale(loginFailures, LOGIN_WINDOW_MS, now);
+  if (loginHitCount(loginAccountKey(req), now) >= 6) {
+    return res.status(429).json({ ok: false, error: '密码错误次数太多，请 10 分钟后再试（忘记密码可用邮箱找回）' });
+  }
+  if (loginHitCount(loginIpKey(req), now) >= 30) {
+    return res.status(429).json({ ok: false, error: '当前网络登录失败次数过多，请 10 分钟后再试' });
+  }
+  next();
+}
+function recordLoginFailure(req) {
+  const now = Date.now();
+  for (const key of [loginAccountKey(req), loginIpKey(req)]) {
+    const rec = (loginFailures.get(key) || []).filter(t => now - t < LOGIN_WINDOW_MS);
+    rec.push(now);
+    loginFailures.set(key, rec);
+  }
+}
+function clearLoginFailures(req) { loginFailures.delete(loginAccountKey(req)); }
 const trackRateLimit = makeRateLimiter(60, 10 * 60 * 1000, '请求太频繁，请稍后再试');
 
 // ---- 按用户限流（2026-10-20）：登录接口按 user.id 计数，不受换 IP 影响；需放在 authUser 之后使用 ----
@@ -411,9 +436,11 @@ app.post('/api/auth/login', loginRateLimit, async (req, res) => {
   const password = String((req.body || {}).password || '');
   const u = loadUsers().find(x => x.email === email);
   if (!u || !u.passHash || crypto.scryptSync(password, u.salt, 32).toString('hex') !== u.passHash) {
+    recordLoginFailure(req);
     logLine('auth', `user-login-fail email=${email} ip=${clientIp(req)}`);
     return res.status(401).json({ ok: false, error: '邮箱或密码不对，再检查一下' });
   }
+  clearLoginFailures(req);
   // 未验证邮箱的账号拒绝登录并自动重发验证码（硬闸门，2026-10-25）
   if (!isVerified(u)) {
     const r = await sendRegisterCode(email);
