@@ -1090,7 +1090,7 @@ window.renameMatModal=(s2,t)=>showModal('<h3>✏️ 重命名素材</h3>\
 window.doRenameMat=async(s2,old)=>{const n=document.getElementById('m-rn').value.trim();if(!n)return toast('请填写名称');try{await api('/console/api/materials/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series:s2,oldTitle:old,newTitle:n})});closeModal();toast('已改名 ✅');route()}catch(e){toast(e.message)}};
 window.addMatModal=()=>showModal('<h3>添加素材（'+esc(matView.series)+'）</h3>\
   <div class="row"><label>素材名称（留空则使用图片文件名）</label><input id="m-title" placeholder="例如：线粒体-粉色版"></div>\
-  <div class="row"><label>素材图片（可多选，PNG 透明底最佳）</label><input id="m-img" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" style="padding:6px"><div class="sub" style="margin-top:4px">批量上传逐张处理，默认以图片文件名（不含扩展名）作为素材名；同名或失败不影响其他图片</div></div>\
+  <div class="row"><label>素材图片（可多选，PNG 透明底最佳）</label><input id="m-img" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" style="padding:6px"><div class="sub" style="margin-top:4px">单张优先使用填写的名称，未填写时用图片文件名；多张逐张使用文件名。同名或失败不影响其他图片</div></div>\
   <div id="m-progress" style="max-height:220px;overflow:auto;font-size:12px;line-height:1.8"></div>\
   <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-g" id="m-batch-btn" onclick="batchSaveMat()">批量上传</button><button class="btn btn-p" id="m-save-btn" onclick="saveMat()">保存</button></div>');
 window.saveMat=async()=>{
@@ -1110,12 +1110,13 @@ window.saveMat=async()=>{
 window.batchSaveMat=async()=>{
   const files=Array.from(document.getElementById('m-img').files||[]);
   if(!files.length)return toast('请先选择要批量上传的图片');
+  const customTitle=document.getElementById('m-title').value.trim();
   const progress=document.getElementById('m-progress');
   const batchBtn=document.getElementById('m-batch-btn'),saveBtn=document.getElementById('m-save-btn');
   batchBtn.disabled=true;saveBtn.disabled=true;
   const results=[];
   for(let i=0;i<files.length;i++){
-    const file=files[i],title=file.name.replace(/\.[^.]+$/,'');
+    const file=files[i],title=(files.length===1&&customTitle)||file.name.replace(/\.[^.]+$/,'');
     progress.textContent='正在上传 '+(i+1)+'/'+files.length+'：'+title;
     try{
       const fd=new FormData();

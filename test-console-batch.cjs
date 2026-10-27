@@ -11,7 +11,7 @@ const calls = [];
 let active = 0, maxActive = 0;
 const progress = { textContent: '', innerHTML: '' };
 const batchBtn = { disabled: false }, saveBtn = { disabled: false };
-const elements = { 'm-img': { files }, 'm-progress': progress, 'm-batch-btn': batchBtn, 'm-save-btn': saveBtn };
+const elements = { 'm-img': { files }, 'm-title': { value: '多张时忽略这个名称' }, 'm-progress': progress, 'm-batch-btn': batchBtn, 'm-save-btn': saveBtn };
 global.document = { getElementById: id => elements[id] };
 global.matView = { series: '测试系列' };
 global.esc = value => String(value);
@@ -35,5 +35,12 @@ global.api = async (_path, options) => {
   assert.match(progress.innerHTML, /同名旧素材/);
   assert.equal(batchBtn.disabled, false);
   assert.equal(saveBtn.disabled, false);
+
+  elements['m-img'].files = [{ name: '10折下叶子做飞机.png' }];
+  elements['m-title'].value = '面包';
+  calls.length = 0;
+  await batchSaveMat();
+  assert.deepEqual(calls.map(x => x.title), ['面包'], '单张批量上传必须优先使用自定义名称');
   console.log('✓ 批量文件名命名、失败隔离、串行处理和结果汇总均正确');
+  console.log('✓ 单张批量上传优先使用自定义名称，多张仍按文件名命名');
 })().catch(e => { console.error(e); process.exitCode = 1; });
