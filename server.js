@@ -3,6 +3,7 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { publishLocalMaterial } = require('./material-publish');
 
 const PORT = process.env.PORT || 8080;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -976,6 +977,12 @@ app.get('/api/download', authUser, (req, res) => {
       const title = parts[parts.length - 1];
       hit = { s: { folder: series }, m: { id, title, series, removed: true, file: title + '.png' } };
     }
+    const file = hit.m.file || (hit.m.title + '.png');
+    const local = path.join(ORIG_DIR, hit.s.folder, file);
+    // 本地上传素材缺失原图时必须停止，先不记账、不扣额度，更不能拿另一张预览冒充交付。
+    if (hit.m.local && !fs.existsSync(local)) {
+      return res.status(404).json({ ok: false, error: '原图文件缺失，请联系客服恢复后再下载（本次未扣额度）' });
+    }
 
     // 记账：历史下载过的素材再次下载免费（不占用额度、不计次数）
     const already = logs.some(l => l.userId === u.id && l.materialId === id);
@@ -1005,8 +1012,6 @@ app.get('/api/download', authUser, (req, res) => {
     saveJSON(DOWNLOADS_FILE, logs);
 
     // 返回文件：优先本地原图目录（注入 AIGC 元数据 + 授权码 + 下载账号隐式标识），否则 302 到 OSS 预览图
-    const file = hit.m.file || (hit.m.title + '.png');
-    const local = path.join(ORIG_DIR, hit.s.folder, file);
     if (fs.existsSync(local)) {
       const buf = injectAigcMeta(fs.readFileSync(local), code, u.email || u.name);
       res.setHeader('Content-Type', 'image/png');
@@ -1345,40 +1350,44 @@ app.post('/console/api/materials/upload', consoleAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: '请填写文件夹和素材名称' });
       }
       if (!req.file) return res.status(400).json({ ok: false, error: '请选择要上传的图片' });
-      const realExt = verifyUploadedImage(req, res);
-      if (!realExt) return;
-      const ext = realExt;
-      const dir = path.join(FILES_DIR, series);
-      fs.mkdirSync(dir, { recursive: true });
-      const dest = path.join(dir, title + ext);
-      fs.renameSync(req.file.path, dest);
-      // TinyPNG 自动压缩（失败静默跳过，不阻断上传）
-      await tinifyCompress(dest);
-      const size = fs.statSync(dest).size;
-      const f = path.join(DATA_DIR, 'console', 'materials.json');
-      const data = JSON.parse(fs.readFileSync(f, 'utf8'));
-      let s = data.find(x => x.folder === series);
-      if (!s) { s = { folder: series, materials: [] }; data.push(s); }
-      const existing = s.materials.find(m => m.title === title);
+      const ext = verifyUploadedImage(req, res);
+      if (!ext) return;
+      const f = path.join(CONSOLE_DIR, 'materials.json');
+      const data = loadJSON(f, []);
+      const existingSeries = data.find(x => x.folder === series);
+      const existing = existingSeries && existingSeries.materials.find(m => m.title === title);
       if (existing && !existing.removed) {
+        fs.unlink(req.file.path, () => {});
         return res.status(400).json({ ok: false, error: '该文件夹下已存在同名素材' });
       }
-      if (existing) {
-        // 下架后同名上传修正版 = 恢复原条目与 ID，保留已有授权码（2026-10-24）
-        existing.removed = false;
-        existing.removedAt = null;
-        existing.updatedAt = new Date().toISOString();
-        existing.file = title + ext;
-        existing.local = true;
-        existing.size = size;
-      } else {
-        s.materials.push({ id: `${series}/${title}`, series, file: title + ext, title, downloads: 0, createdAt: new Date().toISOString().slice(0, 10), local: true, size });
-      }
-      fs.writeFileSync(f, JSON.stringify(data, null, 1));
+      // 一份原图生成 originals、公开文件、干净预览、水印预览和网格缩略图；全部就绪后才写清单。
+      const uploadSize = fs.statSync(req.file.path).size;
+      await publishLocalMaterial({
+        sourcePath: req.file.path, series, title, ext,
+        dataDir: DATA_DIR, webRoot: process.env.ONEFIG_WEB_ROOT || '/opt/onefig-web',
+        filesDir: FILES_DIR, originalsDir: ORIG_DIR,
+        commit: () => {
+          const s = existingSeries || { folder: series, materials: [] };
+          if (!existingSeries) data.push(s);
+          if (existing) {
+            existing.removed = false;
+            existing.removedAt = null;
+            existing.updatedAt = new Date().toISOString();
+            existing.file = title + ext;
+            existing.local = true;
+            existing.size = uploadSize;
+          } else {
+            s.materials.push({ id: `${series}/${title}`, series, file: title + ext, title, downloads: 0, createdAt: new Date().toISOString().slice(0, 10), local: true, size: uploadSize });
+          }
+          saveJSON(f, data);
+        },
+      });
+      fs.unlink(req.file.path, () => {});
       res.json({ ok: true });
     } catch (e) {
       if (req.file) fs.unlink(req.file.path, () => {});
-      res.status(500).json({ ok: false, error: '上传失败，请稍后再试' });
+      logLine('error', `material-upload-fail ${e && e.message}`);
+      res.status(500).json({ ok: false, error: '预览生成或发布失败，未修改线上素材，请稍后重试' });
     }
   });
 });
