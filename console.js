@@ -266,8 +266,18 @@ module.exports = function registerConsole(app, deps) {
         .filter(l => l.userId === u.id);
       const map = new Map();
       for (const s of load('materials.json', [])) for (const m of s.materials) map.set(m.id, { s, m });
+      const exportByCode = new Map(readJSON(path.join(DATA_DIR, 'console', 'exports.json'), []).map(x => [x.code, x]));
       const seen = new Map();
       for (const l of dls) {
+        if (l.kind === 'export') {
+          const archive = exportByCode.get(l.code);
+          seen.set('export:' + (l.code || l.time), {
+            id: 'export:' + (l.code || l.time), kind: 'export',
+            title: l.boardTitle || '画板导出作品', exportId: archive ? archive.id : '',
+            thumb: l.thumb || null, time: l.time, code: l.code || null,
+          });
+          continue;
+        }
         const hit = map.get(l.materialId);
         // 下架/改名后仍显示在用户的下载历史里，标题用下载时快照（2026-10-24）
         const parts = String(l.materialId || '').split('/');
@@ -1180,10 +1190,13 @@ window.userDetail=async(id)=>{
   window.DL_IMGS=[];
   const dlRows=(d.downloads&&d.downloads.length)
     ?d.downloads.map(m=>{
-      const src=m.local?'/files/'+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.file):OSS_P+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.title)+'.webp';
+      const src=(m.kind==='export'
+        ? (m.exportId?'/console/api/export-records/img?id='+encodeURIComponent(m.exportId)+'&t='+getTK():(m.thumb||''))
+        : (m.local?'/files/'+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.file):OSS_P+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.title)+'.webp'))||'/brand/icon.png';
+      const sub=m.kind==='export'?'画板导出':m.folder;
       DL_IMGS.push({src:src,t:m.title});
       const i=DL_IMGS.length-1;
-      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 2px;border-bottom:1px solid #f1eef9"><img src="'+src+'" onerror="this.style.opacity=.2" onclick="viewMatList(DL_IMGS,'+i+')" style="width:56px;height:56px;object-fit:contain;background:#f4f2fa;border-radius:8px;cursor:zoom-in;flex:none"><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(m.title)+'">'+esc(m.title)+'</div><div class="sub" style="font-size:12px">'+esc(m.folder)+' · '+fmtT(m.time)+'</div></div>'+(m.code?'<button class="btn btn-g btn-xs" title="点击复制授权码" onclick="cpTxt(\\''+m.code+'\\')">🔑 '+esc(m.code)+'</button>':'<span style="color:#b0aac4;font-size:12px">无授权码</span>')+'</div>'}).join('')
+      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 2px;border-bottom:1px solid #f1eef9"><img src="'+src+'" onerror="this.style.opacity=.2" onclick="viewMatList(DL_IMGS,'+i+')" style="width:56px;height:56px;object-fit:contain;background:#f4f2fa;border-radius:8px;cursor:zoom-in;flex:none"><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(m.title)+'">'+esc(m.title)+'</div><div class="sub" style="font-size:12px">'+esc(sub)+' · '+fmtT(m.time)+'</div></div>'+(m.code?'<button class="btn btn-g btn-xs" title="点击复制授权码" onclick="cpTxt(\\''+m.code+'\\')">🔑 '+esc(m.code)+'</button>':'<span style="color:#b0aac4;font-size:12px">无授权码</span>')+'</div>'}).join('')
     :'<div style="text-align:center;color:#b0aac4;padding:20px">还没有下载记录</div>';
   const coListRows=(d.creditOrders&&d.creditOrders.length)
     ?d.creditOrders.map(o=>{
