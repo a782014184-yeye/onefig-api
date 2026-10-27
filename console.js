@@ -1089,12 +1089,13 @@ window.renameMatModal=(s2,t)=>showModal('<h3>✏️ 重命名素材</h3>\
   <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="doRenameMat(\\''+s2+'\\',\\''+t+'\\')">保存</button></div>');
 window.doRenameMat=async(s2,old)=>{const n=document.getElementById('m-rn').value.trim();if(!n)return toast('请填写名称');try{await api('/console/api/materials/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series:s2,oldTitle:old,newTitle:n})});closeModal();toast('已改名 ✅');route()}catch(e){toast(e.message)}};
 window.addMatModal=()=>showModal('<h3>添加素材（'+esc(matView.series)+'）</h3>\
-  <div class="row"><label>素材名称 *</label><input id="m-title" placeholder="例如：线粒体-粉色版"></div>\
-  <div class="row"><label>素材图片（PNG 透明底最佳）</label><input id="m-img" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:6px"><div class="sub" style="margin-top:4px">选图上传后网站立即可见；不传图则只登记名称</div></div>\
-  <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="saveMat()">保存</button></div>');
+  <div class="row"><label>素材名称（留空则使用图片文件名）</label><input id="m-title" placeholder="例如：线粒体-粉色版"></div>\
+  <div class="row"><label>素材图片（可多选，PNG 透明底最佳）</label><input id="m-img" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" style="padding:6px"><div class="sub" style="margin-top:4px">批量上传逐张处理，默认以图片文件名（不含扩展名）作为素材名；同名或失败不影响其他图片</div></div>\
+  <div id="m-progress" style="max-height:220px;overflow:auto;font-size:12px;line-height:1.8"></div>\
+  <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-g" id="m-batch-btn" onclick="batchSaveMat()">批量上传</button><button class="btn btn-p" id="m-save-btn" onclick="saveMat()">保存</button></div>');
 window.saveMat=async()=>{
-  const title=document.getElementById('m-title').value.trim();
   const file=document.getElementById('m-img').files[0];
+  const title=document.getElementById('m-title').value.trim()||(file?file.name.replace(/\.[^.]+$/,''):'');
   try{
     if(file){
       const fd=new FormData();
@@ -1105,6 +1106,28 @@ window.saveMat=async()=>{
     }
     closeModal();toast('已添加 ✅');route();
   }catch(e){toast(e.message)}
+};
+window.batchSaveMat=async()=>{
+  const files=Array.from(document.getElementById('m-img').files||[]);
+  if(!files.length)return toast('请先选择要批量上传的图片');
+  const progress=document.getElementById('m-progress');
+  const batchBtn=document.getElementById('m-batch-btn'),saveBtn=document.getElementById('m-save-btn');
+  batchBtn.disabled=true;saveBtn.disabled=true;
+  const results=[];
+  for(let i=0;i<files.length;i++){
+    const file=files[i],title=file.name.replace(/\.[^.]+$/,'');
+    progress.textContent='正在上传 '+(i+1)+'/'+files.length+'：'+title;
+    try{
+      const fd=new FormData();
+      fd.append('series',matView.series);fd.append('title',title);fd.append('image',file);
+      await api('/console/api/materials/upload',{method:'POST',body:fd});
+      results.push({title,ok:true});
+    }catch(e){results.push({title,ok:false,error:e.message})}
+  }
+  const okCount=results.filter(x=>x.ok).length;
+  progress.innerHTML='<div style="margin:6px 0;font-weight:600">批量完成：成功 '+okCount+' 张，失败 '+(results.length-okCount)+' 张</div>'+results.map(x=>'<div style="color:'+(x.ok?'#25824c':'#c05555')+'">'+(x.ok?'✅ ':'❌ ')+esc(x.title)+(x.ok?' 已发布':' '+esc(x.error||'上传失败'))+'</div>').join('');
+  batchBtn.disabled=false;saveBtn.disabled=false;
+  toast('批量上传完成：成功 '+okCount+' 张，失败 '+(results.length-okCount)+' 张');route();
 };
 window.addSeriesModal=()=>showModal('<h3>新建文件夹</h3>\
   <div class="row"><label>文件夹名称 *（建议带编号，如 25-组织与器官系列）</label><input id="m-folder" placeholder="25-组织与器官系列"></div>\
