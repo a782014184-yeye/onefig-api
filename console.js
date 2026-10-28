@@ -309,6 +309,8 @@ module.exports = function registerConsole(app, deps) {
         });
         if (l.kind === 'export') {
           const archive = exportByCode.get(l.code);
+          const preview = l.thumb || (archive ? '/console/api/export-records/img?id=' + encodeURIComponent(archive.id) : '');
+          linkedOrders.forEach(o => { o.preview = preview; });
           seen.set('export:' + (l.code || l.time), {
             id: 'export:' + (l.code || l.time), kind: 'export',
             title: l.boardTitle || '画板导出作品', exportId: archive ? archive.id : '',
@@ -321,6 +323,11 @@ module.exports = function registerConsole(app, deps) {
         const parts = String(l.materialId || '').split('/');
         const title = hit ? hit.m.title : (l.materialTitle || parts[parts.length - 1] || l.materialId);
         const series = hit ? (hit.m.series || hit.s.folder) : (l.materialSeries || (parts.length > 1 ? parts.slice(0, -1).join('/') : ''));
+        if (hit) linkedOrders.forEach(o => {
+          o.previewSeries = hit.m.series || hit.s.folder;
+          o.previewFile = hit.m.file || (hit.m.title + '.png');
+          o.previewLocal = !!hit.m.local;
+        });
         seen.set(l.materialId, {
           id: l.materialId,
           title,
@@ -1570,8 +1577,10 @@ window.userDetail=async(id)=>{
       const providerCell=providerNo?'<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(providerNo)+'</div><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+providerNo+'\\')">复制交易号</button>':'<span style="color:#b0aac4">未记录</span>';
       const licenseCode=String(o.licenseCode||o.exportCode||(o.refundedLicenseCodes&&o.refundedLicenseCodes[0])||'');
       const licenseCell=(o.kind==='export'||o.kind==='single')?'<div class="sub" style="margin-top:4px">授权码：'+(licenseCode?'<span style="font-family:monospace">'+esc(licenseCode)+'</span> <button class="btn btn-g btn-xs" title="复制授权码" onclick="cpTxt(\\''+licenseCode+'\\')">复制</button>':'<span style="color:#b0aac4">未生成/未绑定</span>')+'</div>':'';
+      const orderImg=o.preview?o.preview+(o.preview.indexOf('/console/api/')===0?'&t='+getTK():''):(o.kind==='single'&&o.previewFile?(o.previewLocal?'/files/'+encodeURIComponent(o.previewSeries)+'/'+encodeURIComponent(o.previewFile):OSS_P+encodeURIComponent(o.previewSeries)+'/'+encodeURIComponent(o.previewFile.replace(/\.png$/,'.webp'))):'');
+      const previewImg=orderImg?'<img src="'+esc(orderImg)+'" alt="'+esc(o.materialTitle||type)+'" onclick="viewMat(this.src)" style="width:58px;height:58px;object-fit:contain;background:#f4f2fa;border-radius:8px;cursor:zoom-in;flex:none" onerror="this.style.visibility=\\'hidden\\'">':'';
       const action=o.status==='paid'?'<button class="btn btn-g btn-xs" onclick="refundOrder(\\''+o.id+'\\')">退款回收</button>':o.status==='refunded'?'<button class="btn btn-g btn-xs" onclick="undoRefundOrder(\\''+o.id+'\\')">撤销退款</button>':'<span style="color:#b0aac4">—</span>';
-      return '<tr><td>'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+licenseCell+'</td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td><td>'+action+'</td></tr>'}).join('')
+      return '<tr><td><div style="display:flex;align-items:center;gap:10px">'+previewImg+'<div style="min-width:0">'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+licenseCell+'</div></div></td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td><td>'+action+'</td></tr>'}).join('')
     :'<tr><td colspan="8" style="text-align:center;color:#b0aac4;padding:14px">暂无订单</td></tr>';
   showModal('<h3>👤 '+esc(d.user.name)+'</h3>\
   <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 本月已下 '+(d.user.dlUsed||0)+' 张 · 本月已导出 '+(d.user.exUsed||0)+' 次（单次权益剩 '+(d.user.exportCredits||0)+'） · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\

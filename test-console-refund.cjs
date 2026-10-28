@@ -50,7 +50,7 @@ const orders = [
 const downloads = [
   { userId: 'u-single', materialId: '测试系列/细胞', materialTitle: '细胞', materialSeries: '测试系列', code: 'OF-2026-SING01', time: '2026-10-04T01:00:00.000Z' },
   { userId: 'u-single', materialId: '测试系列/细胞', materialTitle: '细胞', materialSeries: '测试系列', code: 'OF-2026-SING01', time: '2026-10-04T02:00:00.000Z', free: true },
-  { userId: 'u-export-used', kind: 'export', orderId: 'e-used', materialId: '画板导出作品', boardTitle: '已导出画板', code: 'OF-2026-USED01', time: '2026-10-05T00:00:00.000Z' },
+  { userId: 'u-export-used', kind: 'export', orderId: 'e-used', materialId: '画板导出作品', boardTitle: '已导出画板', code: 'OF-2026-USED01', thumb: 'data:image/png;base64,TEST', time: '2026-10-05T00:00:00.000Z' },
   { userId: 'u-other', materialId: '测试系列/其他', materialTitle: '其他', materialSeries: '测试系列', code: 'OF-2026-VALID1', time: '2026-10-04T01:00:00.000Z' },
 ];
 write('users.json', users);
@@ -290,7 +290,10 @@ const snapshot = () => Object.fromEntries([
     const ordersWithCodes = (await user('u-export-used')).body.orders;
     assert.equal(ordersWithCodes.find(o => o.id === 'e-used').exportCode, 'OF-2026-USED01');
     assert.equal(ordersWithCodes.find(o => o.id === 'e-used').licenseStatus, '退款回收');
+    assert.equal(ordersWithCodes.find(o => o.id === 'e-used').preview, 'data:image/png;base64,TEST');
     const singleOrders = (await user('u-single')).body.orders;
+    assert.equal(singleOrders.find(o => o.id === 's-single').previewSeries, '测试系列');
+    assert.equal(singleOrders.find(o => o.id === 's-single').previewFile, '细胞.png');
     assert.equal(singleOrders.find(o => o.id === 's-single').licenseCode, 'OF-2026-SING01');
     assert.equal(singleOrders.find(o => o.id === 's-single').licenseStatus, '退款回收');
     console.log('✓ 素材和导出撤销恢复授权，订单列表保留对应授权码');

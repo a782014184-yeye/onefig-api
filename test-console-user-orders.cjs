@@ -6,8 +6,8 @@ const match = source.match(/const allOrderRows=([\s\S]*?);\n  showModal/);
 assert.ok(match, '必须存在全部订单渲染逻辑');
 const d = { orders: [
   { id: 'member-order', outTradeNo: 'merchant32chars0000000000000001', transactionId: 'wx-transaction-1', plan: 'pro', amount: 99.9, status: 'paid', payChannel: 'alipay', createdAt: '2026-10-01T00:00:00Z' },
-  { id: 'single-order', kind: 'single', materialTitle: '线粒体-纵剖面', amount: 6.9, status: 'pending', channel: '微信支付', createdAt: '2026-10-02T00:00:00Z' },
-  { id: 'export-order', kind: 'export', exportCode: 'OF-2026-TEST01', amount: 6.9, status: 'paid', payChannel: '支付宝', createdAt: '2026-10-03T00:00:00Z' },
+  { id: 'single-order', kind: 'single', materialTitle: '线粒体-纵剖面', previewSeries: '细胞器', previewFile: '线粒体.png', previewLocal: false, amount: 6.9, status: 'pending', channel: '微信支付', createdAt: '2026-10-02T00:00:00Z' },
+  { id: 'export-order', kind: 'export', exportCode: 'OF-2026-TEST01', preview: '/console/api/export-records/img?id=export-1', amount: 6.9, status: 'paid', payChannel: '支付宝', createdAt: '2026-10-03T00:00:00Z' },
   { id: 'refunded-order', kind: 'single', materialTitle: '已退款素材', refundedLicenseCodes: ['OF-2026-SINGLE1'], amount: 6.9, status: 'refunded', createdAt: '2026-10-04T00:00:00Z' },
   { id: 'credit-order', kind: 'credit', materialTitle: '100 积分', credits: 100, amount: 9.9, status: 'paid', createdAt: '2026-10-05T00:00:00Z' },
 ] };
@@ -15,6 +15,8 @@ const lvName = { none: '非会员', basic: '青果会员', pro: '红果会员', 
 const esc = value => String(value);
 const yuan = value => '¥' + Number(value).toFixed(1);
 const fmtT = value => value;
+const OSS_P = 'https://oss.test/';
+const getTK = () => 'token';
 const rows = eval('(' + match[1].replace(/\\'/g, "'") + ')');
 assert.match(rows, /红果会员/);
 assert.match(rows, /单张素材/);
@@ -66,4 +68,8 @@ assert.match(rows, /undoRefundOrder\('refunded-order'\)/);
 assert.match(source, /o.status==='refunded'\?'#d6336c'/);
 assert.doesNotMatch(rows, /btn btn-d btn-xs/);
 assert.match(rows, /btn btn-g btn-xs" onclick="refundOrder/);
-console.log('✓ 订单单号与导出码完整，支持退款、撤销和授权码查询');
+assert.match(rows, /export-records\/img\?id=export-1&t=token/);
+assert.match(rows, /https:\/\/oss\.test\//);
+assert.match(rows, /\.webp/);
+assert.match(rows, /viewMat\(this\.src\)/);
+console.log('✓ 订单单号、授权码和对应预览图完整，支持退款与撤销');
