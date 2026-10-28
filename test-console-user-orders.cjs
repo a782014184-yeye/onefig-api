@@ -45,6 +45,7 @@ assert.match(source, /colspan="8"/);
 assert.match(source, /window\.merchantLookupModal/);
 assert.match(source, /window\.doMerchantLookup/);
 assert.match(source, /\/console\/api\/order-lookup\?merchantNo=/);
+assert.match(source, /previousOutTradeNos/);
 assert.match(source, /window\.licenseLookupModal/);
 assert.match(source, /window\.doLicenseLookup/);
 assert.match(source, /\/console\/api\/license-lookup\?code=/);

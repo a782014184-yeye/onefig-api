@@ -229,7 +229,7 @@ module.exports = function registerConsole(app, deps) {
     const normalize = value => String(value || '').replace(/-/g, '').toUpperCase();
     const key = normalize(raw);
     const orders = load('orders.json', []);
-    const order = orders.find(o => normalize(o.outTradeNo || String(o.id || '').replace(/-/g, '')) === key || normalize(o.id) === key);
+    const order = orders.find(o => normalize(o.outTradeNo || String(o.id || '').replace(/-/g, '')) === key || normalize(o.id) === key || (o.previousOutTradeNos || []).some(no => normalize(no) === key));
     if (!order) return res.json({ ok: false, error: '未找到该商户订单号对应的订单' });
     const merchantNo = order.outTradeNo || String(order.id || '').replace(/-/g, '');
     const user = load('users.json', []).find(u => u.id === order.userId);

@@ -659,8 +659,17 @@ module.exports = function registerPay(app, deps) {
       if (age < 110 * 60 * 1000) {
         return res.json({ ok: true, order, codeUrl: order.codeUrl, reused: true });
       }
-      try { await wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${order.outTradeNo}/close`, { mchid: w.mchid }); log(`关闭过期预支付单 order=${order.id}`); }
+      const previousNo = order.outTradeNo;
+      try { await wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${previousNo}/close`, { mchid: w.mchid }); log(`关闭过期预支付单 order=${order.id}`); }
       catch (e) { log(`关旧单失败（可能已关闭）order=${order.id} err=${e.message}`); }
+      // 微信不允许已使用过的商户单号再次 Native 下单（201 商户订单号重复）。
+      // 内部订单 id 保持不变，仅轮换支付单号，并保留旧号供后台反查。
+      order.previousOutTradeNos = [...new Set([...(order.previousOutTradeNos || []), previousNo].filter(Boolean))];
+      order.outTradeNo = crypto.randomUUID().replace(/-/g, '');
+      delete order.codeUrl;
+      delete order.codeUrlAt;
+      persistOrder(target, order);
+      log(`过期续付更换支付单号 order=${order.id}`);
     }
 
     try {

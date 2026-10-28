@@ -350,8 +350,11 @@ function ok(name) { passed++; console.log('  ✅', name); }
   const f3 = await post('/api/pay/wechat/native', { plan: 'basic', refundConsent: true });
   await new Promise(r => setTimeout(r, 50));
   assert.notStrictEqual(f3.codeUrl, f1.codeUrl, '过期后换新码');
+  assert.notStrictEqual(f3.order.outTradeNo, f1.order.outTradeNo, '过期续付必须更换商户支付单号');
+  assert.ok(f3.order.previousOutTradeNos.includes(f1.order.outTradeNo), '旧支付单号保留用于后台反查');
+  assert.strictEqual(f3.order.id, f1.order.id, '内部订单与权益归属保持不变');
   assert.ok(wxLog.includes('close'), '已调用微信关单接口');
-  ok('F3 二维码过期 → 关旧单 + 生成新码');
+  ok('F3 二维码过期 → 关旧单 + 新支付单号 + 新码');
 
   // ========== G. 查单兜底（回调丢失，轮询触发主动查单）============
   const g1 = readCOs().find(o => o.id === r3.order.id); // A7 留下的 p800 待支付单
