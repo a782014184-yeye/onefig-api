@@ -1445,7 +1445,7 @@ H.invoices=async()=>{
     +'<input id="inv-q" placeholder="搜索抬头 / 税号 / 邮箱 / 订单号" value="'+esc(INV_FILTER.q)+'" style="width:240px" onkeydown="if(event.key===\\'Enter\\')invSearch()">'
     +'<button class="btn btn-p" onclick="invSearch()">查询</button><button class="btn btn-g" onclick="invReset()">重置</button></div>'
     +'<div class="toolbar" style="margin-bottom:0"><span class="sub" style="margin:0">共 '+d.total+' 条申请；选中导出后自动标记为已导出</span><div class="sp"></div>'
-    +'<button class="btn btn-g" onclick="invExport(\\'filter\\')">下载筛选结果</button><button class="btn btn-p" id="inv-selected-btn" onclick="invExport(\\'selected\\')">'+invSelectedText()+'</button></div></div>'
+    +'<button class="btn btn-g" onclick="invSelectUnexported()">全选未导出</button><button class="btn btn-g" onclick="invExport(\\'filter\\')">下载筛选结果</button><button class="btn btn-p" id="inv-selected-btn" onclick="invExport(\\'selected\\')">'+invSelectedText()+'</button></div></div>'
     +'<div class="panel" style="overflow:auto"><table><tr><th><input type="checkbox" onchange="invToggleAll(this.checked)" title="全选当前列表"></th><th>购买方 / 接收邮箱</th><th>订单 / 业务类型</th><th>抬头 / 发票类型</th><th>金额</th><th>导出状态</th><th>申请时间 / 编号</th></tr>'+rows+'</table></div>';
 };
 window.invSearch=()=>{
@@ -1459,6 +1459,14 @@ window.invSearch=()=>{
 window.invReset=()=>{INV_FILTER.status='all';INV_FILTER.exportStatus='all';INV_FILTER.from='';INV_FILTER.to='';INV_FILTER.q='';route()};
 window.invToggle=(id,checked)=>{if(checked)INV_SELECTED.add(id);else INV_SELECTED.delete(id);document.getElementById('inv-selected-btn').textContent=invSelectedText()};
 window.invToggleAll=checked=>{INV_ROWS.forEach(r=>{if(checked)INV_SELECTED.add(r.id);else INV_SELECTED.delete(r.id)});document.querySelectorAll('[data-inv-check]').forEach(c=>{c.checked=checked});document.getElementById('inv-selected-btn').textContent=invSelectedText()};
+window.invSelectUnexported=()=>{
+  INV_SELECTED.clear();
+  const ids=INV_ROWS.filter(r=>r.exportStatus!=='exported').map(r=>r.id);
+  ids.forEach(id=>INV_SELECTED.add(id));
+  document.querySelectorAll('[data-inv-check]').forEach(c=>{c.checked=INV_SELECTED.has(c.dataset.invCheck)});
+  document.getElementById('inv-selected-btn').textContent=invSelectedText();
+  toast(ids.length?'已勾选 '+ids.length+' 条未导出申请':'当前列表没有未导出申请');
+};
 window.invExport=async mode=>{
   if(mode==='selected'&&!INV_SELECTED.size)return toast('请先勾选需要下载的申请');
   if(mode==='filter'&&!INV_ROWS.length)return toast('当前筛选条件下没有可下载的申请');
