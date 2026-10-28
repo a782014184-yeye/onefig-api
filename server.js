@@ -633,6 +633,25 @@ app.post('/api/auth/delete-account', authUser, authRateLimit, (req, res) => {
 
 app.get('/api/me', authUser, (req, res) => {
   const orders = loadOrders().filter(o => o.userId === req.user.id).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  const downloads = loadJSON(DOWNLOADS_FILE, []).filter(l => l.userId === req.user.id);
+  const materials = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), []);
+  const ordersWithPreview = orders.map(o => {
+    if (o.kind === 'export') {
+      const log = downloads.find(l => l.kind === 'export' && (l.orderId === o.id || (o.exportCode && l.code === o.exportCode)));
+      return { ...o, preview: log ? (log.thumb || (log.code ? '/api/my/export-image?code=' + encodeURIComponent(log.code) : '')) : '' };
+    }
+    if (o.materialId) {
+      let hit = null;
+      for (const s of materials) for (const m of s.materials || []) if (m.id === o.materialId) { hit = { s, m }; break; }
+      if (!hit) return { ...o, preview: '' };
+      const file = hit.m.file || (hit.m.title + '.png');
+      const preview = hit.m.local
+        ? '/files/' + encodeURIComponent(hit.m.series || hit.s.folder) + '/' + encodeURIComponent(file)
+        : '/previews/' + encodeURIComponent(hit.m.series || hit.s.folder) + '/' + encodeURIComponent(file.replace(/\.png$/, '.webp'));
+      return { ...o, preview };
+    }
+    return { ...o, preview: '' };
+  });
   // 积分充值订单一并返回，账号中心「积分订单」区展示（2026-10-17）
   let creditOrders = [];
   try {
@@ -642,7 +661,7 @@ app.get('/api/me', authUser, (req, res) => {
   res.json({
     ok: true,
     user: publicUser(req.user),
-    orders,
+    orders: ordersWithPreview,
     creditOrders,
     // 单张购买过的素材 ID（永久可重下；前端据此把“¥6.9 下载”显示为“已购买”）
     purchases: loadJSON(PURCHASES_FILE, []).filter(p => p.userId === req.user.id).map(p => p.materialId),
@@ -1087,6 +1106,26 @@ app.get('/api/my/downloads', authUser, (req, res) => {
     }
     const list = [...seen.values(), ...exports].sort((a, b) => b.time.localeCompare(a.time));
     res.json({ ok: true, list });
+  } catch { res.status(500).json({ ok: false, error: '读取失败' }); }
+});
+
+// 当前用户的导出快照：图片标签不能带请求头，因此与干净预览一样支持 ?tk=。
+// 必须同时校验授权码归属，不能凭码读取其他用户的画板作品。
+app.get('/api/my/export-image', (req, res) => {
+  try {
+    const tk = (req.headers.authorization || '').replace(/^Bearer /, '') || String(req.query.tk || '');
+    const u = validateToken(tk);
+    if (!u) return res.status(401).json({ ok: false, error: '请先登录' });
+    const code = String(req.query.code || '').trim();
+    const owns = loadJSON(DOWNLOADS_FILE, []).some(l => l.kind === 'export' && l.code === code && l.userId === u.id);
+    if (!owns) return res.status(404).json({ ok: false, error: '导出记录不存在' });
+    const rec = loadJSON(EXPORT_INDEX, []).find(l => l.code === code && l.userId === u.id);
+    if (!rec) return res.status(404).json({ ok: false, error: '导出图片不存在' });
+    const f = path.join(EXPORT_DIR, path.basename(String(rec.file || '')));
+    if (!fs.existsSync(f)) return res.status(404).json({ ok: false, error: '导出图片不存在' });
+    res.setHeader('Content-Type', rec.fmt === 'jpg' || f.endsWith('.jpg') ? 'image/jpeg' : (rec.fmt === 'tif' || f.endsWith('.tif') ? 'image/tiff' : 'image/png'));
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    fs.createReadStream(f).pipe(res);
   } catch { res.status(500).json({ ok: false, error: '读取失败' }); }
 });
 
