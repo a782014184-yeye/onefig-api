@@ -290,7 +290,10 @@ const snapshot = () => Object.fromEntries([
     const ordersWithCodes = (await user('u-export-used')).body.orders;
     assert.equal(ordersWithCodes.find(o => o.id === 'e-used').exportCode, 'OF-2026-USED01');
     assert.equal(ordersWithCodes.find(o => o.id === 'e-used').licenseStatus, '退款回收');
-    console.log('✓ 素材和导出撤销恢复授权，订单列表保留对应导出码');
+    const singleOrders = (await user('u-single')).body.orders;
+    assert.equal(singleOrders.find(o => o.id === 's-single').licenseCode, 'OF-2026-SING01');
+    assert.equal(singleOrders.find(o => o.id === 's-single').licenseStatus, '退款回收');
+    console.log('✓ 素材和导出撤销恢复授权，订单列表保留对应授权码');
 
     const creditUndo = await undo('c-credit');
     assert.equal(creditUndo.status, 200, JSON.stringify(creditUndo.body));

@@ -299,12 +299,15 @@ module.exports = function registerConsole(app, deps) {
       const seen = new Map();
       for (const l of dls) {
         const licenseStatus = l.status === 'refund-revoked' || l.revokeReason === 'refund' ? '退款回收' : '有效';
+        const linkedOrders = my.filter(o => (l.orderId && o.id === l.orderId) ||
+          (l.kind === 'export' && o.kind === 'export' && o.exportCode && o.exportCode === l.code) ||
+          (l.kind !== 'export' && o.materialId && o.materialId === l.materialId));
+        linkedOrders.forEach(o => {
+          o.licenseCode = l.code || o.licenseCode;
+          o.licenseStatus = licenseStatus;
+          if (l.kind === 'export') o.exportCode = l.code || o.exportCode;
+        });
         if (l.kind === 'export') {
-          const linkedOrder = l.orderId && my.find(o => o.id === l.orderId);
-          if (linkedOrder) {
-            linkedOrder.exportCode = l.code || linkedOrder.exportCode;
-            linkedOrder.licenseStatus = licenseStatus;
-          }
           const archive = exportByCode.get(l.code);
           seen.set('export:' + (l.code || l.time), {
             id: 'export:' + (l.code || l.time), kind: 'export',
@@ -1565,10 +1568,10 @@ window.userDetail=async(id)=>{
       const providerNo=String(o.transactionId||'');
       const merchantCell='<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(merchantNo)+'</div><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+merchantNo+'\\')">复制商户单号</button>';
       const providerCell=providerNo?'<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(providerNo)+'</div><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+providerNo+'\\')">复制交易号</button>':'<span style="color:#b0aac4">未记录</span>';
-      const exportCode=String(o.exportCode||(o.refundedLicenseCodes&&o.refundedLicenseCodes[0])||'');
-      const exportCell=o.kind==='export'?'<div class="sub" style="margin-top:4px">导出码：'+(exportCode?'<span style="font-family:monospace">'+esc(exportCode)+'</span> <button class="btn btn-g btn-xs" title="复制导出授权码" onclick="cpTxt(\\''+exportCode+'\\')">复制</button>':'<span style="color:#b0aac4">未生成/未绑定</span>')+'</div>':'';
+      const licenseCode=String(o.licenseCode||o.exportCode||(o.refundedLicenseCodes&&o.refundedLicenseCodes[0])||'');
+      const licenseCell=(o.kind==='export'||o.kind==='single')?'<div class="sub" style="margin-top:4px">授权码：'+(licenseCode?'<span style="font-family:monospace">'+esc(licenseCode)+'</span> <button class="btn btn-g btn-xs" title="复制授权码" onclick="cpTxt(\\''+licenseCode+'\\')">复制</button>':'<span style="color:#b0aac4">未生成/未绑定</span>')+'</div>':'';
       const action=o.status==='paid'?'<button class="btn btn-g btn-xs" onclick="refundOrder(\\''+o.id+'\\')">退款回收</button>':o.status==='refunded'?'<button class="btn btn-g btn-xs" onclick="undoRefundOrder(\\''+o.id+'\\')">撤销退款</button>':'<span style="color:#b0aac4">—</span>';
-      return '<tr><td>'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+exportCell+'</td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td><td>'+action+'</td></tr>'}).join('')
+      return '<tr><td>'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+licenseCell+'</td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td><td>'+action+'</td></tr>'}).join('')
     :'<tr><td colspan="8" style="text-align:center;color:#b0aac4;padding:14px">暂无订单</td></tr>';
   showModal('<h3>👤 '+esc(d.user.name)+'</h3>\
   <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 本月已下 '+(d.user.dlUsed||0)+' 张 · 本月已导出 '+(d.user.exUsed||0)+' 次（单次权益剩 '+(d.user.exportCredits||0)+'） · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\
