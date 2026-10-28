@@ -5,9 +5,9 @@ const source = fs.readFileSync(require.resolve('./console.js'), 'utf8');
 const match = source.match(/const allOrderRows=([\s\S]*?);\n  showModal/);
 assert.ok(match, '必须存在全部订单渲染逻辑');
 const d = { orders: [
-  { id: 'member-order', plan: 'pro', amount: 99.9, status: 'paid', createdAt: '2026-10-01T00:00:00Z' },
-  { id: 'single-order', kind: 'single', materialTitle: '线粒体-纵剖面', amount: 6.9, status: 'pending', createdAt: '2026-10-02T00:00:00Z' },
-  { id: 'export-order', kind: 'export', amount: 6.9, status: 'paid', createdAt: '2026-10-03T00:00:00Z' },
+  { id: 'member-order', plan: 'pro', amount: 99.9, status: 'paid', payChannel: 'alipay', createdAt: '2026-10-01T00:00:00Z' },
+  { id: 'single-order', kind: 'single', materialTitle: '线粒体-纵剖面', amount: 6.9, status: 'pending', channel: '微信支付', createdAt: '2026-10-02T00:00:00Z' },
+  { id: 'export-order', kind: 'export', amount: 6.9, status: 'paid', payChannel: '支付宝', createdAt: '2026-10-03T00:00:00Z' },
 ] };
 const lvName = { none: '非会员', basic: '青果会员', pro: '红果会员', team: '金果会员' };
 const esc = value => String(value);
@@ -23,6 +23,9 @@ assert.match(rows, /export-order/);
 assert.match(rows, /待支付/);
 assert.match(rows, /已支付/);
 assert.match(rows, /线粒体-纵剖面/);
+assert.match(rows, /微信支付/);
+assert.match(rows, /支付宝/);
+assert.match(source, /style.width='960px'/);
 assert.match(source, /id="dt-b6"/);
 assert.match(source, /id="dt-p6"/);
 assert.match(source, /\[1,2,3,4,5,6\]/);

@@ -1222,8 +1222,10 @@ window.userDetail=async(id)=>{
       const type=o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':(lvName[o.plan]||'会员订单');
       const status={pending:'待支付',notified:'待确认',paid:'已支付',expired:'已失效',failed:'支付失败'}[o.status]||o.status;
       const color=o.status==='paid'?'#2f9e5f':o.status==='pending'?'#b8860b':'#8b84a3';
-      return '<tr><td>'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+'</td><td style="font-family:monospace;font-size:11px">'+esc(o.id)+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td></tr>'}).join('')
-    :'<tr><td colspan="5" style="text-align:center;color:#b0aac4;padding:14px">暂无订单</td></tr>';
+      const rawChannel=String(o.payChannel||o.channel||'');
+      const channel=/wechat|微信/i.test(rawChannel)?'微信支付':/alipay|支付宝/i.test(rawChannel)?'支付宝':(rawChannel||'未知');
+      return '<tr><td>'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+'</td><td style="font-family:monospace;font-size:11px">'+esc(o.id)+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td></tr>'}).join('')
+    :'<tr><td colspan="6" style="text-align:center;color:#b0aac4;padding:14px">暂无订单</td></tr>';
   showModal('<h3>👤 '+esc(d.user.name)+'</h3>\
   <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 本月已下 '+(d.user.dlUsed||0)+' 张 · 本月已导出 '+(d.user.exUsed||0)+' 次（单次权益剩 '+(d.user.exportCredits||0)+'） · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\
   <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center"><input id="m-delta" type="number" placeholder="积分调整，如 5 或 -3" style="flex:1"><input id="m-reason" placeholder="原因（选填）" style="flex:2"><button class="btn btn-g btn-xs" onclick="adjCredits(\\''+d.user.id+'\\')">调整</button></div>\
@@ -1234,9 +1236,10 @@ window.userDetail=async(id)=>{
   <div id="dt-p3" style="display:none;max-height:200px;overflow:auto"><table><tr><th>画板</th><th>最近编辑</th><th>分享状态</th><th>打开过的人</th></tr>'+bdRows+'</table></div>\
   <div id="dt-p4" style="display:none;max-height:260px;overflow:auto">'+dlRows+'</div>\
   <div id="dt-p5" style="display:none;max-height:220px;overflow:auto"><table><tr><th>下单时间</th><th>积分</th><th>金额</th><th>状态 / 渠道</th><th>流水号</th></tr>'+coListRows+'</table></div>\
-  <div id="dt-p6" style="display:none;max-height:260px;overflow:auto"><table><tr><th>类型</th><th>订单号</th><th>状态</th><th>金额</th><th>支付 / 下单时间</th></tr>'+allOrderRows+'</table></div>\
+  <div id="dt-p6" style="display:none;max-height:260px;overflow:auto"><table><tr><th>类型</th><th>订单号</th><th>状态</th><th>支付方式</th><th>金额</th><th>支付 / 下单时间</th></tr>'+allOrderRows+'</table></div>\
   <div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
-  document.getElementById('modal').style.width='640px';
+  document.getElementById('modal').style.width='960px';
+  document.getElementById('modal').style.maxWidth='94vw';
 };
 
 /* ---------- 4. 素材请求与问题反馈 ---------- */
