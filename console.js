@@ -1379,11 +1379,11 @@ window.userDetail=async(id)=>{
   <div id="dt-p3" style="display:none;max-height:200px;overflow:auto"><table><tr><th>画板</th><th>最近编辑</th><th>分享状态</th><th>打开过的人</th></tr>'+bdRows+'</table></div>\
   <div id="dt-p4" style="display:none;max-height:260px;overflow:auto">'+dlRows+'</div>\
   <div id="dt-p5" style="display:none;max-height:220px;overflow:auto"><table><tr><th>下单时间</th><th>积分</th><th>金额</th><th>状态 / 渠道</th><th>流水号</th></tr>'+coListRows+'</table></div>\
-  <div id="dt-p6" style="display:none;max-height:260px;overflow:auto"><table><tr><th>类型</th><th>商户订单号</th><th>微信/支付宝交易号</th><th>状态</th><th>支付方式</th><th>金额</th><th>支付 / 下单时间</th><th>操作</th></tr>'+allOrderRows+'</table></div>\
+  <div id="dt-p6" style="display:none;overflow:visible"><table><tr><th>类型</th><th>商户订单号</th><th>微信/支付宝交易号</th><th>状态</th><th>支付方式</th><th>金额</th><th>支付 / 下单时间</th><th>操作</th></tr>'+allOrderRows+'</table></div>\
   <div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
-  document.getElementById('modal').style.width='960px';
-  document.getElementById('modal').style.maxWidth='94vw';
-  document.getElementById('modal').style.height='86vh';
+  document.getElementById('modal').style.width='1200px';
+  document.getElementById('modal').style.maxWidth='96vw';
+  document.getElementById('modal').style.height='92vh';
   document.getElementById('modal').style.overflowY='auto';
 };
 window.refundOrder=async(id)=>{
