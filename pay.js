@@ -464,6 +464,8 @@ module.exports = function registerPay(app, deps) {
     order.outTradeNo = order.id.replace(/-/g, '');
     order.payChannel = channel;
     order.tradeType = tradeType;
+    // 新版单次权益订单才允许绑定未来导出码；旧订单缺少使用轨迹，绝不自动关联新作品。
+    order.creditSchema = 1;
     saveJSON(ORDERS_FILE, orders);
     return { order, reused };
   }

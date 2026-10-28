@@ -287,7 +287,8 @@ function ok(name) { passed++; console.log('  ✅', name); }
   assert.strictEqual(d1.ok, true);
   assert.strictEqual(d1.order.kind, 'export');
   assert.strictEqual(d1.order.amount, 6.9);
-  ok('D2 exportBoard 下单成功（kind=export，¥6.9）');
+  assert.strictEqual(d1.order.creditSchema, 1);
+  ok('D2 exportBoard 下单成功（kind=export，¥6.9，可绑定授权码）');
 
   assert.strictEqual(await notify(d1.order), 'success');
   assert.strictEqual(readUser().exportCredits, 1);

@@ -269,12 +269,13 @@ module.exports = function registerConsole(app, deps) {
       const exportByCode = new Map(readJSON(path.join(DATA_DIR, 'console', 'exports.json'), []).map(x => [x.code, x]));
       const seen = new Map();
       for (const l of dls) {
+        const licenseStatus = l.status === 'refund-revoked' || l.revokeReason === 'refund' ? '退款回收' : '有效';
         if (l.kind === 'export') {
           const archive = exportByCode.get(l.code);
           seen.set('export:' + (l.code || l.time), {
             id: 'export:' + (l.code || l.time), kind: 'export',
             title: l.boardTitle || '画板导出作品', exportId: archive ? archive.id : '',
-            thumb: l.thumb || null, time: l.time, code: l.code || null,
+            thumb: l.thumb || null, time: l.time, code: l.code || null, licenseStatus,
           });
           continue;
         }
@@ -292,6 +293,7 @@ module.exports = function registerConsole(app, deps) {
           local: hit ? !!hit.m.local : false,
           time: l.time,
           code: l.code || null,
+          licenseStatus,
           removed: hit ? !!hit.m.removed : true,
         });
       }
@@ -441,6 +443,121 @@ module.exports = function registerConsole(app, deps) {
     res.setHeader('Content-Type', l.fmt === 'jpg' || f.endsWith('.jpg') ? 'image/jpeg' : (l.fmt === 'tif' || f.endsWith('.tif') ? 'image/tiff' : 'image/png'));
     res.setHeader('Cache-Control', 'private, max-age=3600');
     fs.createReadStream(f).pipe(res);
+  });
+
+  // 退款预览与执行：只处理 OneFig 权益和授权码，不在站内发起资金退款。
+  // 授权码流水永不删除；退款后公开验真失败，后台仍可审计完整来源。
+  function refundImpact(order, user, allOrders, allDownloads) {
+    const lines = [];
+    const downloads = allDownloads || [];
+    if (order.kind === 'export') {
+      const licenseCodes = [...new Set(downloads.filter(l => l.kind === 'export' && l.userId === order.userId && l.code &&
+        (l.orderId === order.id || (order.exportCode && l.code === order.exportCode))).map(l => l.code))];
+      const consumed = !!(order.exportCode || order.consumedAt);
+      // 旧订单若没有订单↔授权码关联，只在余额足以证明所有未关联订单都未使用时扣减，绝不猜测。
+      const unlinkedPaid = allOrders.filter(o => o.userId === order.userId && o.kind === 'export' && o.status === 'paid' && !o.exportCode && !o.consumedAt).length;
+      const balance = Math.max(0, Number(user.exportCredits) || 0);
+      const exportCreditsDelta = !consumed && !licenseCodes.length && balance >= unlinkedPaid ? Math.min(1, balance) : 0;
+      if (licenseCodes.length) lines.push(`收回授权码 ${licenseCodes.join('、')}（公开验真将显示“已退款回收”）`);
+      else if (exportCreditsDelta) lines.push('扣回 1 次未使用的画板导出权益');
+      else if (consumed) lines.push('该订单的导出授权码记录缺失，请在后台授权码查询中人工核对');
+      else lines.push('旧订单的使用记录不完整，未自动扣减或回收其他作品的授权码，请人工核对');
+      return { kind: 'export', creditsDelta: 0, exportCreditsDelta, licenseCodes, lines };
+    }
+    if (order.materialId) {
+      const licenseCodes = [...new Set(downloads.filter(l => l.userId === order.userId && l.materialId === order.materialId && l.code).map(l => l.code))];
+      lines.push('取消该素材的后续下载权益；历史下载记录保留');
+      lines.push(licenseCodes.length ? `收回授权码 ${licenseCodes.join('、')}（公开验真将显示“已退款回收”）` : '该订单尚无下载授权码，无需回收');
+      return { kind: 'single', creditsDelta: 0, materialId: order.materialId, licenseCodes, lines };
+    }
+    const history = loadLevelLog().filter(l => l.userId === order.userId && l.to === order.plan)
+      .sort((a, b) => String(b.time).localeCompare(String(a.time)));
+    const orderTime = String(order.paidAt || order.createdAt || '');
+    const previousPaid = allOrders.filter(o => o.id !== order.id && o.userId === order.userId && o.status === 'paid' && PLANS[o.plan] && !o.materialId && !o.kind && String(o.paidAt || o.createdAt || '') < orderTime)
+      .sort((a, b) => String(b.paidAt || b.createdAt).localeCompare(String(a.paidAt || a.createdAt)))[0];
+    const previousLevel = history[0] ? history[0].from : (previousPaid ? previousPaid.plan : 'none');
+    const creditsDelta = Math.max(0, (MEMBER_GIFT[order.plan] || 0) - (MEMBER_GIFT[previousLevel] || 0));
+    const levelChanged = (user.level || 'none') !== order.plan;
+    if (!levelChanged && previousLevel !== order.plan) lines.push(`会员等级恢复为 ${PLANS[previousLevel] || '非会员'}`);
+    else if (levelChanged) lines.push('当前会员档位已发生其他变化，不自动改等级');
+    else lines.push('会员档位保持不变');
+    if (creditsDelta) lines.push(`扣回本次档位对应的赠送积分 ${creditsDelta}（最多扣到 0，不出现负数）`);
+    return { kind: 'member', previousLevel, previousPaidAt: previousPaid ? (previousPaid.paidAt || previousPaid.createdAt) : null, levelChanged, creditsDelta, licenseCodes: [], lines };
+  }
+  app.get('/console/api/orders/:id/refund-preview', consoleAuth, (req, res) => {
+    const orders = load('orders.json', []);
+    const order = orders.find(o => o.id === req.params.id);
+    if (!order) return res.status(404).json({ ok: false, error: '订单不存在' });
+    if (order.status !== 'paid') return res.status(400).json({ ok: false, error: '只有已支付订单可以退款' });
+    const user = load('users.json', []).find(u => u.id === order.userId);
+    if (!user) return res.status(404).json({ ok: false, error: '用户不存在' });
+    const impact = refundImpact(order, user, orders, load('downloads.json', []));
+    res.json({ ok: true, order, impact, notice: '请确认你已在微信/支付宝商户平台完成资金退款。这里只收回 OneFig 权益和对应授权码。' });
+  });
+  app.post('/console/api/orders/:id/refund', consoleAuth, (req, res) => {
+    if (!req.body || req.body.confirm !== true) return res.status(400).json({ ok: false, error: '请先查看退款预览并确认' });
+    // 保留写入前快照；任一文件写入失败时恢复原始版本，而不是把已修改的内存对象写回。
+    const original = {
+      users: load('users.json', []), orders: load('orders.json', []), purchases: load('purchases.json', []),
+      downloads: load('downloads.json', []), creditLog: loadLog(), levelLog: loadLevelLog(), refundLog: load('refund-log.json', []),
+    };
+    const copy = value => JSON.parse(JSON.stringify(value));
+    const users = copy(original.users), orders = copy(original.orders), purchases = copy(original.purchases), downloads = copy(original.downloads);
+    const order = orders.find(o => o.id === req.params.id);
+    if (!order) return res.status(404).json({ ok: false, error: '订单不存在' });
+    if (order.status === 'refunded') return res.status(400).json({ ok: false, error: '该订单已退款，请勿重复操作' });
+    if (order.status !== 'paid') return res.status(400).json({ ok: false, error: '只有已支付订单可以退款' });
+    const user = users.find(u => u.id === order.userId);
+    if (!user) return res.status(404).json({ ok: false, error: '用户不存在' });
+    const impact = refundImpact(order, user, orders, downloads);
+    const refundedAt = new Date().toISOString();
+    try {
+      if (impact.kind === 'member') {
+        user.credits = Math.max(0, (user.credits || 0) - impact.creditsDelta);
+        if (impact.creditsDelta) logCredit(user, -impact.creditsDelta, '会员退款扣回赠送积分', 'admin');
+        if (!impact.levelChanged) {
+          logLevel(user, user.level || 'none', impact.previousLevel, 'admin');
+          user.level = impact.previousLevel;
+          user.memberSince = impact.previousPaidAt;
+          if (impact.previousLevel === 'none') delete user.creditsGrantedFor;
+          else user.creditsGrantedFor = impact.previousLevel;
+        }
+      } else if (impact.kind === 'single') {
+        const remaining = purchases.filter(p => !(p.orderId === order.id || (p.userId === order.userId && p.materialId === order.materialId)));
+        save('purchases.json', remaining);
+      } else if (impact.kind === 'export') {
+        user.exportCredits = Math.max(0, (user.exportCredits || 0) - impact.exportCreditsDelta);
+      }
+      if (impact.licenseCodes.length) {
+        downloads.forEach(l => {
+          if (impact.licenseCodes.includes(l.code)) {
+            l.status = 'refund-revoked';
+            l.revokeReason = 'refund';
+            l.refundOrderId = order.id;
+            l.revokedAt = refundedAt;
+          }
+        });
+        save('downloads.json', downloads);
+      }
+      order.status = 'refunded';
+      order.refundedAt = refundedAt;
+      order.refundedBy = 'admin';
+      order.refundImpact = impact.lines;
+      order.refundedLicenseCodes = impact.licenseCodes;
+      save('users.json', users);
+      save('orders.json', orders);
+      save('refund-log.json', [...original.refundLog, { orderId: order.id, userId: order.userId, impact: impact.lines, licenseCodes: impact.licenseCodes, time: refundedAt, by: 'admin' }]);
+      res.json({ ok: true, order, impact });
+    } catch (e) {
+      save('users.json', original.users);
+      save('orders.json', original.orders);
+      save('purchases.json', original.purchases);
+      save('downloads.json', original.downloads);
+      saveLog(original.creditLog);
+      save('level-log.json', original.levelLog);
+      save('refund-log.json', original.refundLog);
+      res.status(500).json({ ok: false, error: '退款权益处理失败，已恢复原数据' });
+    }
   });
 
   app.delete('/console/api/orders/:id', consoleAuth, (req, res) => {
@@ -1170,8 +1287,29 @@ H.users=async()=>{
     <td>'+(u.memberSince?esc(u.memberSince.slice(0,10)):'—')+'</td><td>'+u.orderCount+' 笔</td><td><b>'+yuan(u.totalPaid)+'</b></td>\
     <td><button class="btn btn-g btn-xs" onclick="userDetail(\\''+u.id+'\\')">详情</button></td></tr>').join('')
     ||'<tr><td colspan="8" style="color:#b0aac4;text-align:center;padding:24px">暂无用户</td></tr>';
-  return '<div class="toolbar"><h2>👥 账号管理</h2><div class="sp"></div><input placeholder="搜索昵称/邮箱" value="'+esc(userQ)+'" onchange="userQ=this.value;route()" style="width:200px"><button class="btn btn-g" onclick="creditLogModal()">⚡ 积分流水</button></div>\
+  return '<div class="toolbar"><h2>👥 账号管理</h2><div class="sp"></div><input placeholder="搜索昵称/邮箱" value="'+esc(userQ)+'" onchange="userQ=this.value;route()" style="width:200px"><button class="btn btn-g" onclick="licenseLookupModal()">🔑 授权码查询</button><button class="btn btn-g" onclick="creditLogModal()">⚡ 积分流水</button></div>\
   <div class="panel"><table><tr><th>昵称</th><th>邮箱</th><th>会员等级</th><th>AI积分</th><th>开通时间</th><th>订单</th><th>累计付款</th><th></th></tr>'+rows+'</table></div>';
+};
+window.licenseLookupModal=()=>{
+  showModal('<h3>🔑 授权码查询</h3><div class="sub" style="margin-bottom:12px">支持素材下载码和画板导出码；退款回收的记录也会保留在这里。</div><div style="display:flex;gap:8px"><input id="license-code" placeholder="例如 OF-2026-ABC123" style="flex:1;font-family:monospace" onkeydown="if(event.key===\\'Enter\\')doLicenseLookup()"><button class="btn btn-p" onclick="doLicenseLookup()">查询</button></div><div id="license-result" style="margin-top:16px"></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
+  const m=document.getElementById('modal');m.style.height='auto';m.style.maxHeight='86vh';m.style.overflowY='auto';
+  setTimeout(()=>document.getElementById('license-code').focus(),0);
+};
+window.doLicenseLookup=async()=>{
+  const input=document.getElementById('license-code'),out=document.getElementById('license-result'),code=input.value.trim();
+  if(!code)return toast('请输入授权码');
+  out.innerHTML='<div class="sub">正在查询…</div>';
+  try{
+    const d=await api('/console/api/license-lookup?code='+encodeURIComponent(code)),r=d.record,u=d.user,o=d.order,revoked=r.status==='退款回收';
+    const row=(k,v)=>'<tr><td style="width:110px;color:#8b84a3">'+k+'</td><td>'+v+'</td></tr>';
+    out.innerHTML='<div style="border:1px solid '+(revoked?'#f0b4c8':'#bde5cd')+';background:'+(revoked?'#fff5f8':'#f3fbf6')+';border-radius:12px;padding:14px"><div style="font-size:16px;font-weight:700;color:'+(revoked?'#d6336c':'#2f9e5f')+';margin-bottom:10px">'+(revoked?'⛔ 退款回收':'✅ 授权有效')+'</div><table>'
+      +row('授权码','<b style="font-family:monospace">'+esc(r.code)+'</b> <button class="btn btn-g btn-xs" onclick="cpTxt(\\''+esc(r.code)+'\\')">复制</button>')
+      +row('类型',r.kind==='export'?'画板导出':'素材下载')+row('名称',esc(r.title))+row('系列',esc(r.series||'—'))+row('授权时间',fmtT(r.time))
+      +(revoked?row('回收时间',fmtT(r.revokedAt)):'')
+      +row('用户',u?'<b>'+esc(u.name||'—')+'</b> · '+esc(u.email||u.id):'账号已注销')
+      +(o?row('关联订单','<span style="font-family:monospace">'+esc(o.outTradeNo||o.id)+'</span> · '+esc(o.status==='refunded'?'已退款':o.status)):'')
+      +'</table>'+(u?'<div class="btns"><button class="btn btn-g" onclick="userDetail(\\''+u.id+'\\')">查看用户详情</button></div>':'')+'</div>';
+  }catch(e){out.innerHTML='<div style="color:#d6336c;padding:12px">'+esc(e.message)+'</div>'}
 };
 window.creditLogModal=async()=>{const d=await api('/console/api/credit-log').catch(()=>({list:[]}));const rows=d.list.map(l=>'<tr><td>'+fmtT(l.time)+'</td><td><b>'+esc(l.name||'')+'</b></td><td style="color:'+(l.delta>0?'#2f9e5f':'#d6336c')+';font-weight:600">'+(l.delta>0?'+':'')+l.delta+'</td><td>'+esc(l.reason||'')+'</td><td>'+esc(l.by||'')+'</td></tr>').join('')||'<tr><td colspan="5" style="text-align:center;color:#b0aac4;padding:20px">暂无流水</td></tr>';
   showModal('<h3>⚡ 积分流水（最近 200 条）</h3><div style="max-height:320px;overflow:auto"><table><tr><th>时间</th><th>用户</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+rows+'</table></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>')};
@@ -1209,7 +1347,7 @@ window.userDetail=async(id)=>{
       const sub=m.kind==='export'?'画板导出':m.folder;
       DL_IMGS.push({src:src,t:m.title});
       const i=DL_IMGS.length-1;
-      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 2px;border-bottom:1px solid #f1eef9"><img src="'+src+'" onerror="this.style.opacity=.2" onclick="viewMatList(DL_IMGS,'+i+')" style="width:56px;height:56px;object-fit:contain;background:#f4f2fa;border-radius:8px;cursor:zoom-in;flex:none"><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(m.title)+'">'+esc(m.title)+'</div><div class="sub" style="font-size:12px">'+esc(sub)+' · '+fmtT(m.time)+'</div></div>'+(m.code?'<button class="btn btn-g btn-xs" title="点击复制授权码" onclick="cpTxt(\\''+m.code+'\\')">🔑 '+esc(m.code)+'</button>':'<span style="color:#b0aac4;font-size:12px">无授权码</span>')+'</div>'}).join('')
+      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 2px;border-bottom:1px solid #f1eef9"><img src="'+src+'" onerror="this.style.opacity=.2" onclick="viewMatList(DL_IMGS,'+i+')" style="width:56px;height:56px;object-fit:contain;background:#f4f2fa;border-radius:8px;cursor:zoom-in;flex:none"><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(m.title)+'">'+esc(m.title)+'</div><div class="sub" style="font-size:12px">'+esc(sub)+' · '+fmtT(m.time)+(m.licenseStatus==='退款回收'?' · <b style="color:#d6336c">退款回收</b>':'')+'</div></div>'+(m.code?'<button class="btn btn-g btn-xs" title="点击复制授权码" onclick="cpTxt(\\''+m.code+'\\')">🔑 '+esc(m.code)+'</button>':'<span style="color:#b0aac4;font-size:12px">无授权码</span>')+'</div>'}).join('')
     :'<div style="text-align:center;color:#b0aac4;padding:20px">还没有下载记录</div>';
   const coListRows=(d.creditOrders&&d.creditOrders.length)
     ?d.creditOrders.map(o=>{
@@ -1220,7 +1358,7 @@ window.userDetail=async(id)=>{
   const allOrderRows=(d.orders&&d.orders.length)
     ?d.orders.map(o=>{
       const type=o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':(lvName[o.plan]||'会员订单');
-      const status={pending:'待支付',notified:'待确认',paid:'已支付',expired:'已失效',failed:'支付失败'}[o.status]||o.status;
+      const status={pending:'待支付',notified:'待确认',paid:'已支付',refunded:'已退款',expired:'已失效',failed:'支付失败'}[o.status]||o.status;
       const color=o.status==='paid'?'#2f9e5f':o.status==='pending'?'#b8860b':'#8b84a3';
       const rawChannel=String(o.payChannel||o.channel||'');
       const channel=/wechat|微信/i.test(rawChannel)?'微信支付':/alipay|支付宝/i.test(rawChannel)?'支付宝':(rawChannel||'未知');
@@ -1228,8 +1366,9 @@ window.userDetail=async(id)=>{
       const providerNo=String(o.transactionId||'');
       const merchantCell='<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(merchantNo)+'</div><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+merchantNo+'\\')">复制商户单号</button>';
       const providerCell=providerNo?'<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(providerNo)+'</div><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+providerNo+'\\')">复制交易号</button>':'<span style="color:#b0aac4">未记录</span>';
-      return '<tr><td>'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+'</td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td></tr>'}).join('')
-    :'<tr><td colspan="7" style="text-align:center;color:#b0aac4;padding:14px">暂无订单</td></tr>';
+      const action=o.status==='paid'?'<button class="btn btn-d btn-xs" onclick="refundOrder(\\''+o.id+'\\')">退款回收</button>':o.status==='refunded'?'<span style="color:#d6336c;font-weight:600">已退款</span>':'<span style="color:#b0aac4">—</span>';
+      return '<tr><td>'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+'</td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td><td>'+action+'</td></tr>'}).join('')
+    :'<tr><td colspan="8" style="text-align:center;color:#b0aac4;padding:14px">暂无订单</td></tr>';
   showModal('<h3>👤 '+esc(d.user.name)+'</h3>\
   <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 本月已下 '+(d.user.dlUsed||0)+' 张 · 本月已导出 '+(d.user.exUsed||0)+' 次（单次权益剩 '+(d.user.exportCredits||0)+'） · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\
   <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center"><input id="m-delta" type="number" placeholder="积分调整，如 5 或 -3" style="flex:1"><input id="m-reason" placeholder="原因（选填）" style="flex:2"><button class="btn btn-g btn-xs" onclick="adjCredits(\\''+d.user.id+'\\')">调整</button></div>\
@@ -1240,12 +1379,28 @@ window.userDetail=async(id)=>{
   <div id="dt-p3" style="display:none;max-height:200px;overflow:auto"><table><tr><th>画板</th><th>最近编辑</th><th>分享状态</th><th>打开过的人</th></tr>'+bdRows+'</table></div>\
   <div id="dt-p4" style="display:none;max-height:260px;overflow:auto">'+dlRows+'</div>\
   <div id="dt-p5" style="display:none;max-height:220px;overflow:auto"><table><tr><th>下单时间</th><th>积分</th><th>金额</th><th>状态 / 渠道</th><th>流水号</th></tr>'+coListRows+'</table></div>\
-  <div id="dt-p6" style="display:none;max-height:260px;overflow:auto"><table><tr><th>类型</th><th>商户订单号</th><th>微信/支付宝交易号</th><th>状态</th><th>支付方式</th><th>金额</th><th>支付 / 下单时间</th></tr>'+allOrderRows+'</table></div>\
+  <div id="dt-p6" style="display:none;max-height:260px;overflow:auto"><table><tr><th>类型</th><th>商户订单号</th><th>微信/支付宝交易号</th><th>状态</th><th>支付方式</th><th>金额</th><th>支付 / 下单时间</th><th>操作</th></tr>'+allOrderRows+'</table></div>\
   <div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
   document.getElementById('modal').style.width='960px';
   document.getElementById('modal').style.maxWidth='94vw';
   document.getElementById('modal').style.height='86vh';
   document.getElementById('modal').style.overflowY='auto';
+};
+window.refundOrder=async(id)=>{
+  try{
+    const d=await api('/console/api/orders/'+encodeURIComponent(id)+'/refund-preview'),o=d.order;
+    const type=o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':'会员订单';
+    const lines=(d.impact.lines||[]).map(x=>'<li style="margin:7px 0">'+esc(x)+'</li>').join('');
+    showModal('<h3>退款回收确认</h3><div style="background:#fff7e8;border:1px solid #f1d39a;border-radius:12px;padding:14px;line-height:1.7"><b>请先在微信/支付宝商户平台完成资金退款。</b><br>'+esc(d.notice)+'</div><div style="margin:16px 0"><b>'+esc(type)+' · '+yuan(o.amount)+'</b><div class="sub" style="margin-top:6px">商户订单号：<span style="font-family:monospace">'+esc(o.outTradeNo||o.id)+'</span></div></div><h4>将执行以下操作：</h4><ul style="padding-left:22px;line-height:1.6">'+lines+'</ul><div class="sub">历史订单、下载记录和授权记录不会删除；授权码退款回收后，公开验真将不能通过。</div><div class="btns"><button class="btn btn-g" onclick="userDetail(\\''+o.userId+'\\')">取消</button><button class="btn btn-d" id="refund-confirm" onclick="doRefund(\\''+o.id+'\\')">已在商户平台退款，确认回收</button></div>');
+    const m=document.getElementById('modal');m.style.width='680px';m.style.maxWidth='94vw';m.style.height='auto';m.style.maxHeight='86vh';m.style.overflowY='auto';
+  }catch(e){toast(e.message)}
+};
+window.doRefund=async(id)=>{
+  const btn=document.getElementById('refund-confirm');if(btn){btn.disabled=true;btn.textContent='正在回收…'}
+  try{
+    const d=await api('/console/api/orders/'+encodeURIComponent(id)+'/refund',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});
+    MODAL_BACK=null;document.getElementById('mask').style.display='none';toast('已标记退款并回收对应权益 ✅');await userDetail(d.order.userId);
+  }catch(e){if(btn){btn.disabled=false;btn.textContent='已在商户平台退款，确认回收'}toast(e.message)}
 };
 
 /* ---------- 4. 素材请求与问题反馈 ---------- */

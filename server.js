@@ -896,6 +896,17 @@ app.post('/api/export/commit', authUser, (req, res) => {
     if (level !== 'pro' && level !== 'team' && (fmt === 'pdf' || fmt === 'svg' || dpi > 300)) {
       return res.json({ ok: false, reason: 'fmt' });
     }
+    let exportOrder = null;
+    let exportOrders = null;
+    // 消耗单次导出权益时锁定最早一笔未使用订单，授权码生成后写回同一订单，退款才能精确回收。
+    const useExportCredit = () => {
+      if ((u.exportCredits || 0) <= 0) return false;
+      u.exportCredits = (u.exportCredits || 0) - 1;
+      exportOrders = loadJSON(ORDERS_FILE, []);
+      exportOrder = exportOrders.filter(o => o.userId === u.id && o.kind === 'export' && o.creditSchema === 1 && o.status === 'paid' && !o.exportCode && !o.consumedAt)
+        .sort((a, b) => String(a.paidAt || a.createdAt).localeCompare(String(b.paidAt || b.createdAt)))[0] || null;
+      return true;
+    };
     const month = curMonth();
     if (u.exMonth !== month) { u.exMonth = month; u.exUsed = 0; }
     if (level !== 'team') {
@@ -903,14 +914,12 @@ app.post('/api/export/commit', authUser, (req, res) => {
       if (limit !== undefined) {
         if ((u.exUsed || 0) >= limit) {
           // 月度额度用完 → 回落单次导出权益（2026-10-25 修复"会员买了单次用不了"的 bug）
-          if ((u.exportCredits || 0) <= 0) return res.json({ ok: false, reason: 'quota', limit, used: u.exUsed });
-          u.exportCredits = (u.exportCredits || 0) - 1;
+          if (!useExportCredit()) return res.json({ ok: false, reason: 'quota', limit, used: u.exUsed });
         } else {
           u.exUsed = (u.exUsed || 0) + 1;
         }
       } else {
-        if ((u.exportCredits || 0) <= 0) return res.json({ ok: false, reason: 'no-plan' });
-        u.exportCredits = (u.exportCredits || 0) - 1;
+        if (!useExportCredit()) return res.json({ ok: false, reason: 'no-plan' });
       }
       const users = loadUsers();
       const ui = users.findIndex(x => x.id === u.id);
@@ -918,17 +927,24 @@ app.post('/api/export/commit', authUser, (req, res) => {
     }
     const logs = loadJSON(DOWNLOADS_FILE, []);
     const code = genLicenseCode(logs);
+    const exportedAt = new Date().toISOString();
     const boardTitle = String((req.body || {}).boardTitle || '').slice(0, 80);
     const boardId = String((req.body || {}).boardId || '');
     // 缩略图随导出快照保存：画板日后删除/重建，历史导出记录的预览图依然可用（2026-10-26）
     const bmeta = boardId ? loadBoardIndex(u.id).boards.find(b => b.id === boardId) : null;
     logs.push({
       userId: u.id, kind: 'export', materialId: '画板导出作品',
+      orderId: exportOrder ? exportOrder.id : null,
       boardId, boardTitle,
       thumb: (bmeta && bmeta.thumb) || null,
-      code, time: new Date().toISOString(), free: false,
+      code, time: exportedAt, free: false,
     });
     saveJSON(DOWNLOADS_FILE, logs);
+    if (exportOrder) {
+      exportOrder.exportCode = code;
+      exportOrder.consumedAt = exportedAt;
+      saveJSON(ORDERS_FILE, exportOrders);
+    }
     res.json({ ok: true, code });
   } catch (e) {
     res.status(500).json({ ok: false, error: '核销失败，请稍后再试' });
@@ -990,8 +1006,8 @@ app.get('/api/download', authUser, (req, res) => {
     if (hit.m.removed && !already && !purchased) {
       return res.status(403).json({ ok: false, error: '该素材已下架，暂不提供下载' });
     }
-    // 授权码：同一用户对同一素材固定一个码（重复下载沿用首个码）
-    const code = (logs.find(l => l.userId === u.id && l.materialId === id && l.code) || {}).code || genLicenseCode(logs);
+    // 同一用户对同一素材沿用有效授权码；已退款回收的旧码不再复用，会员后续合法下载会获得新码。
+    const code = (logs.find(l => l.userId === u.id && l.materialId === id && l.code && l.status !== 'refund-revoked') || {}).code || genLicenseCode(logs);
     if (!already) {
       // 青果会员：每月 5 张额度（自然月重置，重复下载不占额度）；单张购买过的素材不占额度
       if (level === 'basic' && !purchased) {
@@ -1083,6 +1099,10 @@ app.get('/api/verify', verifyRateLimit, optionalAuth, (req, res) => {
     if (!code) return res.status(400).json({ ok: false, error: '缺少授权码' });
     const hit = loadJSON(DOWNLOADS_FILE, []).find(l => l.code === code);
     if (!hit) return res.json({ ok: false, error: '授权码不存在' });
+    // 退款回收是明确失效状态：公开验真不再返回证书内容，也不计入成功查询监控。
+    if (hit.status === 'refund-revoked' || hit.revokeReason === 'refund') {
+      return res.json({ ok: false, error: '授权码已退款回收', code, status: '退款回收' });
+    }
     const data = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), []);
     let mat = null;
     for (const s of data) for (const m of s.materials) if (m.id === hit.materialId) { mat = { title: m.title, series: m.series || s.folder, removed: !!m.removed, file: m.file || (m.title + '.png'), folder: s.folder, local: !!m.local }; break; }
@@ -1161,17 +1181,29 @@ app.get('/api/verify', verifyRateLimit, optionalAuth, (req, res) => {
 // 后台：凭授权码反查下载记录与用户全部信息（仅管理员）
 app.get('/console/api/license-lookup', consoleAuth, (req, res) => {
   try {
-    const code = String(req.query.code || '').trim();
-    const hit = loadJSON(DOWNLOADS_FILE, []).find(l => l.code === code);
+    const code = String(req.query.code || '').trim().toUpperCase();
+    if (!code) return res.status(400).json({ ok: false, error: '请输入授权码' });
+    const hit = loadJSON(DOWNLOADS_FILE, []).find(l => String(l.code || '').toUpperCase() === code);
     if (!hit) return res.json({ ok: false, error: '授权码不存在' });
     const u = loadUsers().find(x => x.id === hit.userId) || null;
     const data = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), []);
     let mat = null;
     for (const s of data) for (const m of s.materials) if (m.id === hit.materialId) { mat = { title: m.title, series: m.series || s.folder, file: m.file }; break; }
+    const parts = String(hit.materialId || '').split('/');
+    const title = hit.kind === 'export' ? (hit.boardTitle || '画板导出作品') : (mat ? mat.title : (hit.materialTitle || parts[parts.length - 1] || hit.materialId));
+    const series = hit.kind === 'export' ? '画板导出' : (mat ? mat.series : (hit.materialSeries || parts.slice(0, -1).join('/')));
+    const orders = loadJSON(ORDERS_FILE, []);
+    const order = orders.find(o => o.id === hit.refundOrderId || o.id === hit.orderId) || orders.find(o => o.userId === hit.userId && o.materialId === hit.materialId && o.status === 'paid');
+    const revoked = hit.status === 'refund-revoked' || hit.revokeReason === 'refund';
     res.json({
       ok: true,
-      record: { code: hit.code, materialId: hit.materialId, material: mat, time: hit.time },
-      user: u ? { id: u.id, name: u.name, email: u.email, level: u.level, joinedAt: u.joinedAt, memberSince: u.memberSince, dlUsed: u.dlUsed || 0, notes: u.notes || '' } : null,
+      record: {
+        code: hit.code, kind: hit.kind || 'single', materialId: hit.materialId, title, series, time: hit.time,
+        status: revoked ? '退款回收' : '有效', revokedAt: hit.revokedAt || null,
+        revokeReason: hit.revokeReason || null, refundOrderId: hit.refundOrderId || null, orderId: hit.orderId || null,
+      },
+      order: order ? { id: order.id, outTradeNo: order.outTradeNo || '', transactionId: order.transactionId || '', kind: order.kind || 'member', materialTitle: order.materialTitle || '', amount: order.amount, status: order.status, paidAt: order.paidAt || null, refundedAt: order.refundedAt || null } : null,
+      user: u ? { id: u.id, name: u.name, email: u.email, level: u.level, joinedAt: u.joinedAt, memberSince: u.memberSince, dlUsed: u.dlUsed || 0, exportCredits: u.exportCredits || 0, notes: u.notes || '' } : null,
     });
   } catch { res.status(500).json({ ok: false, error: '查询失败' }); }
 });

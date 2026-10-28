@@ -8,6 +8,7 @@ const d = { orders: [
   { id: 'member-order', outTradeNo: 'merchant32chars0000000000000001', transactionId: 'wx-transaction-1', plan: 'pro', amount: 99.9, status: 'paid', payChannel: 'alipay', createdAt: '2026-10-01T00:00:00Z' },
   { id: 'single-order', kind: 'single', materialTitle: '线粒体-纵剖面', amount: 6.9, status: 'pending', channel: '微信支付', createdAt: '2026-10-02T00:00:00Z' },
   { id: 'export-order', kind: 'export', amount: 6.9, status: 'paid', payChannel: '支付宝', createdAt: '2026-10-03T00:00:00Z' },
+  { id: 'refunded-order', kind: 'single', materialTitle: '已退款素材', amount: 6.9, status: 'refunded', createdAt: '2026-10-04T00:00:00Z' },
 ] };
 const lvName = { none: '非会员', basic: '青果会员', pro: '红果会员', team: '金果会员' };
 const esc = value => String(value);
@@ -34,4 +35,14 @@ assert.match(source, /style.width='960px'/);
 assert.match(source, /id="dt-b6"/);
 assert.match(source, /id="dt-p6"/);
 assert.match(source, /\[1,2,3,4,5,6\]/);
-console.log('✓ 会员、单张素材、画板导出订单均显示类型、订单号、状态、金额和时间');
+assert.match(rows, /refundOrder\('member-order'\)/);
+assert.match(rows, /已退款/);
+assert.match(source, /<th>操作<\/th>/);
+assert.match(source, /colspan="8"/);
+assert.match(source, /window\.licenseLookupModal/);
+assert.match(source, /window\.doLicenseLookup/);
+assert.match(source, /\/console\/api\/license-lookup\?code=/);
+assert.match(source, /window\.refundOrder/);
+assert.match(source, /window\.doRefund/);
+assert.match(source, /退款回收/);
+console.log('✓ 订单类型与单号完整，支持退款回收和授权码查询入口');
