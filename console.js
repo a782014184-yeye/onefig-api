@@ -345,7 +345,10 @@ module.exports = function registerConsole(app, deps) {
     } catch {}
     const allOrders = [...my, ...creditOrders.map(o => ({ ...o, kind: 'credit', materialTitle: `${o.credits || 0} 积分` }))]
       .sort((a, b) => String(b.createdAt || b.paidAt || '').localeCompare(String(a.createdAt || a.paidAt || '')));
-    res.json({ ok: true, user: adminUserView(u), orders: allOrders, totalPaid: rmb(allOrders.filter(o => o.status === 'paid').reduce((s, o) => s + o.amount, 0)), levelLog, creditOrders, creditLog, boards, downloads });
+    // 待支付订单只在支付流程中使用，不在前后台订单列表展示，避免与真实付款记录混淆。
+    const visibleOrders = allOrders.filter(o => o.status !== 'pending');
+    const visibleCreditOrders = creditOrders.filter(o => o.status !== 'pending');
+    res.json({ ok: true, user: adminUserView(u), orders: visibleOrders, totalPaid: rmb(allOrders.filter(o => o.status === 'paid').reduce((s, o) => s + o.amount, 0)), levelLog, creditOrders: visibleCreditOrders, creditLog, boards, downloads });
   });
 
   const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制开通一次性赠送积分

@@ -67,7 +67,10 @@ write('level-log.json', [
   { userId: 'u-changed', from: 'none', to: 'pro', time: '2026-10-03T00:00:00.000Z', by: 'system' },
 ]);
 write('credit-log.json', [], aiDir);
-write('credit-orders.json', [{ id: 'c-credit', userId: 'u-credit', pkg: 'p100', credits: 100, amount: 9.9, status: 'paid', createdAt: '2026-10-05T00:00:00.000Z', paidAt: '2026-10-05T00:00:00.000Z', outTradeNo: 'CREDITPAY001', transactionId: 'TX-CREDIT-1' }], aiDir);
+write('credit-orders.json', [
+  { id: 'c-credit', userId: 'u-credit', pkg: 'p100', credits: 100, amount: 9.9, status: 'paid', createdAt: '2026-10-05T00:00:00.000Z', paidAt: '2026-10-05T00:00:00.000Z', outTradeNo: 'CREDITPAY001', transactionId: 'TX-CREDIT-1' },
+  { id: 'c-pending', userId: 'u-credit', pkg: 'p100', credits: 100, amount: 9.9, status: 'pending', createdAt: '2026-10-06T00:00:00.000Z' },
+], aiDir);
 write('refund-log.json', []);
 
 const child = spawn(process.execPath, ['server.js'], {
@@ -219,6 +222,10 @@ const snapshot = () => Object.fromEntries([
     assert.equal((await lookup(newCode)).body.order.id, 'e-commit');
     console.log('✓ 新导出自动绑定订单与授权码，退款可精确回收');
 
+    const visibleSingleOrders = (await user('u-single')).body.orders;
+    assert.equal(visibleSingleOrders.some(o => o.id === 's-pending'), false, '后台全部订单不得展示待支付记录');
+    assert.equal(read('orders.json').some(o => o.id === 's-pending' && o.status === 'pending'), true, '隐藏列表不得删除待支付数据');
+
     const creditPreview = await preview('c-credit');
     assert.equal(creditPreview.status, 200, JSON.stringify(creditPreview.body));
     assert.equal(creditPreview.body.impact.kind, 'credit');
@@ -226,6 +233,7 @@ const snapshot = () => Object.fromEntries([
     const creditBefore = await user('u-credit');
     assert.equal(creditBefore.body.orders[0].kind, 'credit');
     assert.equal(creditBefore.body.orders[0].materialTitle, '100 积分');
+    assert.equal(creditBefore.body.creditOrders.some(o => o.id === 'c-pending'), false, '后台积分订单不得展示待支付记录');
     assert.equal(creditBefore.body.totalPaid, 9.9);
     const creditRefund = await refund('c-credit');
     assert.equal(creditRefund.status, 200, JSON.stringify(creditRefund.body));
