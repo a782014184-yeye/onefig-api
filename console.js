@@ -1374,11 +1374,11 @@ window.userDetail=async(id)=>{
   <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center"><input id="m-delta" type="number" placeholder="积分调整，如 5 或 -3" style="flex:1"><input id="m-reason" placeholder="原因（选填）" style="flex:2"><button class="btn btn-g btn-xs" onclick="adjCredits(\\''+d.user.id+'\\')">调整</button></div>\
   <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap"><button class="btn btn-g btn-xs" onclick="resetQuota(\\''+d.user.id+'\\')">🧪 重置本月下载额度</button><button class="btn btn-g btn-xs" onclick="resetExport(\\''+d.user.id+'\\')">🧪 重置导出额度</button><button class="btn btn-g btn-xs" onclick="clearPurchases(\\''+d.user.id+'\\')">🧪 清空单张购买记录</button></div>\
   <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap"><button class="btn btn-xs btn-p" id="dt-b1" onclick="dtShow(1)">⚡ 积分变动记录</button><button class="btn btn-xs btn-g" id="dt-b2" onclick="dtShow(2)">📜 会员变更记录</button><button class="btn btn-xs btn-g" id="dt-b3" onclick="dtShow(3)">🎨 画板与分享</button><button class="btn btn-xs btn-g" id="dt-b4" onclick="dtShow(4)">⬇️ 下载历史</button><button class="btn btn-xs btn-g" id="dt-b5" onclick="dtShow(5)">🧾 积分订单</button><button class="btn btn-xs btn-g" id="dt-b6" onclick="dtShow(6)">🧾 全部订单</button></div>\
-  <div id="dt-p1" style="max-height:200px;overflow:auto"><table><tr><th>时间</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+coRows+'</table></div>\
-  <div id="dt-p2" style="display:none;max-height:200px;overflow:auto"><table><tr><th>时间</th><th>变更</th><th>操作者</th></tr>'+lvRows+'</table></div>\
-  <div id="dt-p3" style="display:none;max-height:200px;overflow:auto"><table><tr><th>画板</th><th>最近编辑</th><th>分享状态</th><th>打开过的人</th></tr>'+bdRows+'</table></div>\
-  <div id="dt-p4" style="display:none;max-height:260px;overflow:auto">'+dlRows+'</div>\
-  <div id="dt-p5" style="display:none;max-height:220px;overflow:auto"><table><tr><th>下单时间</th><th>积分</th><th>金额</th><th>状态 / 渠道</th><th>流水号</th></tr>'+coListRows+'</table></div>\
+  <div id="dt-p1" style="overflow:visible"><table><tr><th>时间</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+coRows+'</table></div>\
+  <div id="dt-p2" style="display:none;overflow:visible"><table><tr><th>时间</th><th>变更</th><th>操作者</th></tr>'+lvRows+'</table></div>\
+  <div id="dt-p3" style="display:none;overflow:visible"><table><tr><th>画板</th><th>最近编辑</th><th>分享状态</th><th>打开过的人</th></tr>'+bdRows+'</table></div>\
+  <div id="dt-p4" style="display:none;overflow:visible">'+dlRows+'</div>\
+  <div id="dt-p5" style="display:none;overflow:visible"><table><tr><th>下单时间</th><th>积分</th><th>金额</th><th>状态 / 渠道</th><th>流水号</th></tr>'+coListRows+'</table></div>\
   <div id="dt-p6" style="display:none;overflow:visible"><table><tr><th>类型</th><th>商户订单号</th><th>微信/支付宝交易号</th><th>状态</th><th>支付方式</th><th>金额</th><th>支付 / 下单时间</th><th>操作</th></tr>'+allOrderRows+'</table></div>\
   <div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
   document.getElementById('modal').style.width='1200px';
