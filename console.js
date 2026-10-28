@@ -934,9 +934,14 @@ const OSS_P='${OSS}';
 function matImg(m){return m.local?'/files/'+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.file||(m.title+'.png')):OSS_P+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.title)+'.webp'}
 function showModal(html){const m=document.getElementById('modal');m.style.width='';delete m.dataset.nav;m.innerHTML=html;document.getElementById('mask').style.display='flex'}
 /* 大图浏览：支持左右箭头 + 键盘 ← →，Escape 关闭；条目可为 {src,t} 带标题 */
-let VIEW_LIST=[],VIEW_I=0,CUR_IMGS=[],REQ_IMGS=[];
+let VIEW_LIST=[],VIEW_I=0,CUR_IMGS=[],REQ_IMGS=[],MODAL_BACK=null;
 window.viewMat=src=>viewMatList([{src}],0);
-window.viewMatList=(list,i)=>{VIEW_LIST=list;VIEW_I=i;renderView()};
+window.viewMatList=(list,i)=>{
+  const m=document.getElementById('modal');
+  // 从详情弹窗进入大图时记录父层；关闭大图应返回详情，而不是全部退出。
+  if(document.getElementById('mask').style.display==='flex'&&m.dataset.nav!=='1')MODAL_BACK={html:m.innerHTML,width:m.style.width};
+  VIEW_LIST=list;VIEW_I=i;renderView()
+};
 window.viewNav=d=>{if(document.getElementById('modal').dataset.nav!=='1')return;const n=VIEW_LIST.length;if(!n)return;VIEW_I=(VIEW_I+d+n)%n;renderView()};
 function renderView(){
   const it=VIEW_LIST[VIEW_I],src=it.src||it,t=it.t||'',multi=VIEW_LIST.length>1;
@@ -962,7 +967,15 @@ window.cpTxt=t=>{
   const fallback=()=>{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch(e){toast('复制失败，请手动选择')}document.body.removeChild(ta)};
   if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done).catch(fallback)}else fallback();
 };
-function closeModal(){document.getElementById('mask').style.display='none'}
+function closeModal(){
+  if(MODAL_BACK){
+    const m=document.getElementById('modal'),back=MODAL_BACK;MODAL_BACK=null;
+    m.innerHTML=back.html;m.style.width=back.width;delete m.dataset.nav;
+    document.getElementById('mask').style.display='flex';
+    return;
+  }
+  document.getElementById('mask').style.display='none';
+}
 document.getElementById('mask').onclick=e=>{if(e.target.id==='mask')closeModal()};
 
 /* ---------- 1. 数据看板 ---------- */
