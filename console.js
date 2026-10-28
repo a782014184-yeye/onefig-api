@@ -300,6 +300,11 @@ module.exports = function registerConsole(app, deps) {
       for (const l of dls) {
         const licenseStatus = l.status === 'refund-revoked' || l.revokeReason === 'refund' ? '退款回收' : '有效';
         if (l.kind === 'export') {
+          const linkedOrder = l.orderId && my.find(o => o.id === l.orderId);
+          if (linkedOrder) {
+            linkedOrder.exportCode = l.code || linkedOrder.exportCode;
+            linkedOrder.licenseStatus = licenseStatus;
+          }
           const archive = exportByCode.get(l.code);
           seen.set('export:' + (l.code || l.time), {
             id: 'export:' + (l.code || l.time), kind: 'export',
@@ -540,10 +545,23 @@ module.exports = function registerConsole(app, deps) {
     if (!user) return res.status(404).json({ ok: false, error: '用户不存在' });
     const impact = refundImpact(order, user, orders, downloads);
     const refundedAt = new Date().toISOString();
+    // 撤销只回滚本次实际影响；积分曾扣到 0 时记录真实扣减量，避免撤销时多送积分。
+    const undoData = {
+      kind: impact.kind,
+      licenseCodes: impact.licenseCodes,
+      exportCreditsDelta: impact.exportCreditsDelta || 0,
+      levelRestored: impact.kind === 'member' && !impact.levelChanged && impact.previousLevel !== order.plan,
+      previousLevel: impact.previousLevel || null,
+      creditsRestored: 0,
+      memberSince: user.memberSince || null,
+      creditsGrantedFor: user.creditsGrantedFor || null,
+    };
     try {
       if (impact.kind === 'member') {
-        user.credits = Math.max(0, (user.credits || 0) - impact.creditsDelta);
-        if (impact.creditsDelta) logCredit(user, -impact.creditsDelta, '会员退款扣回赠送积分', 'admin');
+        const beforeCredits = Math.max(0, Number(user.credits) || 0);
+        user.credits = Math.max(0, beforeCredits - impact.creditsDelta);
+        undoData.creditsRestored = beforeCredits - user.credits;
+        if (undoData.creditsRestored) logCredit(user, -undoData.creditsRestored, '会员退款扣回赠送积分', 'admin');
         if (!impact.levelChanged) {
           logLevel(user, user.level || 'none', impact.previousLevel, 'admin');
           user.level = impact.previousLevel;
@@ -573,6 +591,7 @@ module.exports = function registerConsole(app, deps) {
       order.refundedBy = 'admin';
       order.refundImpact = impact.lines;
       order.refundedLicenseCodes = impact.licenseCodes;
+      order.refundUndoData = undoData;
       save('users.json', users);
       save('orders.json', orders);
       save('refund-log.json', [...original.refundLog, { orderId: order.id, userId: order.userId, impact: impact.lines, licenseCodes: impact.licenseCodes, time: refundedAt, by: 'admin' }]);
@@ -586,6 +605,110 @@ module.exports = function registerConsole(app, deps) {
       save('level-log.json', original.levelLog);
       save('refund-log.json', original.refundLog);
       res.status(500).json({ ok: false, error: '退款权益处理失败，已恢复原数据' });
+    }
+  });
+
+  // 撤销退款回收：仅恢复 OneFig 权益，不操作商户平台资金，也不删除退款审计记录。
+  app.post('/console/api/orders/:id/undo-refund', consoleAuth, (req, res) => {
+    if (!req.body || req.body.confirm !== true) return res.status(400).json({ ok: false, error: '请确认后再撤销退款回收' });
+    const original = {
+      users: load('users.json', []), orders: load('orders.json', []), purchases: load('purchases.json', []),
+      downloads: load('downloads.json', []), creditLog: loadLog(), levelLog: loadLevelLog(), refundLog: load('refund-log.json', []),
+    };
+    const copy = value => JSON.parse(JSON.stringify(value));
+    const users = copy(original.users), orders = copy(original.orders), purchases = copy(original.purchases), downloads = copy(original.downloads);
+    const order = orders.find(o => o.id === req.params.id);
+    if (!order) return res.status(404).json({ ok: false, error: '订单不存在' });
+    if (order.status !== 'refunded') return res.status(400).json({ ok: false, error: '只有已退款订单可以撤销回收' });
+    const user = users.find(u => u.id === order.userId);
+    if (!user) return res.status(404).json({ ok: false, error: '用户不存在' });
+    const kind = order.kind === 'export' ? 'export' : order.materialId ? 'single' : 'member';
+    let data = order.refundUndoData;
+    if (!data) {
+      // 兼容新快照上线前的退款；积分曾扣到 0 的旧记录无法得知实际扣减量，必须人工处理。
+      const lines = order.refundImpact || [];
+      const creditLine = lines.find(x => x.includes('赠送积分')) || '';
+      const match = creditLine.match(/赠送积分\s+(\d+)/);
+      const creditsRestored = match ? Number(match[1]) : 0;
+      if (kind === 'member' && creditsRestored > 0 && (Number(user.credits) || 0) <= 0) {
+        return res.status(400).json({ ok: false, error: '旧退款缺少积分快照，不能安全撤销，请人工核对后调整' });
+      }
+      const levelLine = lines.find(x => x.startsWith('会员等级恢复为')) || '';
+      const previousLevel = levelLine ? (Object.keys(PLANS).find(k => levelLine.includes(PLANS[k])) || 'none') : null;
+      data = {
+        kind,
+        licenseCodes: order.refundedLicenseCodes || [],
+        exportCreditsDelta: lines.some(x => x.includes('扣回 1 次未使用')) ? 1 : 0,
+        levelRestored: !!levelLine,
+        previousLevel,
+        creditsRestored,
+        memberSince: user.memberSince || null,
+        creditsGrantedFor: user.creditsGrantedFor || null,
+      };
+    }
+    const undoneAt = new Date().toISOString();
+    try {
+      if (kind === 'member') {
+        const restored = Math.max(0, Number(data.creditsRestored) || 0);
+        user.credits = Math.max(0, Number(user.credits) || 0) + restored;
+        if (restored) logCredit(user, restored, '撤销会员退款回收，返还实际扣减积分', 'admin');
+        if (data.levelRestored) {
+          const current = user.level || 'none';
+          if (current === data.previousLevel) {
+            logLevel(user, current, order.plan, 'admin');
+            user.level = order.plan;
+            user.memberSince = data.memberSince || order.paidAt || order.createdAt || null;
+            user.creditsGrantedFor = data.creditsGrantedFor || order.plan;
+          }
+          // 若用户此后已改成其他档位，不覆盖后续变化；只恢复实际扣减积分。
+        }
+      } else if (kind === 'single') {
+        if (!purchases.some(p => p.userId === order.userId && p.materialId === order.materialId)) {
+          purchases.push({
+            userId: order.userId, materialId: order.materialId, materialTitle: order.materialTitle || '', orderId: order.id,
+            amount: order.amount, channel: order.channel || '', paidAt: order.paidAt || null,
+            refundConsent: !!order.refundConsent, refundConsentAt: order.refundConsentAt || null,
+          });
+        }
+        save('purchases.json', purchases);
+      } else if (kind === 'export') {
+        user.exportCredits = Math.max(0, Number(user.exportCredits) || 0) + Math.max(0, Number(data.exportCreditsDelta) || 0);
+      }
+      const codes = data.licenseCodes || [];
+      if (codes.length) {
+        downloads.forEach(l => {
+          if (codes.includes(l.code) && l.refundOrderId === order.id) {
+            delete l.status;
+            delete l.revokeReason;
+            delete l.refundOrderId;
+            delete l.revokedAt;
+          }
+        });
+        save('downloads.json', downloads);
+      }
+      order.status = 'paid';
+      delete order.refundedAt;
+      delete order.refundedBy;
+      delete order.refundImpact;
+      delete order.refundedLicenseCodes;
+      delete order.refundUndoData;
+      const refundLog = copy(original.refundLog);
+      const entry = refundLog.slice().reverse().find(l => l.orderId === order.id && !l.undoneAt);
+      if (entry) { entry.undoneAt = undoneAt; entry.undoneBy = 'admin'; }
+      else refundLog.push({ orderId: order.id, userId: order.userId, action: 'undo-refund', time: undoneAt, by: 'admin' });
+      save('users.json', users);
+      save('orders.json', orders);
+      save('refund-log.json', refundLog);
+      res.json({ ok: true, order, restored: data });
+    } catch (e) {
+      save('users.json', original.users);
+      save('orders.json', original.orders);
+      save('purchases.json', original.purchases);
+      save('downloads.json', original.downloads);
+      saveLog(original.creditLog);
+      save('level-log.json', original.levelLog);
+      save('refund-log.json', original.refundLog);
+      res.status(500).json({ ok: false, error: '撤销失败，已恢复撤销前的数据' });
     }
   });
 
@@ -1422,8 +1545,10 @@ window.userDetail=async(id)=>{
       const providerNo=String(o.transactionId||'');
       const merchantCell='<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(merchantNo)+'</div><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+merchantNo+'\\')">复制商户单号</button>';
       const providerCell=providerNo?'<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(providerNo)+'</div><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+providerNo+'\\')">复制交易号</button>':'<span style="color:#b0aac4">未记录</span>';
-      const action=o.status==='paid'?'<button class="btn btn-d btn-xs" onclick="refundOrder(\\''+o.id+'\\')">退款回收</button>':o.status==='refunded'?'<span style="color:#d6336c;font-weight:600">已退款</span>':'<span style="color:#b0aac4">—</span>';
-      return '<tr><td>'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+'</td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td><td>'+action+'</td></tr>'}).join('')
+      const exportCode=String(o.exportCode||(o.refundedLicenseCodes&&o.refundedLicenseCodes[0])||'');
+      const exportCell=o.kind==='export'?'<div class="sub" style="margin-top:4px">导出码：'+(exportCode?'<span style="font-family:monospace">'+esc(exportCode)+'</span> <button class="btn btn-g btn-xs" title="复制导出授权码" onclick="cpTxt(\\''+exportCode+'\\')">复制</button>':'<span style="color:#b0aac4">未生成/未绑定</span>')+'</div>':'';
+      const action=o.status==='paid'?'<button class="btn btn-d btn-xs" onclick="refundOrder(\\''+o.id+'\\')">退款回收</button>':o.status==='refunded'?'<button class="btn btn-g btn-xs" onclick="undoRefundOrder(\\''+o.id+'\\')">撤销退款</button>':'<span style="color:#b0aac4">—</span>';
+      return '<tr><td>'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+exportCell+'</td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td><td>'+action+'</td></tr>'}).join('')
     :'<tr><td colspan="8" style="text-align:center;color:#b0aac4;padding:14px">暂无订单</td></tr>';
   showModal('<h3>👤 '+esc(d.user.name)+'</h3>\
   <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 本月已下 '+(d.user.dlUsed||0)+' 张 · 本月已导出 '+(d.user.exUsed||0)+' 次（单次权益剩 '+(d.user.exportCredits||0)+'） · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\
@@ -1457,6 +1582,13 @@ window.doRefund=async(id)=>{
     const d=await api('/console/api/orders/'+encodeURIComponent(id)+'/refund',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});
     MODAL_BACK=null;document.getElementById('mask').style.display='none';toast('已标记退款并回收对应权益 ✅');await userDetail(d.order.userId);
   }catch(e){if(btn){btn.disabled=false;btn.textContent='已在商户平台退款，确认回收'}toast(e.message)}
+};
+window.undoRefundOrder=async(id)=>{
+  if(!confirm('确定撤销这笔退款回收吗？\\n只恢复 OneFig 权益和授权码，不会撤销商户平台的资金退款。'))return;
+  try{
+    const d=await api('/console/api/orders/'+encodeURIComponent(id)+'/undo-refund',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});
+    MODAL_BACK=null;document.getElementById('mask').style.display='none';toast('已撤销回收并恢复对应权益 ✅');await userDetail(d.order.userId);
+  }catch(e){toast(e.message)}
 };
 
 /* ---------- 4. 素材请求与问题反馈 ---------- */

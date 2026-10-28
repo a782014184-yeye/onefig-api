@@ -98,6 +98,7 @@ const request = async (url, options = {}, admin = true) => {
 };
 const preview = id => request(`/console/api/orders/${id}/refund-preview`);
 const refund = (id, confirm = true) => request(`/console/api/orders/${id}/refund`, { method: 'POST', body: JSON.stringify({ confirm }) });
+const undo = (id, confirm = true) => request(`/console/api/orders/${id}/undo-refund`, { method: 'POST', body: JSON.stringify({ confirm }) });
 const verify = code => request(`/api/verify?code=${encodeURIComponent(code)}`, {}, false);
 const lookup = code => request(`/console/api/license-lookup?code=${encodeURIComponent(code)}`);
 const user = id => request(`/console/api/users/${id}`);
@@ -145,7 +146,8 @@ const snapshot = () => Object.fromEntries([
     member = read('users.json').find(u => u.id === 'u-changed');
     assert.equal(member.level, 'team', '档位另有变化时不得自动降级');
     assert.equal(member.credits, 0, '积分不得扣成负数');
-    console.log('✓ 会员另有变更时不改等级，积分最低为 0');
+    assert.equal(read('credit-log.json', aiDir).at(-1).delta, -5, '积分流水只记录实际扣减量');
+    console.log('✓ 会员另有变更时不改等级，积分最低为 0 且流水按实记录');
 
     assert.equal((await verify('OF-2026-SING01')).body.ok, true);
     const singlePreview = await preview('s-single');
@@ -219,6 +221,63 @@ const snapshot = () => Object.fromEntries([
     assert.equal(detail.body.downloads.find(d => d.code === 'OF-2026-USED01').licenseStatus, '退款回收');
     assert.equal(read('refund-log.json').length, 6, '每次成功退款只留一条审计记录');
     console.log('✓ 用户详情显示退款回收，退款审计日志完整');
+
+    assert.equal((await undo('m-pro', false)).status, 400);
+    const memberUndo = await undo('m-pro');
+    assert.equal(memberUndo.status, 200, JSON.stringify(memberUndo.body));
+    let restoredUser = read('users.json').find(u => u.id === 'u-member');
+    assert.equal(restoredUser.level, 'pro');
+    assert.equal(restoredUser.credits, 1000);
+    assert.equal(restoredUser.memberSince, '2026-10-03T00:00:00.000Z');
+    assert.equal((await user('u-member')).body.totalPaid, 129.8);
+    assert.equal((await undo('m-pro')).status, 400, '重复撤销必须拒绝');
+    assert.equal((await refund('m-pro')).status, 200);
+    restoredUser = read('users.json').find(u => u.id === 'u-member');
+    assert.equal(restoredUser.level, 'basic');
+    assert.equal(restoredUser.credits, 250);
+    console.log('✓ 会员撤销按快照恢复档位和积分，可再次退款且不能重复撤销');
+
+    const changedRefund = read('orders.json').find(o => o.id === 'm-changed');
+    assert.equal(changedRefund.refundUndoData.creditsRestored, 5, '扣到 0 时只记录真实扣减量');
+    assert.equal((await undo('m-changed')).status, 200);
+    assert.equal(read('users.json').find(u => u.id === 'u-changed').credits, 5, '撤销不得把套餐积分全部重复送回');
+    assert.equal((await refund('m-changed')).status, 200);
+
+    assert.equal((await undo('s-single')).status, 200);
+    assert.equal(read('purchases.json').length, 1);
+    assert.equal((await verify('OF-2026-SING01')).body.ok, true, '撤销后素材授权码恢复有效');
+    assert.equal((await refund('s-single')).status, 200);
+    assert.equal((await verify('OF-2026-SING01')).body.ok, false);
+
+    assert.equal((await undo('e-unused')).status, 200);
+    assert.equal(read('users.json').find(u => u.id === 'u-export-unused').exportCredits, 1);
+    assert.equal((await refund('e-unused')).status, 200);
+    assert.equal(read('users.json').find(u => u.id === 'u-export-unused').exportCredits, 0);
+
+    assert.equal((await undo('e-used')).status, 200);
+    assert.equal((await verify('OF-2026-USED01')).body.ok, true, '撤销后导出授权码恢复有效');
+    assert.equal(read('users.json').find(u => u.id === 'u-export-used').exportCredits, 1);
+    assert.equal((await refund('e-used')).status, 200);
+    assert.equal((await verify('OF-2026-USED01')).body.ok, false);
+
+    assert.equal((await undo('e-commit')).status, 200);
+    assert.equal((await verify(newCode)).body.ok, true);
+    assert.equal((await refund('e-commit')).status, 200);
+    assert.equal((await verify(newCode)).body.ok, false);
+    const ordersWithCodes = (await user('u-export-used')).body.orders;
+    assert.equal(ordersWithCodes.find(o => o.id === 'e-used').exportCode, 'OF-2026-USED01');
+    assert.equal(ordersWithCodes.find(o => o.id === 'e-used').licenseStatus, '退款回收');
+    console.log('✓ 素材和导出撤销恢复授权，订单列表保留对应导出码');
+
+    const legacyOrders = read('orders.json');
+    delete legacyOrders.find(o => o.id === 'm-changed').refundUndoData;
+    write('orders.json', legacyOrders);
+    const unsafeLegacyUndo = await undo('m-changed');
+    assert.equal(unsafeLegacyUndo.status, 400, '旧积分快照不完整时必须阻止不安全撤销');
+    assert.match(unsafeLegacyUndo.body.error, /不能安全撤销/);
+    assert.equal(read('refund-log.json').length, 12, '退款、撤销、再次退款均保留审计轨迹');
+    assert.equal(read('refund-log.json').filter(l => l.undoneAt).length, 6);
+    console.log('✓ 旧记录安全拦截，退款与撤销审计轨迹完整');
   } finally {
     await stop();
     fs.rmSync(dataDir, { recursive: true, force: true });
