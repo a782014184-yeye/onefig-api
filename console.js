@@ -297,7 +297,7 @@ module.exports = function registerConsole(app, deps) {
       }
       downloads = [...seen.values()].sort((a, b) => b.time.localeCompare(a.time));
     } catch {}
-    res.json({ ok: true, user: adminUserView(u), orders: my, totalPaid: rmb(my.reduce((s, o) => s + o.amount, 0)), levelLog, creditOrders, creditLog, boards, downloads });
+    res.json({ ok: true, user: adminUserView(u), orders: my, totalPaid: rmb(my.filter(o => o.status === 'paid').reduce((s, o) => s + o.amount, 0)), levelLog, creditOrders, creditLog, boards, downloads });
   });
 
   const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制开通一次性赠送积分
