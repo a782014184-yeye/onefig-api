@@ -1558,7 +1558,7 @@ window.userDetail=async(id)=>{
     ?d.orders.map(o=>{
       const type=o.kind==='credit'?'积分充值':o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':(lvName[o.plan]||'会员订单');
       const status={pending:'待支付',notified:'待确认',paid:'已支付',refunded:'已退款',expired:'已失效',failed:'支付失败'}[o.status]||o.status;
-      const color=o.status==='paid'?'#2f9e5f':o.status==='pending'?'#b8860b':'#8b84a3';
+      const color=o.status==='paid'?'#2f9e5f':o.status==='pending'?'#b8860b':o.status==='refunded'?'#d6336c':'#8b84a3';
       const rawChannel=String(o.payChannel||o.channel||'');
       const channel=/wechat|微信/i.test(rawChannel)?'微信支付':/alipay|支付宝/i.test(rawChannel)?'支付宝':(rawChannel||'未知');
       const merchantNo=String(o.outTradeNo||String(o.id||'').replace(/-/g,''));
@@ -1567,7 +1567,7 @@ window.userDetail=async(id)=>{
       const providerCell=providerNo?'<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(providerNo)+'</div><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+providerNo+'\\')">复制交易号</button>':'<span style="color:#b0aac4">未记录</span>';
       const exportCode=String(o.exportCode||(o.refundedLicenseCodes&&o.refundedLicenseCodes[0])||'');
       const exportCell=o.kind==='export'?'<div class="sub" style="margin-top:4px">导出码：'+(exportCode?'<span style="font-family:monospace">'+esc(exportCode)+'</span> <button class="btn btn-g btn-xs" title="复制导出授权码" onclick="cpTxt(\\''+exportCode+'\\')">复制</button>':'<span style="color:#b0aac4">未生成/未绑定</span>')+'</div>':'';
-      const action=o.status==='paid'?'<button class="btn btn-d btn-xs" onclick="refundOrder(\\''+o.id+'\\')">退款回收</button>':o.status==='refunded'?'<button class="btn btn-g btn-xs" onclick="undoRefundOrder(\\''+o.id+'\\')">撤销退款</button>':'<span style="color:#b0aac4">—</span>';
+      const action=o.status==='paid'?'<button class="btn btn-g btn-xs" onclick="refundOrder(\\''+o.id+'\\')">退款回收</button>':o.status==='refunded'?'<button class="btn btn-g btn-xs" onclick="undoRefundOrder(\\''+o.id+'\\')">撤销退款</button>':'<span style="color:#b0aac4">—</span>';
       return '<tr><td>'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+exportCell+'</td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td><td>'+action+'</td></tr>'}).join('')
     :'<tr><td colspan="8" style="text-align:center;color:#b0aac4;padding:14px">暂无订单</td></tr>';
   showModal('<h3>👤 '+esc(d.user.name)+'</h3>\

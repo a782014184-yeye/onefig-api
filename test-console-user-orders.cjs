@@ -61,4 +61,7 @@ assert.match(source, /退款回收/);
 assert.match(rows, /OF-2026-TEST01/);
 assert.match(rows, /复制导出授权码/);
 assert.match(rows, /undoRefundOrder\('refunded-order'\)/);
+assert.match(source, /o.status==='refunded'\?'#d6336c'/);
+assert.doesNotMatch(rows, /btn btn-d btn-xs/);
+assert.match(rows, /btn btn-g btn-xs" onclick="refundOrder/);
 console.log('✓ 订单单号与导出码完整，支持退款、撤销和授权码查询');
