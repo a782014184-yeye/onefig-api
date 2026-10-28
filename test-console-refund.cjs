@@ -30,6 +30,7 @@ const users = [
   loginUser('u-export-used', { exportCredits: 1 }),
   loginUser('u-export-commit', { exportCredits: 1 }),
   loginUser('u-legacy', { exportCredits: 0 }),
+  loginUser('u-credit', { credits: 80 }),
   loginUser('u-other', { level: 'team', credits: 3000 }),
 ];
 const orders = [
@@ -66,6 +67,7 @@ write('level-log.json', [
   { userId: 'u-changed', from: 'none', to: 'pro', time: '2026-10-03T00:00:00.000Z', by: 'system' },
 ]);
 write('credit-log.json', [], aiDir);
+write('credit-orders.json', [{ id: 'c-credit', userId: 'u-credit', pkg: 'p100', credits: 100, amount: 9.9, status: 'paid', createdAt: '2026-10-05T00:00:00.000Z', paidAt: '2026-10-05T00:00:00.000Z', outTradeNo: 'CREDITPAY001', transactionId: 'TX-CREDIT-1' }], aiDir);
 write('refund-log.json', []);
 
 const child = spawn(process.execPath, ['server.js'], {
@@ -103,7 +105,7 @@ const verify = code => request(`/api/verify?code=${encodeURIComponent(code)}`, {
 const lookup = code => request(`/console/api/license-lookup?code=${encodeURIComponent(code)}`);
 const user = id => request(`/console/api/users/${id}`);
 const snapshot = () => Object.fromEntries([
-  file('users.json'), file('orders.json'), file('purchases.json'), file('downloads.json'), file('level-log.json'), file('refund-log.json'), file('credit-log.json', aiDir),
+  file('users.json'), file('orders.json'), file('purchases.json'), file('downloads.json'), file('level-log.json'), file('refund-log.json'), file('credit-log.json', aiDir), file('credit-orders.json', aiDir),
 ].map(f => [f, fs.readFileSync(f, 'utf8')]));
 
 (async () => {
@@ -217,9 +219,30 @@ const snapshot = () => Object.fromEntries([
     assert.equal((await lookup(newCode)).body.order.id, 'e-commit');
     console.log('✓ 新导出自动绑定订单与授权码，退款可精确回收');
 
+    const creditPreview = await preview('c-credit');
+    assert.equal(creditPreview.status, 200, JSON.stringify(creditPreview.body));
+    assert.equal(creditPreview.body.impact.kind, 'credit');
+    assert.equal(creditPreview.body.impact.creditsDelta, 80, '积分不足时只扣当前余额');
+    const creditBefore = await user('u-credit');
+    assert.equal(creditBefore.body.orders[0].kind, 'credit');
+    assert.equal(creditBefore.body.orders[0].materialTitle, '100 积分');
+    assert.equal(creditBefore.body.totalPaid, 9.9);
+    const creditRefund = await refund('c-credit');
+    assert.equal(creditRefund.status, 200, JSON.stringify(creditRefund.body));
+    assert.equal(read('users.json').find(u => u.id === 'u-credit').credits, 0);
+    assert.equal(read('credit-orders.json', aiDir).find(o => o.id === 'c-credit').status, 'refunded');
+    assert.equal(read('credit-log.json', aiDir).at(-1).delta, -80);
+    assert.equal((await user('u-credit')).body.totalPaid, 0);
+    const creditLookup = await request('/console/api/order-lookup?merchantNo=CREDITPAY001');
+    assert.equal(creditLookup.body.order.id, 'c-credit');
+    assert.equal(creditLookup.body.order.kind, 'credit');
+    assert.equal(creditLookup.body.user.id, 'u-credit');
+    assert.equal((await refund('c-credit')).status, 400);
+    console.log('✓ 积分订单并入全部订单和单号查询，按实际余额退款');
+
     const detail = await user('u-export-used');
     assert.equal(detail.body.downloads.find(d => d.code === 'OF-2026-USED01').licenseStatus, '退款回收');
-    assert.equal(read('refund-log.json').length, 6, '每次成功退款只留一条审计记录');
+    assert.equal(read('refund-log.json').length, 7, '每次成功退款只留一条审计记录');
     console.log('✓ 用户详情显示退款回收，退款审计日志完整');
 
     assert.equal((await undo('m-pro', false)).status, 400);
@@ -269,14 +292,25 @@ const snapshot = () => Object.fromEntries([
     assert.equal(ordersWithCodes.find(o => o.id === 'e-used').licenseStatus, '退款回收');
     console.log('✓ 素材和导出撤销恢复授权，订单列表保留对应导出码');
 
+    const creditUndo = await undo('c-credit');
+    assert.equal(creditUndo.status, 200, JSON.stringify(creditUndo.body));
+    assert.equal(read('users.json').find(u => u.id === 'u-credit').credits, 80, '积分撤销只恢复实际扣减量');
+    assert.equal(read('credit-orders.json', aiDir).find(o => o.id === 'c-credit').status, 'paid');
+    assert.equal((await user('u-credit')).body.totalPaid, 9.9);
+    assert.equal((await undo('c-credit')).status, 400);
+    assert.equal((await refund('c-credit')).status, 200);
+    assert.equal(read('users.json').find(u => u.id === 'u-credit').credits, 0);
+    assert.equal(read('credit-orders.json', aiDir).find(o => o.id === 'c-credit').status, 'refunded');
+    console.log('✓ 积分充值支持撤销与再次退款，不重复恢复');
+
     const legacyOrders = read('orders.json');
     delete legacyOrders.find(o => o.id === 'm-changed').refundUndoData;
     write('orders.json', legacyOrders);
     const unsafeLegacyUndo = await undo('m-changed');
     assert.equal(unsafeLegacyUndo.status, 400, '旧积分快照不完整时必须阻止不安全撤销');
     assert.match(unsafeLegacyUndo.body.error, /不能安全撤销/);
-    assert.equal(read('refund-log.json').length, 12, '退款、撤销、再次退款均保留审计轨迹');
-    assert.equal(read('refund-log.json').filter(l => l.undoneAt).length, 6);
+    assert.equal(read('refund-log.json').length, 14, '退款、撤销、再次退款均保留审计轨迹');
+    assert.equal(read('refund-log.json').filter(l => l.undoneAt).length, 7);
     console.log('✓ 旧记录安全拦截，退款与撤销审计轨迹完整');
   } finally {
     await stop();

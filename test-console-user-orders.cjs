@@ -9,6 +9,7 @@ const d = { orders: [
   { id: 'single-order', kind: 'single', materialTitle: '线粒体-纵剖面', amount: 6.9, status: 'pending', channel: '微信支付', createdAt: '2026-10-02T00:00:00Z' },
   { id: 'export-order', kind: 'export', exportCode: 'OF-2026-TEST01', amount: 6.9, status: 'paid', payChannel: '支付宝', createdAt: '2026-10-03T00:00:00Z' },
   { id: 'refunded-order', kind: 'single', materialTitle: '已退款素材', amount: 6.9, status: 'refunded', createdAt: '2026-10-04T00:00:00Z' },
+  { id: 'credit-order', kind: 'credit', materialTitle: '100 积分', credits: 100, amount: 9.9, status: 'paid', createdAt: '2026-10-05T00:00:00Z' },
 ] };
 const lvName = { none: '非会员', basic: '青果会员', pro: '红果会员', team: '金果会员' };
 const esc = value => String(value);
@@ -18,6 +19,9 @@ const rows = eval('(' + match[1].replace(/\\'/g, "'") + ')');
 assert.match(rows, /红果会员/);
 assert.match(rows, /单张素材/);
 assert.match(rows, /画板导出/);
+assert.match(rows, /积分充值/);
+assert.match(rows, /100 积分/);
+assert.match(rows, /refundOrder\('credit-order'\)/);
 assert.match(rows, /merchant32chars0000000000000001/);
 assert.match(rows, /wx-transaction-1/);
 assert.match(rows, /singleorder/);

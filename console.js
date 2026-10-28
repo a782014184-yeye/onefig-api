@@ -211,7 +211,7 @@ module.exports = function registerConsole(app, deps) {
 
   app.get('/console/api/users', consoleAuth, (req, res) => {
     const users = load('users.json', []);
-    const orders = load('orders.json', []).filter(o => o.status === 'paid');
+    const orders = [...load('orders.json', []), ...loadCreditOrders()].filter(o => o.status === 'paid');
     const q = (req.query.q || '').trim().toLowerCase();
     let list = users.map(u => ({
       ...adminUserView(u),
@@ -228,7 +228,7 @@ module.exports = function registerConsole(app, deps) {
     if (!raw) return res.status(400).json({ ok: false, error: '请输入商户订单号' });
     const normalize = value => String(value || '').replace(/-/g, '').toUpperCase();
     const key = normalize(raw);
-    const orders = load('orders.json', []);
+    const orders = [...load('orders.json', []), ...loadCreditOrders().map(o => ({ ...o, kind: 'credit' }))];
     const order = orders.find(o => normalize(o.outTradeNo || String(o.id || '').replace(/-/g, '')) === key || normalize(o.id) === key || (o.previousOutTradeNos || []).some(no => normalize(no) === key));
     if (!order) return res.json({ ok: false, error: '未找到该商户订单号对应的订单' });
     const merchantNo = order.outTradeNo || String(order.id || '').replace(/-/g, '');
@@ -333,10 +333,15 @@ module.exports = function registerConsole(app, deps) {
       }
       downloads = [...seen.values()].sort((a, b) => b.time.localeCompare(a.time));
     } catch {}
-    res.json({ ok: true, user: adminUserView(u), orders: my, totalPaid: rmb(my.filter(o => o.status === 'paid').reduce((s, o) => s + o.amount, 0)), levelLog, creditOrders, creditLog, boards, downloads });
+    const allOrders = [...my, ...creditOrders.map(o => ({ ...o, kind: 'credit', materialTitle: `${o.credits || 0} 积分` }))]
+      .sort((a, b) => String(b.createdAt || b.paidAt || '').localeCompare(String(a.createdAt || a.paidAt || '')));
+    res.json({ ok: true, user: adminUserView(u), orders: allOrders, totalPaid: rmb(allOrders.filter(o => o.status === 'paid').reduce((s, o) => s + o.amount, 0)), levelLog, creditOrders, creditLog, boards, downloads });
   });
 
   const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制开通一次性赠送积分
+  const CREDIT_ORDERS_FILE = path.join('..', 'ai', 'credit-orders.json');
+  const loadCreditOrders = () => load(CREDIT_ORDERS_FILE, []);
+  const saveCreditOrders = rows => save(CREDIT_ORDERS_FILE, rows);
   const CREDIT_LOG = path.join(DATA_DIR, 'ai', 'credit-log.json');
   const loadLog = () => { try { return JSON.parse(fs.readFileSync(CREDIT_LOG, 'utf8')); } catch { return []; } };
   const saveLog = rows => { fs.mkdirSync(path.dirname(CREDIT_LOG), { recursive: true }); const t = CREDIT_LOG + '.tmp'; fs.writeFileSync(t, JSON.stringify(rows, null, 1)); fs.renameSync(t, CREDIT_LOG); };
@@ -484,6 +489,15 @@ module.exports = function registerConsole(app, deps) {
   function refundImpact(order, user, allOrders, allDownloads) {
     const lines = [];
     const downloads = allDownloads || [];
+    if (order.kind === 'credit' || order.pkg) {
+      const purchasedCredits = Math.max(0, Number(order.credits) || 0);
+      const balance = Math.max(0, Number(user.credits) || 0);
+      const creditsDelta = Math.min(purchasedCredits, balance);
+      lines.push(creditsDelta === purchasedCredits
+        ? `扣回本笔充值到账的 ${purchasedCredits} 积分`
+        : `本笔充值 ${purchasedCredits} 积分，当前余额 ${balance}，本次最多扣回 ${creditsDelta}（不出现负数）`);
+      return { kind: 'credit', creditsDelta, licenseCodes: [], lines };
+    }
     if (order.kind === 'export') {
       const licenseCodes = [...new Set(downloads.filter(l => l.kind === 'export' && l.userId === order.userId && l.code &&
         (l.orderId === order.id || (order.exportCode && l.code === order.exportCode))).map(l => l.code))];
@@ -519,7 +533,7 @@ module.exports = function registerConsole(app, deps) {
     return { kind: 'member', previousLevel, previousPaidAt: previousPaid ? (previousPaid.paidAt || previousPaid.createdAt) : null, levelChanged, creditsDelta, licenseCodes: [], lines };
   }
   app.get('/console/api/orders/:id/refund-preview', consoleAuth, (req, res) => {
-    const orders = load('orders.json', []);
+    const orders = [...load('orders.json', []), ...loadCreditOrders().map(o => ({ ...o, kind: 'credit' }))];
     const order = orders.find(o => o.id === req.params.id);
     if (!order) return res.status(404).json({ ok: false, error: '订单不存在' });
     if (order.status !== 'paid') return res.status(400).json({ ok: false, error: '只有已支付订单可以退款' });
@@ -532,12 +546,14 @@ module.exports = function registerConsole(app, deps) {
     if (!req.body || req.body.confirm !== true) return res.status(400).json({ ok: false, error: '请先查看退款预览并确认' });
     // 保留写入前快照；任一文件写入失败时恢复原始版本，而不是把已修改的内存对象写回。
     const original = {
-      users: load('users.json', []), orders: load('orders.json', []), purchases: load('purchases.json', []),
+      users: load('users.json', []), orders: load('orders.json', []), creditOrders: loadCreditOrders(), purchases: load('purchases.json', []),
       downloads: load('downloads.json', []), creditLog: loadLog(), levelLog: loadLevelLog(), refundLog: load('refund-log.json', []),
     };
     const copy = value => JSON.parse(JSON.stringify(value));
-    const users = copy(original.users), orders = copy(original.orders), purchases = copy(original.purchases), downloads = copy(original.downloads);
-    const order = orders.find(o => o.id === req.params.id);
+    const users = copy(original.users), orders = copy(original.orders), creditOrders = copy(original.creditOrders), purchases = copy(original.purchases), downloads = copy(original.downloads);
+    const creditOrder = creditOrders.find(o => o.id === req.params.id);
+    const order = orders.find(o => o.id === req.params.id) || creditOrder;
+    const isCreditOrder = !!creditOrder;
     if (!order) return res.status(404).json({ ok: false, error: '订单不存在' });
     if (order.status === 'refunded') return res.status(400).json({ ok: false, error: '该订单已退款，请勿重复操作' });
     if (order.status !== 'paid') return res.status(400).json({ ok: false, error: '只有已支付订单可以退款' });
@@ -557,12 +573,12 @@ module.exports = function registerConsole(app, deps) {
       creditsGrantedFor: user.creditsGrantedFor || null,
     };
     try {
-      if (impact.kind === 'member') {
+      if (impact.kind === 'member' || impact.kind === 'credit') {
         const beforeCredits = Math.max(0, Number(user.credits) || 0);
         user.credits = Math.max(0, beforeCredits - impact.creditsDelta);
         undoData.creditsRestored = beforeCredits - user.credits;
-        if (undoData.creditsRestored) logCredit(user, -undoData.creditsRestored, '会员退款扣回赠送积分', 'admin');
-        if (!impact.levelChanged) {
+        if (undoData.creditsRestored) logCredit(user, -undoData.creditsRestored, impact.kind === 'credit' ? '积分充值退款扣回积分' : '会员退款扣回赠送积分', 'admin');
+        if (impact.kind === 'member' && !impact.levelChanged) {
           logLevel(user, user.level || 'none', impact.previousLevel, 'admin');
           user.level = impact.previousLevel;
           user.memberSince = impact.previousPaidAt;
@@ -593,12 +609,13 @@ module.exports = function registerConsole(app, deps) {
       order.refundedLicenseCodes = impact.licenseCodes;
       order.refundUndoData = undoData;
       save('users.json', users);
-      save('orders.json', orders);
+      if (isCreditOrder) saveCreditOrders(creditOrders); else save('orders.json', orders);
       save('refund-log.json', [...original.refundLog, { orderId: order.id, userId: order.userId, impact: impact.lines, licenseCodes: impact.licenseCodes, time: refundedAt, by: 'admin' }]);
       res.json({ ok: true, order, impact });
     } catch (e) {
       save('users.json', original.users);
       save('orders.json', original.orders);
+      saveCreditOrders(original.creditOrders);
       save('purchases.json', original.purchases);
       save('downloads.json', original.downloads);
       saveLog(original.creditLog);
@@ -612,17 +629,19 @@ module.exports = function registerConsole(app, deps) {
   app.post('/console/api/orders/:id/undo-refund', consoleAuth, (req, res) => {
     if (!req.body || req.body.confirm !== true) return res.status(400).json({ ok: false, error: '请确认后再撤销退款回收' });
     const original = {
-      users: load('users.json', []), orders: load('orders.json', []), purchases: load('purchases.json', []),
+      users: load('users.json', []), orders: load('orders.json', []), creditOrders: loadCreditOrders(), purchases: load('purchases.json', []),
       downloads: load('downloads.json', []), creditLog: loadLog(), levelLog: loadLevelLog(), refundLog: load('refund-log.json', []),
     };
     const copy = value => JSON.parse(JSON.stringify(value));
-    const users = copy(original.users), orders = copy(original.orders), purchases = copy(original.purchases), downloads = copy(original.downloads);
-    const order = orders.find(o => o.id === req.params.id);
+    const users = copy(original.users), orders = copy(original.orders), creditOrders = copy(original.creditOrders), purchases = copy(original.purchases), downloads = copy(original.downloads);
+    const creditOrder = creditOrders.find(o => o.id === req.params.id);
+    const order = orders.find(o => o.id === req.params.id) || creditOrder;
+    const isCreditOrder = !!creditOrder;
     if (!order) return res.status(404).json({ ok: false, error: '订单不存在' });
     if (order.status !== 'refunded') return res.status(400).json({ ok: false, error: '只有已退款订单可以撤销回收' });
     const user = users.find(u => u.id === order.userId);
     if (!user) return res.status(404).json({ ok: false, error: '用户不存在' });
-    const kind = order.kind === 'export' ? 'export' : order.materialId ? 'single' : 'member';
+    const kind = isCreditOrder || order.kind === 'credit' || order.pkg ? 'credit' : order.kind === 'export' ? 'export' : order.materialId ? 'single' : 'member';
     let data = order.refundUndoData;
     if (!data) {
       // 兼容新快照上线前的退款；积分曾扣到 0 的旧记录无法得知实际扣减量，必须人工处理。
@@ -648,11 +667,11 @@ module.exports = function registerConsole(app, deps) {
     }
     const undoneAt = new Date().toISOString();
     try {
-      if (kind === 'member') {
+      if (kind === 'member' || kind === 'credit') {
         const restored = Math.max(0, Number(data.creditsRestored) || 0);
         user.credits = Math.max(0, Number(user.credits) || 0) + restored;
-        if (restored) logCredit(user, restored, '撤销会员退款回收，返还实际扣减积分', 'admin');
-        if (data.levelRestored) {
+        if (restored) logCredit(user, restored, kind === 'credit' ? '撤销积分充值退款，返还实际扣减积分' : '撤销会员退款回收，返还实际扣减积分', 'admin');
+        if (kind === 'member' && data.levelRestored) {
           const current = user.level || 'none';
           if (current === data.previousLevel) {
             logLevel(user, current, order.plan, 'admin');
@@ -697,12 +716,13 @@ module.exports = function registerConsole(app, deps) {
       if (entry) { entry.undoneAt = undoneAt; entry.undoneBy = 'admin'; }
       else refundLog.push({ orderId: order.id, userId: order.userId, action: 'undo-refund', time: undoneAt, by: 'admin' });
       save('users.json', users);
-      save('orders.json', orders);
+      if (isCreditOrder) saveCreditOrders(creditOrders); else save('orders.json', orders);
       save('refund-log.json', refundLog);
       res.json({ ok: true, order, restored: data });
     } catch (e) {
       save('users.json', original.users);
       save('orders.json', original.orders);
+      saveCreditOrders(original.creditOrders);
       save('purchases.json', original.purchases);
       save('downloads.json', original.downloads);
       saveLog(original.creditLog);
@@ -1455,7 +1475,7 @@ window.doMerchantLookup=async()=>{
     const d=await api('/console/api/order-lookup?merchantNo='+encodeURIComponent(merchantNo)),o=d.order,u=d.user;
     const status={pending:'待支付',notified:'待确认',paid:'已支付',refunded:'已退款',expired:'已失效',failed:'支付失败'}[o.status]||o.status;
     const lvName={basic:'青果会员',pro:'红果会员',team:'金果会员'};
-    const type=o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':(lvName[o.plan]||'会员订单');
+    const type=o.kind==='credit'?'积分充值':o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':(lvName[o.plan]||'会员订单');
     const refunded=o.status==='refunded';
     const row=(k,v)=>'<tr><td style="width:130px;color:#8b84a3">'+k+'</td><td>'+v+'</td></tr>';
     const licenses=(d.licenses||[]).map(l=>'<div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #f1eef9"><span><b>'+esc(l.title)+'</b><br><span style="font-family:monospace;font-size:12px">'+esc(l.code)+'</span></span><b style="color:'+(l.status==='退款回收'?'#d6336c':'#2f9e5f')+'">'+esc(l.status)+'</b></div>').join('');
@@ -1530,13 +1550,13 @@ window.userDetail=async(id)=>{
     :'<div style="text-align:center;color:#b0aac4;padding:20px">还没有下载记录</div>';
   const coListRows=(d.creditOrders&&d.creditOrders.length)
     ?d.creditOrders.map(o=>{
-      const stTxt={pending:'待支付',notified:'待人工确认',paid:'已到账'}[o.status]||o.status;
-      const stClr={pending:'#b8860b',notified:'#d6336c',paid:'#2f9e5f'}[o.status]||'#8b84a3';
+      const stTxt={pending:'待支付',notified:'待人工确认',paid:'已到账',refunded:'已退款',expired:'已失效',failed:'支付失败'}[o.status]||o.status;
+      const stClr={pending:'#b8860b',notified:'#d6336c',paid:'#2f9e5f',refunded:'#d6336c'}[o.status]||'#8b84a3';
       return '<tr><td>'+fmtT(o.createdAt)+'</td><td><b>'+(o.credits||0)+'</b> 积分</td><td>'+yuan(o.amount)+'</td><td style="color:'+stClr+';font-weight:600">'+stTxt+(o.channel?' · '+esc(o.channel):'')+'</td><td style="font-size:11px;color:#8b84a3">'+(o.transactionId?esc(String(o.transactionId)):'—')+'</td></tr>'}).join('')
     :'<tr><td colspan="5" style="text-align:center;color:#b0aac4;padding:14px">暂无积分订单</td></tr>';
   const allOrderRows=(d.orders&&d.orders.length)
     ?d.orders.map(o=>{
-      const type=o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':(lvName[o.plan]||'会员订单');
+      const type=o.kind==='credit'?'积分充值':o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':(lvName[o.plan]||'会员订单');
       const status={pending:'待支付',notified:'待确认',paid:'已支付',refunded:'已退款',expired:'已失效',failed:'支付失败'}[o.status]||o.status;
       const color=o.status==='paid'?'#2f9e5f':o.status==='pending'?'#b8860b':'#8b84a3';
       const rawChannel=String(o.payChannel||o.channel||'');
@@ -1570,7 +1590,7 @@ window.userDetail=async(id)=>{
 window.refundOrder=async(id)=>{
   try{
     const d=await api('/console/api/orders/'+encodeURIComponent(id)+'/refund-preview'),o=d.order;
-    const type=o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':'会员订单';
+    const type=o.kind==='credit'?'积分充值':o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':'会员订单';
     const lines=(d.impact.lines||[]).map(x=>'<li style="margin:7px 0">'+esc(x)+'</li>').join('');
     showModal('<h3>退款回收确认</h3><div style="background:#fff7e8;border:1px solid #f1d39a;border-radius:12px;padding:14px;line-height:1.7"><b>请先在微信/支付宝商户平台完成资金退款。</b><br>'+esc(d.notice)+'</div><div style="margin:16px 0"><b>'+esc(type)+' · '+yuan(o.amount)+'</b><div class="sub" style="margin-top:6px">商户订单号：<span style="font-family:monospace">'+esc(o.outTradeNo||o.id)+'</span></div></div><h4>将执行以下操作：</h4><ul style="padding-left:22px;line-height:1.6">'+lines+'</ul><div class="sub">历史订单、下载记录和授权记录不会删除；授权码退款回收后，公开验真将不能通过。</div><div class="btns"><button class="btn btn-g" onclick="userDetail(\\''+o.userId+'\\')">取消</button><button class="btn btn-d" id="refund-confirm" onclick="doRefund(\\''+o.id+'\\')">已在商户平台退款，确认回收</button></div>');
     const m=document.getElementById('modal');m.style.width='680px';m.style.maxWidth='94vw';m.style.height='auto';m.style.maxHeight='86vh';m.style.overflowY='auto';
