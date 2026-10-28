@@ -165,6 +165,15 @@ const snapshot = () => Object.fromEntries([
     assert.equal(adminSingle.body.record.title, '细胞');
     assert.equal(adminSingle.body.user.id, 'u-single');
     assert.equal(adminSingle.body.order.status, 'refunded');
+    const merchantLookup = await request('/console/api/order-lookup?merchantNo=S-SINGLE');
+    assert.equal(merchantLookup.status, 200, JSON.stringify(merchantLookup.body));
+    assert.equal(merchantLookup.body.order.id, 's-single');
+    assert.equal(merchantLookup.body.order.status, 'refunded');
+    assert.equal(merchantLookup.body.user.id, 'u-single');
+    assert.equal(merchantLookup.body.licenses.length, 1);
+    assert.equal(merchantLookup.body.licenses[0].code, 'OF-2026-SING01');
+    assert.equal(merchantLookup.body.licenses[0].status, '退款回收');
+    assert.equal((await request('/console/api/order-lookup?merchantNo=NOT-EXIST')).body.ok, false);
     assert.equal((await verify('OF-2026-VALID1')).body.ok, true, '不得误回收无关授权码');
     assert.equal((await refund('s-pending')).status, 400);
     console.log('✓ 单张素材保留下载历史、公开验真失败、后台可查且不影响其他码');

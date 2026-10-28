@@ -222,6 +222,35 @@ module.exports = function registerConsole(app, deps) {
     res.json({ ok: true, list });
   });
 
+  // 商户单号反查：与用户账号页展示的号码一致，支持有无连字符、大小写输入。
+  app.get('/console/api/order-lookup', consoleAuth, (req, res) => {
+    const raw = String(req.query.merchantNo || req.query.outTradeNo || '').trim();
+    if (!raw) return res.status(400).json({ ok: false, error: '请输入商户订单号' });
+    const normalize = value => String(value || '').replace(/-/g, '').toUpperCase();
+    const key = normalize(raw);
+    const orders = load('orders.json', []);
+    const order = orders.find(o => normalize(o.outTradeNo || String(o.id || '').replace(/-/g, '')) === key || normalize(o.id) === key);
+    if (!order) return res.json({ ok: false, error: '未找到该商户订单号对应的订单' });
+    const merchantNo = order.outTradeNo || String(order.id || '').replace(/-/g, '');
+    const user = load('users.json', []).find(u => u.id === order.userId);
+    const downloads = load('downloads.json', []);
+    const related = order.kind === 'export'
+      ? downloads.filter(l => l.kind === 'export' && (l.orderId === order.id || (order.exportCode && l.code === order.exportCode)))
+      : order.materialId ? downloads.filter(l => l.userId === order.userId && l.materialId === order.materialId) : [];
+    const licenses = [...new Map(related.filter(l => l.code).map(l => [l.code, {
+      code: l.code,
+      title: l.kind === 'export' ? (l.boardTitle || '画板导出作品') : (l.materialTitle || order.materialTitle || order.materialId),
+      time: l.time,
+      status: l.status === 'refund-revoked' || l.revokeReason === 'refund' ? '退款回收' : '有效',
+    }])).values()];
+    res.json({
+      ok: true,
+      order: { ...order, merchantNo },
+      user: user ? { id: user.id, name: user.name || '', email: user.email || user.contact || '', level: user.level || 'none' } : null,
+      licenses,
+    });
+  });
+
   app.get('/console/api/users/:id', consoleAuth, (req, res) => {
     const users = load('users.json', []);
     const orders = load('orders.json', []).filter(o => o.userId === req.params.id);
@@ -1287,8 +1316,35 @@ H.users=async()=>{
     <td>'+(u.memberSince?esc(u.memberSince.slice(0,10)):'—')+'</td><td>'+u.orderCount+' 笔</td><td><b>'+yuan(u.totalPaid)+'</b></td>\
     <td><button class="btn btn-g btn-xs" onclick="userDetail(\\''+u.id+'\\')">详情</button></td></tr>').join('')
     ||'<tr><td colspan="8" style="color:#b0aac4;text-align:center;padding:24px">暂无用户</td></tr>';
-  return '<div class="toolbar"><h2>👥 账号管理</h2><div class="sp"></div><input placeholder="搜索昵称/邮箱" value="'+esc(userQ)+'" onchange="userQ=this.value;route()" style="width:200px"><button class="btn btn-g" onclick="licenseLookupModal()">🔑 授权码查询</button><button class="btn btn-g" onclick="creditLogModal()">⚡ 积分流水</button></div>\
+  return '<div class="toolbar"><h2>👥 账号管理</h2><div class="sp"></div><input placeholder="搜索昵称/邮箱" value="'+esc(userQ)+'" onchange="userQ=this.value;route()" style="width:200px"><button class="btn btn-g" onclick="merchantLookupModal()">🧾 商户单号查询</button><button class="btn btn-g" onclick="licenseLookupModal()">🔑 授权码查询</button><button class="btn btn-g" onclick="creditLogModal()">⚡ 积分流水</button></div>\
   <div class="panel"><table><tr><th>昵称</th><th>邮箱</th><th>会员等级</th><th>AI积分</th><th>开通时间</th><th>订单</th><th>累计付款</th><th></th></tr>'+rows+'</table></div>';
+};
+window.merchantLookupModal=()=>{
+  showModal('<h3>🧾 商户单号查询</h3><div class="sub" style="margin-bottom:12px">粘贴用户账号页复制的商户订单号，可查订单、用户和关联授权码。</div><div style="display:flex;gap:8px"><input id="merchant-no" placeholder="请输入完整商户订单号" style="flex:1;font-family:monospace" onkeydown="if(event.key===\\'Enter\\')doMerchantLookup()"><button class="btn btn-p" onclick="doMerchantLookup()">查询</button></div><div id="merchant-result" style="margin-top:16px"></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
+  const m=document.getElementById('modal');m.style.width='760px';m.style.maxWidth='94vw';m.style.height='auto';m.style.maxHeight='86vh';m.style.overflowY='auto';
+  setTimeout(()=>document.getElementById('merchant-no').focus(),0);
+};
+window.doMerchantLookup=async()=>{
+  const input=document.getElementById('merchant-no'),out=document.getElementById('merchant-result'),merchantNo=input.value.trim();
+  if(!merchantNo)return toast('请输入商户订单号');
+  out.innerHTML='<div class="sub">正在查询…</div>';
+  try{
+    const d=await api('/console/api/order-lookup?merchantNo='+encodeURIComponent(merchantNo)),o=d.order,u=d.user;
+    const status={pending:'待支付',notified:'待确认',paid:'已支付',refunded:'已退款',expired:'已失效',failed:'支付失败'}[o.status]||o.status;
+    const lvName={basic:'青果会员',pro:'红果会员',team:'金果会员'};
+    const type=o.kind==='export'?'画板导出':o.kind==='single'?'单张素材':(lvName[o.plan]||'会员订单');
+    const refunded=o.status==='refunded';
+    const row=(k,v)=>'<tr><td style="width:130px;color:#8b84a3">'+k+'</td><td>'+v+'</td></tr>';
+    const licenses=(d.licenses||[]).map(l=>'<div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #f1eef9"><span><b>'+esc(l.title)+'</b><br><span style="font-family:monospace;font-size:12px">'+esc(l.code)+'</span></span><b style="color:'+(l.status==='退款回收'?'#d6336c':'#2f9e5f')+'">'+esc(l.status)+'</b></div>').join('');
+    out.innerHTML='<div style="border:1px solid '+(refunded?'#f0b4c8':'#d9d2ec')+';border-radius:12px;padding:14px"><div style="font-size:16px;font-weight:700;color:'+(refunded?'#d6336c':'#6d4fb0')+';margin-bottom:10px">'+esc(type)+' · '+esc(status)+'</div><table>'
+      +row('商户订单号','<span style="font-family:monospace;word-break:break-all">'+esc(o.merchantNo)+'</span> <button class="btn btn-g btn-xs" onclick="cpTxt(\\''+o.merchantNo+'\\')">复制</button>')
+      +row('微信/支付宝交易号',o.transactionId?'<span style="font-family:monospace;word-break:break-all">'+esc(o.transactionId)+'</span>':'未记录')
+      +row('金额',yuan(o.amount))+row('支付方式',esc(o.payChannel||o.channel||'—'))+row('支付/下单时间',fmtT(o.paidAt||o.createdAt))
+      +(refunded?row('退款时间',fmtT(o.refundedAt)):'')
+      +row('用户',u?'<b>'+esc(u.name||'—')+'</b> · '+esc(u.email||u.id):'账号已注销')
+      +'</table>'+(licenses?'<h4 style="margin-top:14px">关联授权码</h4>'+licenses:'')
+      +(u?'<div class="btns"><button class="btn btn-g" onclick="userDetail(\\''+u.id+'\\')">查看用户详情</button></div>':'')+'</div>';
+  }catch(e){out.innerHTML='<div style="color:#d6336c;padding:12px">'+esc(e.message)+'</div>'}
 };
 window.licenseLookupModal=()=>{
   showModal('<h3>🔑 授权码查询</h3><div class="sub" style="margin-bottom:12px">支持素材下载码和画板导出码；退款回收的记录也会保留在这里。</div><div style="display:flex;gap:8px"><input id="license-code" placeholder="例如 OF-2026-ABC123" style="flex:1;font-family:monospace" onkeydown="if(event.key===\\'Enter\\')doLicenseLookup()"><button class="btn btn-p" onclick="doLicenseLookup()">查询</button></div><div id="license-result" style="margin-top:16px"></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
