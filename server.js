@@ -439,7 +439,7 @@ app.post('/api/auth/login', loginRateLimit, async (req, res) => {
   if (!u || !u.passHash || crypto.scryptSync(password, u.salt, 32).toString('hex') !== u.passHash) {
     recordLoginFailure(req);
     logLine('auth', `user-login-fail email=${email} ip=${clientIp(req)}`);
-    return res.status(401).json({ ok: false, error: '邮箱或密码不对，再检查一下' });
+    return res.status(401).json({ ok: false, error: !u ? '无当前账号，请先注册' : '邮箱或密码不对，再检查一下' });
   }
   clearLoginFailures(req);
   // 未验证邮箱的账号拒绝登录并自动重发验证码（硬闸门，2026-10-25）

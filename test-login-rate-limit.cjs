@@ -6,6 +6,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
+const PORT = Number(process.env.TEST_PORT || 8090);
+const BASE = `http://127.0.0.1:${PORT}`;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onefig-login-limit-'));
 const password = 'dummy-correct-password';
 const makeUser = id => {
@@ -16,14 +18,14 @@ fs.mkdirSync(path.join(dataDir, 'console'), { recursive: true });
 fs.writeFileSync(path.join(dataDir, 'console', 'users.json'), JSON.stringify(['a', 'b', 'c'].map(makeUser)));
 const child = spawn(process.execPath, ['server.js'], {
   cwd: __dirname,
-  env: { ...process.env, PORT: '8090', DATA_DIR: dataDir, TOKEN_SECRET: 'isolated-test-secret', ONEFIG_ENV: 'test' },
+  env: { ...process.env, PORT: String(PORT), DATA_DIR: dataDir, TOKEN_SECRET: 'isolated-test-secret', ONEFIG_ENV: 'test' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let logs = '';
 child.stdout.on('data', x => { logs += x; });
 child.stderr.on('data', x => { logs += x; });
 const login = async (id, pass = password) => {
-  const res = await fetch('http://127.0.0.1:8090/api/auth/login', {
+  const res = await fetch(`${BASE}/api/auth/login`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: `${id}@example.invalid`, password: pass }),
   });
@@ -40,10 +42,17 @@ const stop = () => new Promise(resolve => {
   try {
     let healthy = false;
     for (let i = 0; i < 60; i++) {
-      try { if ((await fetch('http://127.0.0.1:8090/healthz')).ok) { healthy = true; break; } } catch {}
+      try { if ((await fetch(`${BASE}/healthz`)).ok) { healthy = true; break; } } catch {}
       await new Promise(r => setTimeout(r, 100));
     }
     assert.ok(healthy, `隔离实例启动失败：${logs}`);
+
+    const missing = await login('not-registered');
+    assert.equal(missing.status, 401);
+    assert.equal(missing.data.error, '无当前账号，请先注册');
+    const wrongPassword = await login('a', 'wrong-password');
+    assert.equal(wrongPassword.status, 401);
+    assert.equal(wrongPassword.data.error, '邮箱或密码不对，再检查一下');
 
     for (let i = 0; i < 10; i++) {
       const r = await login(i % 2 ? 'a' : 'b');
@@ -61,8 +70,8 @@ const stop = () => new Promise(resolve => {
     assert.match(locked.data.error, /密码错误次数太多/);
     assert.equal((await login('b')).status, 200, 'A 被锁定不能影响 B 的正常登录');
 
-    // 目前已有 16 次 IP 失败记录，再补 14 次，验证换邮箱也不能绕过网络级防护。
-    for (let i = 0; i < 14; i++) assert.equal((await login(`c${i}`, 'wrong-password')).status, 401);
+    // 目前已有 18 次 IP 失败记录，再补 12 次，验证换邮箱也不能绕过网络级防护。
+    for (let i = 0; i < 12; i++) assert.equal((await login(`c${i}`, 'wrong-password')).status, 401);
     const sprayBlocked = await login('b');
     assert.equal(sprayBlocked.status, 429, '同 IP 累计失败过多必须继续拦截');
     assert.match(sprayBlocked.data.error, /当前网络登录失败次数过多/);
