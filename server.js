@@ -132,7 +132,7 @@ app.use((req, res, next) => {
   const isConsole = req.path.startsWith('/console') || req.path.startsWith('/' + ADMIN_PATH);
   if (!isConsole) {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -2303,6 +2303,21 @@ app.post('/api/boards/:id/comments/:cid/replies', authUser, (req, res) => {
 });
 
 // （2026-10-05）「提醒作者」邮件接口已下线：批注改由作者在编辑器批注面板直接查看
+
+// 本地隔离验收：完整主站与画板也统一由 8090 承载；仅测试环境启用，生产路由不变。
+if (process.env.ONEFIG_ENV === 'test' && process.env.ONEFIG_WEB_ROOT) {
+  const webRoot = path.resolve(process.env.ONEFIG_WEB_ROOT);
+  app.use('/canvas-lab', express.static(path.join(webRoot, 'canvas-lab')));
+  app.use(express.static(webRoot));
+  app.get('/canvas-lab*', (req, res, next) => {
+    if (path.extname(req.path)) return next();
+    res.sendFile(path.join(webRoot, 'canvas-lab', 'index.html'));
+  });
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/') || path.extname(req.path)) return next();
+    res.sendFile(path.join(webRoot, 'index.html'));
+  });
+}
 
 // ---- 统一错误处理（2026-09-21，必须放在所有路由之后）----
 app.use((err, req, res, next) => {
