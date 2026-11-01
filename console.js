@@ -218,7 +218,7 @@ module.exports = function registerConsole(app, deps) {
       totalPaid: rmb(orders.filter(o => o.userId === u.id).reduce((s, o) => s + o.amount, 0)),
       orderCount: orders.filter(o => o.userId === u.id).length,
     }));
-    if (q) list = list.filter(u => ((u.name || '') + (u.contact || '') + (u.email || '')).toLowerCase().includes(q));
+    if (q) list = list.filter(u => ((u.name || '') + (u.contact || '') + (u.email || '') + (u.source || '')).toLowerCase().includes(q));
     res.json({ ok: true, list });
   });
 
@@ -1463,17 +1463,36 @@ window.saveSeries=async()=>{const f=document.getElementById('m-folder').value.tr
 
 /* ---------- 3. 账号管理 ---------- */
 let userQ='';
+const sourceBadge=(source)=>{
+  const s=String(source||''),lower=s.toLowerCase();
+  let text='↗',color='#8b84a3',icon='';
+  if(/百度|baidu/.test(lower)){
+    color='#2932e1';
+    icon='<svg width="16" height="16" viewBox="0 0 32 32" aria-hidden="true"><g fill="'+color+'"><ellipse cx="7" cy="9" rx="3" ry="4"/><ellipse cx="15" cy="5" rx="3" ry="4"/><ellipse cx="24" cy="8" rx="3" ry="4"/><ellipse cx="28" cy="16" rx="3" ry="4"/><path d="M17 13c-6 0-11 5-11 10 0 4 4 6 8 4 3-1 5-1 8 0 4 2 7-1 6-5-1-5-6-9-11-9z"/></g></svg>';
+  }else if(/google/.test(lower)){text='G';color='#4285f4'}
+  else if(/bing/.test(lower)){text='B';color='#00897b'}
+  else if(/小红书/.test(s)){text='小';color='#ff2442'}
+  else if(/微信/.test(s)){text='微';color='#07c160'}
+  else if(/知乎/.test(s)){text='知';color='#0066ff'}
+  else if(/b站|bilibili/.test(lower)){text='B';color='#fb7299'}
+  else if(/抖音/.test(s)){text='抖';color='#333333'}
+  else if(/微博/.test(s)){text='博';color='#e6162d'}
+  else if(!s){text='·';color='#b0aac4'}
+  const body=icon||'<b style="font-size:12px;line-height:1">'+text+'</b>';
+  return '<span title="'+esc(s||'历史未记录')+'" style="display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin-right:5px;vertical-align:middle;color:'+color+'">'+body+'</span>';
+};
 H.users=async()=>{
   const s=await api('/console/api/users?q='+encodeURIComponent(userQ));
   const lvName={none:'—',basic:'青果会员',pro:'红果会员',team:'金果会员'};
-  const rows=s.list.map(u=>'<tr><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制"><b>'+esc(u.name)+'</b></td><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+esc(u.email||u.contact||'—')+'</td>\
+  const rows=s.list.map(u=>'<tr><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+sourceBadge(u.source)+'<b>'+esc(u.name)+'</b></td><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+esc(u.email||u.contact||'—')+'</td>\
+    <td>'+esc(u.source||'历史未记录')+'</td>\
     <td><select onchange="setLevel(\\''+u.id+'\\',this.value)">'+Object.keys(lvName).map(k=>'<option value="'+k+'" '+(u.level===k?'selected':'')+'>'+lvName[k]+'</option>').join('')+'</select></td>\
     <td>'+(u.credits||0)+' ⚡</td>\
     <td>'+(u.memberSince?esc(u.memberSince.slice(0,10)):'—')+'</td><td>'+u.orderCount+' 笔</td><td><b>'+yuan(u.totalPaid)+'</b></td>\
     <td><button class="btn btn-g btn-xs" onclick="userDetail(\\''+u.id+'\\')">详情</button></td></tr>').join('')
-    ||'<tr><td colspan="8" style="color:#b0aac4;text-align:center;padding:24px">暂无用户</td></tr>';
-  return '<div class="toolbar"><h2>👥 账号管理</h2><div class="sp"></div><input placeholder="搜索昵称/邮箱" value="'+esc(userQ)+'" onchange="userQ=this.value;route()" style="width:200px"><button class="btn btn-g" onclick="merchantLookupModal()">🧾 商户单号查询</button><button class="btn btn-g" onclick="licenseLookupModal()">🔑 授权码查询</button><button class="btn btn-g" onclick="creditLogModal()">⚡ 积分流水</button></div>\
-  <div class="panel"><table><tr><th>昵称</th><th>邮箱</th><th>会员等级</th><th>AI积分</th><th>开通时间</th><th>订单</th><th>累计付款</th><th></th></tr>'+rows+'</table></div>';
+    ||'<tr><td colspan="9" style="color:#b0aac4;text-align:center;padding:24px">暂无用户</td></tr>';
+  return '<div class="toolbar"><h2>👥 账号管理</h2><div class="sp"></div><input placeholder="搜索昵称/邮箱/来源" value="'+esc(userQ)+'" onchange="userQ=this.value;route()" style="width:200px"><button class="btn btn-g" onclick="merchantLookupModal()">🧾 商户单号查询</button><button class="btn btn-g" onclick="licenseLookupModal()">🔑 授权码查询</button><button class="btn btn-g" onclick="creditLogModal()">⚡ 积分流水</button></div>\
+  <div class="panel"><table><tr><th>昵称</th><th>邮箱</th><th>来源</th><th>会员等级</th><th>AI积分</th><th>开通时间</th><th>订单</th><th>累计付款</th><th></th></tr>'+rows+'</table></div>';
 };
 window.merchantLookupModal=()=>{
   showModal('<h3>🧾 商户单号查询</h3><div class="sub" style="margin-bottom:12px">粘贴用户账号页复制的商户订单号，可查订单、用户和关联授权码。</div><div style="display:flex;gap:8px"><input id="merchant-no" placeholder="请输入完整商户订单号" style="flex:1;font-family:monospace" onkeydown="if(event.key===\\'Enter\\')doMerchantLookup()"><button class="btn btn-p" onclick="doMerchantLookup()">查询</button></div><div id="merchant-result" style="margin-top:16px"></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
@@ -1585,8 +1604,8 @@ window.userDetail=async(id)=>{
       const action=o.status==='paid'?'<button class="btn btn-g btn-xs" onclick="refundOrder(\\''+o.id+'\\')">退款回收</button>':o.status==='refunded'?'<button class="btn btn-g btn-xs" onclick="undoRefundOrder(\\''+o.id+'\\')">撤销退款</button>':'<span style="color:#b0aac4">—</span>';
       return '<tr><td><div style="display:flex;align-items:center;gap:10px">'+previewImg+'<div style="min-width:0">'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+licenseCell+'</div></div></td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td><td>'+action+'</td></tr>'}).join('')
     :'<tr><td colspan="8" style="text-align:center;color:#b0aac4;padding:14px">暂无订单</td></tr>';
-  showModal('<h3>👤 '+esc(d.user.name)+'</h3>\
-  <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 本月已下 '+(d.user.dlUsed||0)+' 张 · 本月已导出 '+(d.user.exUsed||0)+' 次（单次权益剩 '+(d.user.exportCredits||0)+'） · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\
+  showModal('<h3>'+sourceBadge(d.user.source)+esc(d.user.name)+'</h3>\
+  <div class="sub" style="margin-bottom:14px">注册：'+esc((d.user.joinedAt||'').slice(0,10))+' · 来源：<b>'+esc(d.user.source||'历史未记录')+'</b> · 会员：'+lvName[d.user.level]+(d.user.memberSince?'（'+d.user.memberSince.slice(0,10)+' 开通）':'')+' · AI 积分 <b style="color:#6d4fb0">'+(d.user.credits||0)+' ⚡</b> · 本月已下 '+(d.user.dlUsed||0)+' 张 · 本月已导出 '+(d.user.exUsed||0)+' 次（单次权益剩 '+(d.user.exportCredits||0)+'） · 累计付款 <b style="color:#6d4fb0">'+yuan(d.totalPaid)+'</b></div>\
   <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center"><input id="m-delta" type="number" placeholder="积分调整，如 5 或 -3" style="flex:1"><input id="m-reason" placeholder="原因（选填）" style="flex:2"><button class="btn btn-g btn-xs" onclick="adjCredits(\\''+d.user.id+'\\')">调整</button></div>\
   <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap"><button class="btn btn-g btn-xs" onclick="resetQuota(\\''+d.user.id+'\\')">🧪 重置本月下载额度</button><button class="btn btn-g btn-xs" onclick="resetExport(\\''+d.user.id+'\\')">🧪 重置导出额度</button><button class="btn btn-g btn-xs" onclick="clearPurchases(\\''+d.user.id+'\\')">🧪 清空单张购买记录</button></div>\
   <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap"><button class="btn btn-xs btn-p" id="dt-b1" onclick="dtShow(1)">⚡ 积分变动记录</button><button class="btn btn-xs btn-g" id="dt-b2" onclick="dtShow(2)">📜 会员变更记录</button><button class="btn btn-xs btn-g" id="dt-b3" onclick="dtShow(3)">🎨 画板与分享</button><button class="btn btn-xs btn-g" id="dt-b4" onclick="dtShow(4)">⬇️ 下载历史</button><button class="btn btn-xs btn-g" id="dt-b5" onclick="dtShow(5)">🧾 积分订单</button><button class="btn btn-xs btn-g" id="dt-b6" onclick="dtShow(6)">🧾 全部订单</button></div>\

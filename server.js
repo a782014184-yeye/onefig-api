@@ -423,7 +423,9 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
   const users = loadUsers();
   if (users.some(u => u.email === email)) return res.status(400).json({ ok: false, error: '这个邮箱已经注册过啦，直接登录吧' });
   const salt = crypto.randomBytes(16).toString('hex');
-  const u = { id: crypto.randomUUID(), name, email, contact: email, salt, passHash: crypto.scryptSync(password, salt, 32).toString('hex'), level: 'none', joinedAt: new Date().toISOString(), memberSince: null, notes: '', verified: false };
+  const source = String((req.body || {}).source || '直接访问').trim().slice(0, 40) || '直接访问';
+  const sourceHost = String((req.body || {}).sourceHost || '').trim().slice(0, 100);
+  const u = { id: crypto.randomUUID(), name, email, contact: email, salt, passHash: crypto.scryptSync(password, salt, 32).toString('hex'), level: 'none', joinedAt: new Date().toISOString(), memberSince: null, notes: '', verified: false, source, sourceHost };
   users.push(u);
   saveUsers(users);
   // 注册邮箱验证（2026-10-25 审计 ISSUE-3 → 应所有者要求升级为硬闸门）：
