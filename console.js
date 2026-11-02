@@ -1485,19 +1485,20 @@ const sourceBadge=(source)=>{
   const body=icon||'<b style="font-size:12px;line-height:1">'+text+'</b>';
   return '<span title="'+esc(s||'历史未记录')+'" style="display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin-right:5px;vertical-align:middle;color:'+color+'">'+body+'</span>';
 };
-const testAccountBadge=u=>'<button type="button" data-test-account="'+u.id+'" title="'+(u.test?'取消测试账号标记':'设为测试账号')+'" aria-label="'+(u.test?'取消测试账号标记':'设为测试账号')+'" onclick="event.stopPropagation();toggleTestAccount(\\''+u.id+'\\','+(!u.test)+')" style="border:0;background:transparent;padding:0 4px 0 0;font-size:13px;font-weight:700;line-height:20px;cursor:pointer;opacity:'+(u.test?'1':'.28')+'">测</button>';
+const accountSourceBadge=u=>u.test
+  ?'<span title="测试账号" data-test-account="'+u.id+'" style="display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin-right:5px;border-radius:5px;background:#f3efff;color:#7c5cbf;font-size:12px;font-weight:700;vertical-align:middle">测</span>'
+  :sourceBadge(u.source);
 H.users=async()=>{
   const s=await api('/console/api/users?q='+encodeURIComponent(userQ));
   const lvName={none:'—',basic:'青果会员',pro:'红果会员',team:'金果会员'};
-  const rows=s.list.map(u=>'<tr><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+sourceBadge(u.source)+testAccountBadge(u)+'<b style="'+(u.test?'color:#7c5cbf':'')+'">'+esc(u.name)+'</b></td><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+esc(u.email||u.contact||'—')+'</td>\
-    <td>'+esc(u.source||'历史未记录')+'</td>\
+  const rows=s.list.map(u=>'<tr><td onclick="cpTxt(this.textContent)" oncontextmenu="userTestMenu(event,\\''+u.id+'\\')" style="cursor:pointer" title="点击复制，右键设置账号类型">'+accountSourceBadge(u)+'<b style="'+(u.test?'color:#7c5cbf':'')+'">'+esc(u.name)+'</b></td><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+esc(u.email||u.contact||'—')+'</td>\
     <td><select onchange="setLevel(\\''+u.id+'\\',this.value)">'+Object.keys(lvName).map(k=>'<option value="'+k+'" '+(u.level===k?'selected':'')+'>'+lvName[k]+'</option>').join('')+'</select></td>\
     <td>'+(u.credits||0)+' ⚡</td>\
     <td>'+(u.memberSince?esc(u.memberSince.slice(0,10)):'—')+'</td><td>'+u.orderCount+' 笔</td><td><b>'+yuan(u.totalPaid)+'</b></td>\
     <td><button class="btn btn-g btn-xs" onclick="userDetail(\\''+u.id+'\\')">详情</button></td></tr>').join('')
-    ||'<tr><td colspan="9" style="color:#b0aac4;text-align:center;padding:24px">暂无用户</td></tr>';
+    ||'<tr><td colspan="8" style="color:#b0aac4;text-align:center;padding:24px">暂无用户</td></tr>';
   return '<div class="toolbar"><h2>👥 账号管理</h2><div class="sp"></div><input placeholder="搜索昵称/邮箱/来源" value="'+esc(userQ)+'" onchange="userQ=this.value;route()" style="width:200px"><button class="btn btn-g" onclick="merchantLookupModal()">🧾 商户单号查询</button><button class="btn btn-g" onclick="licenseLookupModal()">🔑 授权码查询</button><button class="btn btn-g" onclick="creditLogModal()">⚡ 积分流水</button></div>\
-  <div class="panel"><table><tr><th>昵称</th><th>邮箱</th><th>来源</th><th>会员等级</th><th>AI积分</th><th>开通时间</th><th>订单</th><th>累计付款</th><th></th></tr>'+rows+'</table></div>';
+  <div class="panel"><table><tr><th>昵称</th><th>邮箱</th><th>会员等级</th><th>AI积分</th><th>开通时间</th><th>订单</th><th>累计付款</th><th></th></tr>'+rows+'</table></div>';
 };
 window.merchantLookupModal=()=>{
   showModal('<h3>🧾 商户单号查询</h3><div class="sub" style="margin-bottom:12px">粘贴用户账号页复制的商户订单号，可查订单、用户和关联授权码。</div><div style="display:flex;gap:8px"><input id="merchant-no" placeholder="请输入完整商户订单号" style="flex:1;font-family:monospace" onkeydown="if(event.key===\\'Enter\\')doMerchantLookup()"><button class="btn btn-p" onclick="doMerchantLookup()">查询</button></div><div id="merchant-result" style="margin-top:16px"></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>');
@@ -1550,7 +1551,19 @@ window.doLicenseLookup=async()=>{
 window.creditLogModal=async()=>{const d=await api('/console/api/credit-log').catch(()=>({list:[]}));const rows=d.list.map(l=>'<tr><td>'+fmtT(l.time)+'</td><td><b>'+esc(l.name||'')+'</b></td><td style="color:'+(l.delta>0?'#2f9e5f':'#d6336c')+';font-weight:600">'+(l.delta>0?'+':'')+l.delta+'</td><td>'+esc(l.reason||'')+'</td><td>'+esc(l.by||'')+'</td></tr>').join('')||'<tr><td colspan="5" style="text-align:center;color:#b0aac4;padding:20px">暂无流水</td></tr>';
   showModal('<h3>⚡ 积分流水（最近 200 条）</h3><div style="max-height:320px;overflow:auto"><table><tr><th>时间</th><th>用户</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+rows+'</table></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>')};
 window.setLevel=async(id,level)=>{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({level})});toast('已修改 ✅')};
-window.toggleTestAccount=async(id,test)=>{try{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({test})});toast(test?'已设为测试账号 🧪':'已取消测试账号标记 ✅');route()}catch(e){toast(e.message)}};
+window.hideUserTestMenu=()=>{const m=document.getElementById('user-test-menu');if(m)m.remove()};
+window.userTestMenu=(e,id)=>{
+  e.preventDefault();e.stopPropagation();hideUserTestMenu();
+  const m=document.createElement('div');m.id='user-test-menu';
+  m.style.cssText='position:fixed;z-index:10000;display:flex;gap:4px;padding:5px;background:#fff;border:1px solid #d9d2ec;border-radius:9px;box-shadow:0 8px 24px rgba(45,35,80,.16)';
+  m.innerHTML='<button type="button" style="border:0;border-radius:6px;background:#f3efff;color:#6d4fb0;padding:7px 14px;cursor:pointer" onclick="setTestAccount(\\''+id+'\\',true)">测试</button><button type="button" style="border:0;border-radius:6px;background:#fff;color:#3d3a4b;padding:7px 14px;cursor:pointer" onclick="setTestAccount(\\''+id+'\\',false)">非测试</button>';
+  document.body.appendChild(m);
+  m.style.left=Math.max(8,Math.min(e.clientX,window.innerWidth-m.offsetWidth-8))+'px';
+  m.style.top=Math.max(8,Math.min(e.clientY,window.innerHeight-m.offsetHeight-8))+'px';
+};
+window.setTestAccount=async(id,test)=>{hideUserTestMenu();try{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({test})});toast(test?'已设为测试账号 ✅':'已设为非测试账号 ✅');route()}catch(e){toast(e.message)}};
+document.addEventListener('click',hideUserTestMenu);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')hideUserTestMenu()});
 window.adjCredits=async(id)=>{const delta=parseInt(document.getElementById('m-delta').value,10);if(!delta)return toast('填写调整数量');try{await api('/console/api/users/'+id+'/credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({delta,reason:document.getElementById('m-reason').value.trim()})});toast('已调整 ✅');userDetail(id)}catch(e){toast(e.message)}};
 window.resetQuota=async(id)=>{if(!confirm('把该账号本月下载额度重置为未使用？（测试用）'))return;try{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({resetQuota:true})});toast('本月额度已重置 ✅');userDetail(id)}catch(e){toast(e.message)}};
 window.resetExport=async(id)=>{if(!confirm('重置该账号本月导出额度并清零单次导出权益？（测试用）'))return;try{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({resetExport:true})});toast('导出额度已重置 ✅');userDetail(id)}catch(e){toast(e.message)}};

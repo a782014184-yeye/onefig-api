@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const assert = require('assert');
 const { spawn } = require('child_process');
+const puppeteer = require('../canvas-lab/node_modules/puppeteer-core');
 const PORT = 8148;
 const BASE = `http://127.0.0.1:${PORT}`;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onefig-test-accounts-'));
@@ -70,10 +71,36 @@ const api = async (route, options = {}, token = '') => {
     assert.equal(invalid.status, 400, '非布尔标记必须拒绝');
     const source = fs.readFileSync(require.resolve('./console.js'), 'utf8');
     assert.match(source, /data-test-account/);
-    assert.match(source, /toggleTestAccount/);
-    assert.match(source, /测<\/button>/);
+    assert.match(source, /accountSourceBadge/);
+    assert.match(source, /oncontextmenu="userTestMenu/);
+    assert.match(source, /setTestAccount/);
+    assert.match(source, /测<\/span>/);
     assert.match(source, /color:#7c5cbf/);
-    console.log('✓ 账号前有“测”字、测试昵称紫色和手动切换入口，非法参数被拒绝');
+    assert.doesNotMatch(source, /testAccountBadge/);
+    console.log('✓ 来源图标显示“测”、昵称紫色，右键可切换测试/非测试');
+
+    const browser = await puppeteer.launch({ executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: 'new', defaultViewport: { width: 1440, height: 900 } });
+    try {
+      const page = await browser.newPage();
+      const pageErrors = [];
+      page.on('pageerror', e => pageErrors.push(e.message));
+      await page.evaluateOnNewDocument(t => localStorage.setItem('onefig_console_token', t), token);
+      await page.goto(BASE + '/admin#/users', { waitUntil: 'networkidle2' });
+      await page.waitForSelector('td[oncontextmenu]');
+      await page.click('td[oncontextmenu]', { button: 'right' });
+      await page.waitForSelector('#user-test-menu');
+      const choices = await page.$$eval('#user-test-menu button', bs => bs.map(b => b.textContent));
+      assert.deepEqual(choices, ['测试', '非测试']);
+      await page.evaluate(() => [...document.querySelectorAll('#user-test-menu button')].find(b => b.textContent === '测试').click());
+      await sleep(500);
+      assert.equal(await page.$$eval('[data-test-account]', els => els.length), 2, '右键应能把普通账号设为测试账号');
+      const nameColor = await page.$eval('td[oncontextmenu] b', e => getComputedStyle(e).color);
+      assert.equal(nameColor, 'rgb(124, 92, 191)');
+      assert.deepEqual(pageErrors, []);
+      console.log('✓ 实际右键昵称出现菜单，设为测试后来源显示“测”且昵称紫色');
+    } finally {
+      await browser.close();
+    }
   } finally {
     child.kill();
     fs.rmSync(dataDir, { recursive: true, force: true });
