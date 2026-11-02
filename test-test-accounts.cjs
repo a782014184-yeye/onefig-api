@@ -58,10 +58,10 @@ const api = async (route, options = {}, token = '') => {
     assert.equal(stats.levelCount.pro, 1, '手动标记后会员人数应扣除');
     const list = (await api('/console/api/users', {}, token)).data.list;
     assert.equal(list.find(u => u.id === 'candidate').test, true, '标记应持久化到用户列表');
-    assert.equal(list.find(u => u.id === 'candidate').totalPaid, 0, '测试账号列表累计付款应为 0');
-    assert.equal(list.find(u => u.id === 'known-test').totalPaid, 0, '既有测试账号累计付款也应为 0');
+    assert.equal(list.find(u => u.id === 'candidate').totalPaid, 25, '测试账号列表保留真实累计付款');
+    assert.equal(list.find(u => u.id === 'known-test').totalPaid, 50, '既有测试账号也保留真实累计付款');
     assert.equal(list.find(u => u.id === 'real-pro').totalPaid, 100, '真实账号金额不受影响');
-    console.log('✓ 手动设为测试账号后，列表显示 0 元且首页统计立即扣除');
+    console.log('✓ 列表保留真实累计付款，数据看板仍立即扣除测试账号数据');
 
     changed = await api('/console/api/users/candidate', { method: 'PATCH', body: JSON.stringify({ test: false }) }, token);
     assert.equal(changed.status, 200);

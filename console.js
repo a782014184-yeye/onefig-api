@@ -215,7 +215,7 @@ module.exports = function registerConsole(app, deps) {
     const q = (req.query.q || '').trim().toLowerCase();
     let list = users.map(u => ({
       ...adminUserView(u),
-      totalPaid: u.test ? 0 : rmb(orders.filter(o => o.userId === u.id).reduce((s, o) => s + o.amount, 0)),
+      totalPaid: rmb(orders.filter(o => o.userId === u.id).reduce((s, o) => s + o.amount, 0)),
       orderCount: orders.filter(o => o.userId === u.id).length,
     }));
     if (q) list = list.filter(u => ((u.name || '') + (u.contact || '') + (u.email || '') + (u.source || '')).toLowerCase().includes(q));
