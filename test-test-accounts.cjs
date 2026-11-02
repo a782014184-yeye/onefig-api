@@ -18,6 +18,7 @@ const orders = [
   { id: 'o-real', userId: 'real-pro', plan: 'pro', amount: 100, status: 'paid', paidAt: new Date().toISOString() },
   { id: 'o-test', userId: 'known-test', plan: 'basic', amount: 50, status: 'paid', paidAt: new Date().toISOString() },
   { id: 'o-candidate', userId: 'candidate', plan: 'pro', amount: 25, status: 'paid', paidAt: new Date().toISOString() },
+  { id: 'o-legacy-test', userId: 'deleted-user', plan: 'pro', amount: 50.6, status: 'paid', test: true, paidAt: new Date().toISOString() },
 ];
 fs.writeFileSync(path.join(dataDir, 'console', 'users.json'), JSON.stringify(users));
 fs.writeFileSync(path.join(dataDir, 'console', 'orders.json'), JSON.stringify(orders));

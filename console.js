@@ -21,12 +21,12 @@ module.exports = function registerConsole(app, deps) {
   // 后台一旦 XSS 或被抓包，泄露的就是全站密码哈希（可离线爆破弱密码）
   const adminUserView = (u) => { if (!u) return u; const { passHash, salt, pwdVer, ...pub } = u; return pub; };
 
-  // 测试账号过滤（2026-10-25）：users.json 里 test:true 的账号全部保留，
-  // 但其订单不计入任何金额统计，新增用户走势也不含测试号（真实用户如张天志不标记）
+  // 测试数据过滤：users.json 里 test:true 的账号、orders 里 test:true 的历史订单均不计入金额统计；
+  // 账号已注销的历史测试订单可直接在订单上标记，新增用户走势也不含测试号。
   const testUserIds = () => new Set(load('users.json', []).filter(u => u.test).map(u => u.id));
   const paidOrdersExcludingTests = () => {
     const ids = testUserIds();
-    return load('orders.json', []).filter(o => o.status === 'paid' && !ids.has(o.userId));
+    return load('orders.json', []).filter(o => o.status === 'paid' && !o.test && !ids.has(o.userId));
   };
   const realUsersOnly = users => { const ids = testUserIds(); return users.filter(u => !ids.has(u.id)); };
 
@@ -128,7 +128,7 @@ module.exports = function registerConsole(app, deps) {
     const days = Math.min(366, Math.max(7, parseInt(req.query.range, 10) || 30));
     const testIds = testUserIds();
     const all = load(path.join('..', 'ai', 'credit-orders.json'), []);
-    const paid = all.filter(o => o.status === 'paid' && !testIds.has(o.userId));
+    const paid = all.filter(o => o.status === 'paid' && !o.test && !testIds.has(o.userId));
     const PKG_NAMES = { p100: '100积分', p800: '800积分', p2000: '2000积分' };
     const byPkg = {};
     paid.forEach(o => {
@@ -1114,7 +1114,7 @@ select:focus,input:focus{border-color:#a78bfa}
 .mat{background:#fff;border-radius:12px;padding:10px;box-shadow:0 2px 8px rgba(124,92,191,.07);text-align:center}
 .mat img{width:100%;height:96px;object-fit:contain;background:#faf9fd;border-radius:8px;border:1px solid #efeafb}
 .mat .t{font-size:12px;margin-top:6px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mat .mat-del{display:none}
+.mat .mat-del{display:inline-block}
 .mat:hover .mat-del{display:inline-block}
 .mat .dl{font-size:11px;color:#a78bfa;margin:3px 0 6px}
 .folder{background:#fff;border-radius:14px;padding:16px;box-shadow:0 2px 8px rgba(124,92,191,.07);cursor:pointer;transition:.15s;text-align:center;position:relative}
@@ -1238,7 +1238,7 @@ function fmtSize(b){b=Number(b)||0;if(!b)return '—';return b>=1048576?(b/10485
 function fmtT(t){if(!t)return '—';if(/^\d{4}-\d{2}-\d{2}$/.test(t))return t;const d=new Date(t);if(isNaN(d))return t;const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())}
 const OSS_P='${OSS}';
 function matImg(m){return m.local?'/files/'+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.file||(m.title+'.png')):OSS_P+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.title)+'.webp'}
-function showModal(html){const m=document.getElementById('modal');m.style.width='';delete m.dataset.nav;m.innerHTML=html;document.getElementById('mask').style.display='flex'}
+function showModal(html){const m=document.getElementById('modal');m.style.width='';m.style.height='auto';m.style.maxHeight='86vh';m.style.overflowY='auto';delete m.dataset.nav;m.innerHTML=html;document.getElementById('mask').style.display='flex'}
 /* 大图浏览：支持左右箭头 + 键盘 ← →，Escape 关闭；条目可为 {src,t} 带标题 */
 let VIEW_LIST=[],VIEW_I=0,CUR_IMGS=[],REQ_IMGS=[],MODAL_BACK=null;
 window.viewMat=src=>viewMatList([{src}],0);
@@ -1360,12 +1360,12 @@ window.matGlobalSearch=()=>{matView.q=document.getElementById('mat-global-q').va
 window.matGlobalClear=()=>{matView.q='';route()};
 H.materials=async()=>{
   const s=await api('/console/api/materials');MAT_DATA=s;
-  const activeOf = sd => (sd.materials || []).filter(m => !m.removed);
+  const activeOf = sd => (sd.materials || []).filter(m => !m.removed).map(m => ({ ...m, series: m.series ?? sd.folder }));
   if(matView.hot){
     const hot=await api('/console/api/materials?hot=1');CUR_IMGS=hot.list.map(m=>({src:matImg(m),t:m.title}));
     return '<div class="toolbar"><button class="btn btn-g" onclick="matView.hot=false;route()">← 返回</button><h2>🎨 热门排行</h2><div class="sp"></div></div>\
     <div class="panel" style="font-size:13px;color:#8b84a3;margin-bottom:16px">🏆 热门素材 TOP（按下载量）· 全库共 '+s.total+' 个素材，总下载 '+s.totalDownloads+' 次</div>\
-    <div class="grid">'+hot.list.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' 次 · '+fmtSize(m.size)+' · '+esc(m.series.split('-')[1]||m.series)+'</div></div>').join('')+'</div>';
+    <div class="grid">'+hot.list.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="renameMatInline(\\''+m.series+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' 次 · '+fmtSize(m.size)+' · '+esc(m.series.split('-')[1]||m.series)+'</div></div>').join('')+'</div>';
   }
   if(matView.featured){
     const starredSeries=s.series.filter(x=>x.featured);
@@ -1376,14 +1376,14 @@ H.materials=async()=>{
     <h3 style="font-size:15px;margin:14px 0 10px">📁 精选文件夹（'+starredSeries.length+'）</h3>\
     '+(starredSeries.length?'<div class="grid">'+starredSeries.map(x=>'<div class="folder"><button class="btn btn-g f-edit" style="display:inline-block;color:#b45309;background:#fef3c7" onclick="toggleFeature(\\'series\\',\\''+x.folder+'\\',null,false)">⭐</button><div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.filter(m=>!m.removed).length+' 个素材</div></div>').join('')+'</div>':'<div class="sub" style="margin-bottom:6px">暂无打星文件夹：回到素材管理，悬停文件夹卡片点左上角 ☆ 即可添加</div>')+'\
     <h3 style="font-size:15px;margin:18px 0 10px">🎨 精选素材（'+starredMats.length+'）</h3>\
-    '+(starredMats.length?'<div class="grid">'+starredMats.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t">'+esc(m.title)+'</div><div class="dl">'+esc(m.folder)+'</div><button class="btn btn-g btn-xs mat-del" style="display:inline-block;color:#b45309;background:#fef3c7" onclick="toggleFeature(\\'material\\',\\''+m.folder+'\\',\\''+m.title+'\\',false)">⭐ 取消精选</button></div>').join('')+'</div>':'<div class="sub">暂无打星素材：回到素材管理，悬停素材卡片点「☆ 精选」即可添加</div>');
+    '+(starredMats.length?'<div class="grid">'+starredMats.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="renameMatInline(\\''+m.folder+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">'+esc(m.folder)+'</div><button class="btn btn-g btn-xs mat-del" style="display:inline-block;color:#b45309;background:#fef3c7" onclick="toggleFeature(\\'material\\',\\''+m.folder+'\\',\\''+m.title+'\\',false)">⭐ 取消精选</button></div>').join('')+'</div>':'<div class="sub">暂无打星素材：回到素材管理，悬停素材卡片点「☆ 精选」即可添加</div>');
   }
   if(matView.series){
     const sd=s.series.find(x=>x.folder===matView.series) || {materials:[]};
     const ms=activeOf(sd);CUR_IMGS=ms.map(m=>({src:matImg(m),t:m.title}));
     return '<div class="toolbar"><button class="btn btn-g" onclick="matView.series=null;route()">← 返回</button><h2>🎨 '+esc(matView.series)+'</h2><div class="sp"></div>'+sortBtn()+'<button class="btn btn-p" onclick="addMatModal()">＋ 添加素材</button></div>\
     '+(sortMode?'<div class="sub" style="color:#7c5cbf;font-weight:600">⇅ 排序模式：拖动素材卡片换位，松手即保存，前台同步生效。点「✅ 完成排序」退出</div>':'')+'\
-    <div class="grid">'+ms.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'"'+(sortMode?' draggable="true" ondragstart="mDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="mDrop(event,'+i+')"':'')+'><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+(sortMode?'':' onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"')+'><div class="t">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-g btn-xs mat-del" onclick="renameMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">✏️ 改名</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>';
+    <div class="grid">'+ms.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'"'+(sortMode?' draggable="true" ondragstart="mDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="mDrop(event,'+i+')"':'')+'><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+(sortMode?'':' onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"')+'><div class="t" title="双击改名" ondblclick="renameMatInline(\\''+matView.series+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>';
   }
   const removed=await api('/console/api/materials/removed').catch(()=>({list:[]}));
   const removedHtml=removed.list.length
@@ -1397,7 +1397,7 @@ H.materials=async()=>{
     CUR_IMGS=matches.map(m=>({src:matImg(m),t:m.title}));
     return '<div class="toolbar"><h2>🎨 素材管理</h2><div class="sp"></div>'+searchBar+sortBtn()+'<button class="btn btn-g" onclick="matView.featured=true;route()">⭐ 精选管理</button><button class="btn btn-g" onclick="matView.hot=true;route()">🏆 热门排行</button><button class="btn btn-p" onclick="addSeriesModal()">＋ 新建文件夹</button></div>\
     <div class="sub">“'+esc(matView.q)+'” 找到 '+matches.length+' 个匹配素材 · 显示全部系列结果</div>'
-    +(matches.length?'<div class="grid">'+matches.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t">'+esc(m.title)+'</div><div class="dl">📁 '+esc(m.folder)+' · ⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div><button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-g btn-xs mat-del" onclick="renameMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">✏️ 改名</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button></div>').join('')+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3;padding:36px">没有找到匹配素材，请换个名称试试</div>');
+    +(matches.length?'<div class="grid">'+matches.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="renameMatInline(\\''+m.folder+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">📁 '+esc(m.folder)+' · ⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div><button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button></div>').join('')+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3;padding:36px">没有找到匹配素材，请换个名称试试</div>');
   }
   return '<div class="toolbar"><h2>🎨 素材管理</h2><div class="sp"></div>'+searchBar+sortBtn()+'<button class="btn btn-g" onclick="matView.featured=true;route()">⭐ 精选管理</button><button class="btn btn-g" onclick="matView.hot=true;route()">🏆 热门排行</button><button class="btn btn-p" onclick="addSeriesModal()">＋ 新建文件夹</button></div>\
   <div class="sub">'+(sortMode?'⇅ 排序模式：拖动文件夹换位，松手即保存，前台网站同步生效。点「✅ 完成排序」退出':'共 '+s.total+' 个素材 · 点击文件夹查看和管理')+'</div>\
@@ -1417,6 +1417,22 @@ window.renameMatModal=(s2,t)=>showModal('<h3>✏️ 重命名素材</h3>\
   <div class="sub">会同步修改服务器上的图片文件名和 OSS 预览图名，前台立即生效</div>\
   <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" onclick="doRenameMat(\\''+s2+'\\',\\''+t+'\\')">保存</button></div>');
 window.doRenameMat=async(s2,old)=>{const n=document.getElementById('m-rn').value.trim();if(!n)return toast('请填写名称');try{await api('/console/api/materials/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series:s2,oldTitle:old,newTitle:n})});closeModal();toast('已改名 ✅');route()}catch(e){toast(e.message)}};
+window.renameMatInline=(s2,t,el)=>{
+  const input=document.createElement('input');input.value=t;input.style.cssText='width:100%;height:26px;box-sizing:border-box;border:1px solid #a78bfa;border-radius:5px;padding:0 5px;font:inherit;color:#3d3a4b;outline:none';
+  el.textContent='';el.appendChild(input);input.focus();input.select();
+  let finished=false,cancelled=false;
+  const save=async()=>{
+    if(finished||cancelled)return;
+    const n=input.value.trim();
+    if(!n||n===t){finished=true;el.textContent=t;return}
+    finished=true;input.disabled=true;
+    try{await api('/console/api/materials/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series:s2,oldTitle:t,newTitle:n})});toast('已改名 ✅');route()}
+    catch(e){finished=false;input.disabled=false;toast(e.message);input.focus()}
+  };
+  input.addEventListener('keydown',e=>{if(e.key==='Enter')save();if(e.key==='Escape'){cancelled=true;el.textContent=t}});
+  input.addEventListener('dblclick',e=>e.stopPropagation());
+  input.addEventListener('blur',()=>{if(!cancelled)save()});
+};
 window.addMatModal=()=>showModal('<h3>添加素材（'+esc(matView.series)+'）</h3>\
   <div class="row"><label>素材名称（留空则使用图片文件名）</label><input id="m-title" placeholder="例如：线粒体-粉色版"></div>\
   <div class="row"><label>素材图片（可多选，PNG 透明底最佳）</label><input id="m-img" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" style="padding:6px"><div class="sub" style="margin-top:4px">单张优先使用填写的名称，未填写时用图片文件名；多张逐张使用文件名。同名或失败不影响其他图片</div></div>\
