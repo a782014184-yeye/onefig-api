@@ -35,8 +35,9 @@ module.exports = function registerConsole(app, deps) {
     const users = load('users.json', []);
     const orders = paidOrdersExcludingTests();
     const totalRevenue = rmb(orders.reduce((s, o) => s + o.amount, 0));
+    const realUsers = realUsersOnly(users);
     const levelCount = { basic: 0, pro: 0, team: 0 };
-    users.forEach(u => { if (levelCount[u.level] !== undefined) levelCount[u.level]++; });
+    realUsers.forEach(u => { if (levelCount[u.level] !== undefined) levelCount[u.level]++; });
     const monthly = {};
     orders.forEach(o => {
       const m = (o.paidAt || '').slice(0, 7) || '未知';
@@ -45,7 +46,6 @@ module.exports = function registerConsole(app, deps) {
     });
     const days = [];
     const now = new Date();
-    const realUsers = realUsersOnly(users);
     for (let i = 29; i >= 0; i--) {
       const d = new Date(now); d.setDate(d.getDate() - i);
       const key = d.toISOString().slice(0, 10);
@@ -377,7 +377,11 @@ module.exports = function registerConsole(app, deps) {
     const users = load('users.json', []);
     const u = users.find(x => x.id === req.params.id);
     if (!u) return res.status(404).json({ ok: false });
-    const { level, notes, resetQuota, resetExport } = req.body || {};
+    const { level, notes, resetQuota, resetExport, test } = req.body || {};
+    if (test !== undefined) {
+      if (typeof test !== 'boolean') return res.status(400).json({ ok: false, error: '测试账号标记必须是布尔值' });
+      u.test = test;
+    }
     if (resetQuota) {
       // 测试工具：重置本月下载额度（dlMonth 清空后，下次下载按当月重新计数）
       u.dlUsed = 0;
@@ -1481,10 +1485,11 @@ const sourceBadge=(source)=>{
   const body=icon||'<b style="font-size:12px;line-height:1">'+text+'</b>';
   return '<span title="'+esc(s||'历史未记录')+'" style="display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin-right:5px;vertical-align:middle;color:'+color+'">'+body+'</span>';
 };
+const testAccountBadge=u=>'<button type="button" data-test-account="'+u.id+'" title="'+(u.test?'取消测试账号标记':'设为测试账号')+'" aria-label="'+(u.test?'取消测试账号标记':'设为测试账号')+'" onclick="event.stopPropagation();toggleTestAccount(\\''+u.id+'\\','+(!u.test)+')" style="border:0;background:transparent;padding:0 4px 0 0;font-size:13px;font-weight:700;line-height:20px;cursor:pointer;opacity:'+(u.test?'1':'.28')+'">测</button>';
 H.users=async()=>{
   const s=await api('/console/api/users?q='+encodeURIComponent(userQ));
   const lvName={none:'—',basic:'青果会员',pro:'红果会员',team:'金果会员'};
-  const rows=s.list.map(u=>'<tr><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+sourceBadge(u.source)+'<b>'+esc(u.name)+'</b></td><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+esc(u.email||u.contact||'—')+'</td>\
+  const rows=s.list.map(u=>'<tr><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+sourceBadge(u.source)+testAccountBadge(u)+'<b style="'+(u.test?'color:#7c5cbf':'')+'">'+esc(u.name)+'</b></td><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+esc(u.email||u.contact||'—')+'</td>\
     <td>'+esc(u.source||'历史未记录')+'</td>\
     <td><select onchange="setLevel(\\''+u.id+'\\',this.value)">'+Object.keys(lvName).map(k=>'<option value="'+k+'" '+(u.level===k?'selected':'')+'>'+lvName[k]+'</option>').join('')+'</select></td>\
     <td>'+(u.credits||0)+' ⚡</td>\
@@ -1545,6 +1550,7 @@ window.doLicenseLookup=async()=>{
 window.creditLogModal=async()=>{const d=await api('/console/api/credit-log').catch(()=>({list:[]}));const rows=d.list.map(l=>'<tr><td>'+fmtT(l.time)+'</td><td><b>'+esc(l.name||'')+'</b></td><td style="color:'+(l.delta>0?'#2f9e5f':'#d6336c')+';font-weight:600">'+(l.delta>0?'+':'')+l.delta+'</td><td>'+esc(l.reason||'')+'</td><td>'+esc(l.by||'')+'</td></tr>').join('')||'<tr><td colspan="5" style="text-align:center;color:#b0aac4;padding:20px">暂无流水</td></tr>';
   showModal('<h3>⚡ 积分流水（最近 200 条）</h3><div style="max-height:320px;overflow:auto"><table><tr><th>时间</th><th>用户</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+rows+'</table></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>')};
 window.setLevel=async(id,level)=>{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({level})});toast('已修改 ✅')};
+window.toggleTestAccount=async(id,test)=>{try{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({test})});toast(test?'已设为测试账号 🧪':'已取消测试账号标记 ✅');route()}catch(e){toast(e.message)}};
 window.adjCredits=async(id)=>{const delta=parseInt(document.getElementById('m-delta').value,10);if(!delta)return toast('填写调整数量');try{await api('/console/api/users/'+id+'/credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({delta,reason:document.getElementById('m-reason').value.trim()})});toast('已调整 ✅');userDetail(id)}catch(e){toast(e.message)}};
 window.resetQuota=async(id)=>{if(!confirm('把该账号本月下载额度重置为未使用？（测试用）'))return;try{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({resetQuota:true})});toast('本月额度已重置 ✅');userDetail(id)}catch(e){toast(e.message)}};
 window.resetExport=async(id)=>{if(!confirm('重置该账号本月导出额度并清零单次导出权益？（测试用）'))return;try{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({resetExport:true})});toast('导出额度已重置 ✅');userDetail(id)}catch(e){toast(e.message)}};
