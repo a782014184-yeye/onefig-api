@@ -6,6 +6,25 @@ const sharp = require('sharp');
 
 const WATERMARK_FILE = path.join(__dirname, 'assets', 'wm-unit.png');
 const WATERMARK_OPACITY = 0.20;
+const MAX_SVG_BYTES = 10 * 1024 * 1024;
+
+// 管理端上传的 SVG 只做必要的安全清理，保留 Illustrator 的图层、渐变与可编辑结构。
+function sanitizeSvg(input) {
+  const svg = String(input || '')
+    .replace(/<!DOCTYPE[^>]*>/gi, '')
+    .replace(/<\?xml[^>]*\?>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<\s*(script|foreignObject|iframe|object|embed|audio|video)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+    .replace(/<\s*(script|foreignObject|iframe|object|embed|audio|video)\b[^>]*\/\s*>/gi, '')
+    .replace(/\s+on[a-z-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s+(?:href|xlink:href|src)\s*=\s*(["'])\s*(?:javascript:|https?:|\/\/)[\s\S]*?\1/gi, '')
+    .replace(/url\(\s*(?:javascript:|https?:|\/\/)[^)]*\)/gi, '')
+    .trim();
+  if (!svg || Buffer.byteLength(svg, 'utf8') > MAX_SVG_BYTES) throw new Error('SVG 不能超过 10MB');
+  if (!/<svg\b[^>]*>/i.test(svg) || !/<\/svg\s*>/i.test(svg)) throw new Error('文件内容不是有效的 SVG');
+  if (/<script\b|javascript:|<!ENTITY/i.test(svg)) throw new Error('SVG 包含不安全内容');
+  return svg;
+}
 
 async function watermarkUnit(width, height) {
   const tile = await sharp(WATERMARK_FILE).resize(width, height, { fit: 'fill' }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
@@ -112,4 +131,4 @@ async function publishLocalMaterial({ sourcePath, series, title, ext, dataDir, w
   }
 }
 
-module.exports = { publishLocalMaterial };
+module.exports = { publishLocalMaterial, sanitizeSvg };

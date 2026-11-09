@@ -12,7 +12,7 @@ const ICP = '浙ICP备2026079784号';
 module.exports = function registerSeo(app, deps) {
   const { esc, DATA_DIR } = deps;
   const MAT_FILE = path.join(DATA_DIR, 'console', 'materials.json');
-  const loadSeries = () => { try { return JSON.parse(fs.readFileSync(MAT_FILE, 'utf8')); } catch { return []; } };
+  const loadSeries = () => { try { return JSON.parse(fs.readFileSync(MAT_FILE, 'utf8')).filter(s => !s.deleted && s.folder !== 'Fig'); } catch { return []; } };
   // 预览图带版本参数（2026-10-19 水印烘焙上线后破 7 天缓存，让旧干净图立即失效）
   const previewUrl = (folder, file) => `${SITE}/previews/${encodeURIComponent(folder)}/${encodeURIComponent(String(file || '').replace(/\.png$/i, '.webp'))}?v=wm8`;
   const matPath = m => `/m/${encodeURIComponent(m.series)}/${encodeURIComponent(m.title)}`;

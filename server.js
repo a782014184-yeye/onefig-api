@@ -3,7 +3,7 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { publishLocalMaterial } = require('./material-publish');
+const { publishLocalMaterial, sanitizeSvg } = require('./material-publish');
 
 const PORT = process.env.PORT || 8080;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -80,6 +80,7 @@ const ALLOWED_MIME = {
   'image/jpeg': '.jpg',
   'image/webp': '.webp',
   'image/gif': '.gif',
+  'image/svg+xml': '.svg',
 };
 
 const storage = multer.diskStorage({
@@ -91,7 +92,7 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024, files: 3 },
   fileFilter: (req, file, cb) => {
     if (ALLOWED_MIME[file.mimetype]) return cb(null, true);
-    cb(new Error('只支持 PNG / JPG / WebP / GIF 图片'));
+    cb(new Error('只支持 PNG / JPG / WebP / GIF / SVG 文件'));
   },
 });
 
@@ -120,6 +121,8 @@ function clientIp(req) {
 // body-parser 解析过后会置 req._body，全局解析器自动跳过）
 app.use('/api/boards', express.json({ limit: '12mb' }));
 app.use('/api/shared', express.json({ limit: '12mb' }));   // 可编辑分享的保存通道同样要走大 payload
+app.use('/api/designs', express.json({ limit: '14mb' })); // SVG 模板作品与画板分离存储
+app.use('/api/fig-assets', express.json({ limit: '12mb' })); // Fig 编组保存为独立 SVG 素材
 // 微信支付回调需要原始报文验签（2026-10-08）：必须在全局 json 解析器之前挂载 raw
 app.use('/api/pay/wechat/notify', express.raw({ type: '*/*' }));
 // 支付宝回调是表单格式（application/x-www-form-urlencoded）
@@ -133,7 +136,7 @@ app.use((req, res, next) => {
   if (!isConsole) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Fig-Admin-Token');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -322,7 +325,7 @@ function authUser(req, res, next) {
   next();
 }
 function publicUser(u) {
-  return { id: u.id, name: u.name, email: u.email || '', level: u.level || 'none', joinedAt: u.joinedAt, memberSince: u.memberSince || null, dlUsed: u.dlUsed || 0, dlMonth: u.dlMonth || '', verified: u.verified !== false };
+  return { id: u.id, name: u.name, email: u.email || '', level: u.level || 'none', joinedAt: u.joinedAt, memberSince: u.memberSince || null, dlUsed: u.dlUsed || 0, dlMonth: u.dlMonth || '', verified: u.verified !== false, pricingAdmin: u.pricingAdmin === true, templateAdmin: u.templateAdmin === true };
 }
 // 可选认证：带合法登录 token 则识别身份，不带/失效不拦截（供公开验真区分作者本人/登录用户/游客，2026-10-16）
 function optionalAuth(req, res, next) {
@@ -395,15 +398,51 @@ async function sendRegisterCode(email) {
   }
 }
 
+// Fig 是待整理素材区：仅后台主管理员或被授予 templateAdmin 的账号可见。
+function canUseFig(req) {
+  const m = (req.headers.authorization || '').match(/^Bearer (.+)$/);
+  const token = (m && m[1]) || req.query.t || '';
+  if (checkConsoleToken(req.headers['x-fig-admin-token']) || checkConsoleToken(token)) return true;
+  const user = validateToken(token);
+  return user?.templateAdmin === true;
+}
 // 公开：素材列表（供前台网站动态读取）
 app.get('/api/materials', (req, res) => {
   try {
-    // 下架素材只保留在后台留痕，不对外展示；空文件夹也不下发（2026-10-24）
+    const includeFig = req.query.includeFig === '1' && canUseFig(req);
+    // 下架素材只保留在后台留痕；Fig 只有授权账号可见，移出 Fig 后才公开。
     const data = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), [])
       .map(s => ({ ...s, materials: (s.materials || []).filter(m => !m.removed) }))
-      .filter(s => s.materials.length > 0);
+      .filter(s => !s.deleted && s.materials.length > 0 && (s.folder !== 'Fig' || includeFig));
     res.json({ ok: true, series: data, total: data.reduce((s, x) => s + x.materials.length, 0) });
   } catch { res.json({ ok: true, series: [], total: 0 }); }
+});
+app.post('/api/fig-assets', (req, res) => {
+  try {
+    if (!canUseFig(req)) return res.status(403).json({ ok: false, error: '没有 Fig 素材管理权限' });
+    const svg = String(req.body?.svg || '');
+    if (svg.length < 40 || !svg.includes('<svg') || !svg.includes('</svg>')) return res.status(400).json({ ok: false, error: 'Fig 内容不是有效 SVG' });
+    if (Buffer.byteLength(svg) > 12 * 1024 * 1024) return res.status(413).json({ ok: false, error: 'Fig 素材超过 12MB' });
+    if (/<script\b|javascript:/i.test(svg)) return res.status(400).json({ ok: false, error: 'SVG 包含不安全内容' });
+    const materialsFile = path.join(CONSOLE_DIR, 'materials.json');
+    const data = loadJSON(materialsFile, []);
+    let series = data.find(s => s.folder === 'Fig');
+    if (!series) { series = { folder: 'Fig', materials: [] }; data.push(series); }
+    const base = String(req.body?.title || 'Fig 素材').trim().replace(/[\\/:*?"<>|]/g, '').slice(0, 60) || 'Fig 素材';
+    let title = base, suffix = 2;
+    while (series.materials.some(m => m.title === title)) title = `${base}-${suffix++}`;
+    const file = `fig-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.svg`;
+    const folder = path.join(FILES_DIR, 'Fig');
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(folder, file), svg);
+    const material = { id: `Fig/${title}`, series: 'Fig', file, title, downloads: 0, createdAt: new Date().toISOString(), local: true, vector: true, size: Buffer.byteLength(svg) };
+    series.materials.push(material);
+    saveJSON(materialsFile, data);
+    res.json({ ok: true, material, src: `/files/Fig/${encodeURIComponent(file)}` });
+  } catch (e) {
+    logLine('error', 'fig-save-fail ' + (e && e.message));
+    res.status(500).json({ ok: false, error: 'Fig 保存失败，请稍后重试' });
+  }
 });
 
 app.post('/api/auth/register', authRateLimit, async (req, res) => {
@@ -747,8 +786,8 @@ function basicAuth(req, res, next) {
 
 // ---- 后台登录：账号密码换 Bearer token（12 小时有效），替代浏览器 Basic 弹窗（2026-09-22）----
 // token 也可放 ?t= 查询参数：后台页面里 <img src="/uploads/..."> 无法带请求头
-function makeConsoleToken() {
-  const p = Buffer.from(JSON.stringify({ adm: 1, exp: Date.now() + 12 * 36e5 })).toString('base64url');
+function makeConsoleToken(user) {
+  const p = Buffer.from(JSON.stringify({ adm: 1, uid: user?.id, pv: user?.pwdVer || 0, exp: Date.now() + 12 * 36e5 })).toString('base64url');
   return p + '.' + sign(p);
 }
 function checkConsoleToken(t) {
@@ -756,7 +795,10 @@ function checkConsoleToken(t) {
   if (!p || sign(p) !== s) return false;
   try {
     const d = JSON.parse(Buffer.from(p, 'base64url').toString());
-    return d.adm === 1 && d.exp > Date.now();
+    if (d.adm !== 1 || d.exp <= Date.now()) return false;
+    if (!d.uid) return true; // 主管理员令牌
+    const u = loadUsers().find(x => x.id === d.uid);
+    return !!u && (u.pricingAdmin === true || u.templateAdmin === true) && (d.pv || 0) === (u.pwdVer || 0);
   } catch { return false; }
 }
 function consoleAuth(req, res, next) {
@@ -772,8 +814,15 @@ app.post('/console/api/login', consoleLoginLimit, (req, res) => {
     logLine('auth', `admin-login-ok ip=${clientIp(req)}`);
     return res.json({ ok: true, token: makeConsoleToken(), name: ADMIN_USER });
   }
+  const email = String(username || '').trim().toLowerCase();
+  const u = loadUsers().find(x => String(x.email || x.contact || '').toLowerCase() === email);
+  const isManager = !!u && (u.pricingAdmin === true || u.templateAdmin === true);
+  if (isManager && u.passHash && isVerified(u) && crypto.scryptSync(String(password || ''), u.salt, 32).toString('hex') === u.passHash) {
+    logLine('auth', `manager-login-ok ip=${clientIp(req)}`);
+    return res.json({ ok: true, token: makeConsoleToken(u), name: u.name || email });
+  }
   logLine('auth', `admin-login-fail ip=${clientIp(req)}`);
-  res.status(401).json({ ok: false, error: '账号或密码不对，再检查一下' });
+  res.status(401).json({ ok: false, error: '账号或密码不对，或该账号没有管理权限' });
 });
 
 function esc(s) {
@@ -1051,8 +1100,10 @@ app.get('/api/download', authUser, (req, res) => {
     // 返回文件：优先本地原图目录（注入 AIGC 元数据 + 授权码 + 下载账号隐式标识），否则 302 到 OSS 预览图
     if (fs.existsSync(local)) {
       const buf = injectAigcMeta(fs.readFileSync(local), code, u.email || u.name);
-      res.setHeader('Content-Type', 'image/png');
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(hit.m.title + '.png')}`);
+      const ext = path.extname(file).toLowerCase() || '.png';
+      const mime = { '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' }[ext] || 'application/octet-stream';
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(hit.m.title + ext)}`);
       return res.send(buf);
     }
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(hit.m.title + '.webp')}`);
@@ -1323,6 +1374,9 @@ require('./invoices')(app, {
   submitRateLimit: makeUserRateLimiter(10, 3600e3, '开票申请提交太频繁，请稍后再试'),
 });
 
+// 科研模板库：AI 原件归档、SVG 上架编辑、用户作品云端保存
+require('./templates').registerTemplateRoutes(app, { dataDir: DATA_DIR, authUser, consoleAuth });
+
 // SEO 公开页：sitemap.xml + 素材详情页 /m/ + 系列页 /s/（服务端直出）
 require('./seo')(app, { esc, DATA_DIR });
 
@@ -1423,7 +1477,17 @@ app.post('/console/api/materials/upload', consoleAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: '请填写文件夹和素材名称' });
       }
       if (!req.file) return res.status(400).json({ ok: false, error: '请选择要上传的图片' });
-      const ext = verifyUploadedImage(req, res);
+      const isSvg = req.file.mimetype === 'image/svg+xml';
+      if (isSvg) {
+        try {
+          const cleaned = sanitizeSvg(fs.readFileSync(req.file.path, 'utf8'));
+          fs.writeFileSync(req.file.path, cleaned);
+        } catch (svgError) {
+          fs.unlink(req.file.path, () => {});
+          return res.status(400).json({ ok: false, error: svgError.message });
+        }
+      }
+      const ext = isSvg ? '.svg' : verifyUploadedImage(req, res);
       if (!ext) return;
       const f = path.join(CONSOLE_DIR, 'materials.json');
       const data = loadJSON(f, []);

@@ -377,10 +377,11 @@ module.exports = function registerConsole(app, deps) {
     const users = load('users.json', []);
     const u = users.find(x => x.id === req.params.id);
     if (!u) return res.status(404).json({ ok: false });
-    const { level, notes, resetQuota, resetExport, test } = req.body || {};
-    if (test !== undefined) {
-      if (typeof test !== 'boolean') return res.status(400).json({ ok: false, error: '测试账号标记必须是布尔值' });
-      u.test = test;
+    const { level, notes, resetQuota, resetExport, test, pricingAdmin, templateAdmin } = req.body || {};
+    for (const [field, value, label] of [['test', test, '测试账号标记'], ['pricingAdmin', pricingAdmin, '价格表管理权限'], ['templateAdmin', templateAdmin, '模板整体锁定权限']]) {
+      if (value === undefined) continue;
+      if (typeof value !== 'boolean') return res.status(400).json({ ok: false, error: label + '必须是布尔值' });
+      u[field] = value;
     }
     if (resetQuota) {
       // 测试工具：重置本月下载额度（dlMonth 清空后，下次下载按当月重新计数）
@@ -756,10 +757,12 @@ module.exports = function registerConsole(app, deps) {
 
   app.get('/console/api/materials', consoleAuth, (req, res) => {
     const data = load('materials.json', []);
-    const active = data.flatMap(s => (s.materials || []).filter(m => !m.removed));
+    if (!data.some(s => s.folder === 'Fig')) { data.push({ folder: 'Fig', materials: [] }); save('materials.json', data); }
+    const visible = data.filter(s => !s.deleted);
+    const active = visible.flatMap(s => (s.materials || []).filter(m => !m.removed));
     if (req.query.hot) { active.sort((a, b) => b.downloads - a.downloads); return res.json({ ok: true, list: active.slice(0, 50) }); }
     const removedTotal = data.reduce((n, s) => n + (s.materials || []).filter(m => m.removed).length, 0);
-    res.json({ ok: true, series: data, total: active.length, totalDownloads: active.reduce((s, m) => s + m.downloads, 0), removedTotal });
+    res.json({ ok: true, series: visible, total: active.length, totalDownloads: active.reduce((s, m) => s + m.downloads, 0), removedTotal });
   });
 
   // 下架记录：后台单独查看/恢复/彻底删除（授权码流水不随下架删除）
@@ -803,13 +806,16 @@ module.exports = function registerConsole(app, deps) {
   });
 
   app.delete('/console/api/series/:folder', consoleAuth, (req, res) => {
-    // 删除文件夹 = 全部素材下架留痕，不物理删除，避免历史授权码失去名称（2026-10-24）
+    // 文件夹及素材下架留痕，不物理删除文件，避免历史授权码失去名称。
     const data = load('materials.json', []);
     const now = new Date().toISOString();
     const s = data.find(x => x.folder === req.params.folder);
-    if (s) s.materials.forEach(m => { m.removed = true; m.removedAt = now; });
+    if (!s) return res.status(404).json({ ok: false, error: '文件夹不存在' });
+    s.deleted = true;
+    s.deletedAt = now;
+    s.materials.forEach(m => { m.removed = true; m.removedAt = now; });
     save('materials.json', data);
-    res.json({ ok: true });
+    res.json({ ok: true, deleted: true });
   });
 
   app.delete('/console/api/materials/:series/:title', consoleAuth, (req, res) => {
@@ -849,16 +855,105 @@ module.exports = function registerConsole(app, deps) {
     res.json({ ok: true, purged: true });
   });
 
+  // 跨文件夹移动：同步清单、服务器文件和 OSS 预览，素材标题与历史下载记录保持不变。
+  app.post('/console/api/materials/move', consoleAuth, async (req, res) => {
+    const series = cleanName(req.body?.series);
+    const title = cleanName(req.body?.title);
+    const targetFolder = cleanName(req.body?.targetFolder);
+    if (!series || !title || !targetFolder) return res.status(400).json({ ok: false, error: '移动参数不完整' });
+    if (series === targetFolder) return res.json({ ok: true, unchanged: true });
+    const data = load('materials.json', []);
+    const source = data.find(x => x.folder === series);
+    const target = data.find(x => x.folder === targetFolder);
+    if (!source || !target) return res.status(404).json({ ok: false, error: '源文件夹或目标文件夹不存在' });
+    const index = source.materials.findIndex(m => m.title === title);
+    if (index < 0) return res.status(404).json({ ok: false, error: '素材不存在' });
+    if (target.materials.some(m => m.title === title)) return res.status(400).json({ ok: false, error: '目标文件夹已存在同名素材' });
+    const m = source.materials[index];
+    const file = m.file || title + '.png';
+    fs.mkdirSync(path.join(FILES_DIR, targetFolder), { recursive: true });
+    fs.mkdirSync(path.join(ORIG_DIR, targetFolder), { recursive: true });
+    if (m.local) mvIfExists(path.join(FILES_DIR, series, file), path.join(FILES_DIR, targetFolder, file));
+    mvIfExists(path.join(ORIG_DIR, series, file), path.join(ORIG_DIR, targetFolder, file));
+    source.materials.splice(index, 1);
+    m.series = targetFolder;
+    m.id = targetFolder + '/' + title;
+    m.updatedAt = new Date().toISOString();
+    target.materials.push(m);
+    save('materials.json', data);
+    const preview = title.replace(/\.[^.]+$/, '') + '.webp';
+    await ossMv('oss://onefig/previews/' + series + '/' + preview, 'oss://onefig/previews/' + targetFolder + '/' + preview, false);
+    res.json({ ok: true, material: m });
+  });
+
+  // 批量跨文件夹移动：先完整校验，再一次性保存；文件移动失败时尽量回滚，避免半批迁移。
+  app.post('/console/api/materials/move-batch', consoleAuth, async (req, res) => {
+    const targetFolder = cleanName(req.body?.targetFolder);
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!targetFolder || !items.length) return res.status(400).json({ ok: false, error: '请选择素材和目标文件夹' });
+    if (items.length > 200) return res.status(400).json({ ok: false, error: '单次最多移动 200 个素材' });
+    const data = load('materials.json', []);
+    const originalData = JSON.parse(JSON.stringify(data));
+    const target = data.find(x => x.folder === targetFolder);
+    if (!target) return res.status(404).json({ ok: false, error: '目标文件夹不存在' });
+    const planned = [], seen = new Set(), fileMoves = [];
+    try {
+      for (const raw of items) {
+        const series = cleanName(raw?.series), title = cleanName(raw?.title);
+        if (!series || !title) return res.status(400).json({ ok: false, error: '批量移动参数不完整' });
+        if (series === targetFolder) return res.status(400).json({ ok: false, error: `「${title}」已在目标文件夹` });
+        const key = series + '/' + title;
+        if (seen.has(key)) return res.status(400).json({ ok: false, error: `「${title}」被重复选择` });
+        seen.add(key);
+        const source = data.find(x => x.folder === series);
+        const m = source && source.materials.find(x => x.title === title);
+        if (!m) return res.status(404).json({ ok: false, error: `素材不存在：${title}` });
+        if (target.materials.some(x => x.title === title)) return res.status(400).json({ ok: false, error: `目标文件夹已有同名素材：${title}` });
+        const file = m.file || title + '.png';
+        for (const root of m.local ? [FILES_DIR, ORIG_DIR] : [ORIG_DIR]) {
+          const from = path.join(root, series, file), to = path.join(root, targetFolder, file);
+          if (fs.existsSync(from) && fs.existsSync(to)) return res.status(400).json({ ok: false, error: `目标位置已有文件：${title}` });
+        }
+        planned.push({ source, m, series, title, file });
+      }
+      fs.mkdirSync(path.join(FILES_DIR, targetFolder), { recursive: true });
+      fs.mkdirSync(path.join(ORIG_DIR, targetFolder), { recursive: true });
+      const moveFile = (from, to) => { if (fs.existsSync(from)) { fs.renameSync(from, to); fileMoves.push([from, to]); } };
+      const now = new Date().toISOString();
+      for (const item of planned) {
+        if (item.m.local) moveFile(path.join(FILES_DIR, item.series, item.file), path.join(FILES_DIR, targetFolder, item.file));
+        moveFile(path.join(ORIG_DIR, item.series, item.file), path.join(ORIG_DIR, targetFolder, item.file));
+        item.source.materials.splice(item.source.materials.indexOf(item.m), 1);
+        item.m.series = targetFolder;
+        item.m.id = targetFolder + '/' + item.title;
+        item.m.updatedAt = now;
+        target.materials.push(item.m);
+      }
+      save('materials.json', data);
+    } catch (e) {
+      for (const [from, to] of fileMoves.reverse()) { try { if (fs.existsSync(to)) fs.renameSync(to, from); } catch {} }
+      try { save('materials.json', originalData); } catch {}
+      return res.status(500).json({ ok: false, error: '批量移动失败，已恢复原数据：' + (e.message || '未知错误') });
+    }
+    for (const item of planned) {
+      const preview = item.title.replace(/\.[^.]+$/, '') + '.webp';
+      await ossMv('oss://onefig/previews/' + item.series + '/' + preview, 'oss://onefig/previews/' + targetFolder + '/' + preview, false);
+    }
+    res.json({ ok: true, moved: planned.length, targetFolder, materials: planned.map(x => x.m) });
+  });
+
   // 排序保存：整体文件夹顺序 或 某文件夹内素材顺序（materials.json 数组顺序即前台展示顺序）
   app.post('/console/api/materials/reorder', consoleAuth, (req, res) => {
     const { series, folder, materials } = req.body || {};
     const data = load('materials.json', []);
     if (Array.isArray(series)) {
-      if (series.length !== data.length || !series.every(f => data.some(x => x.folder === f))) {
+      // 页面只展示未删除文件夹，排序校验也必须使用同一集合；删除记录单独保留，不能计入数量。
+      const visible = data.filter(x => !x.deleted), deleted = data.filter(x => x.deleted);
+      if (series.length !== visible.length || !series.every(f => visible.some(x => x.folder === f))) {
         return res.status(400).json({ ok: false, error: '顺序和现有数据对不上，请刷新后重试' });
       }
-      const map = {}; data.forEach(x => { map[x.folder] = x; });
-      save('materials.json', series.map(f => map[f]));
+      const map = {}; visible.forEach(x => { map[x.folder] = x; });
+      save('materials.json', [...series.map(f => map[f]), ...deleted]);
       return res.json({ ok: true });
     }
     if (folder && Array.isArray(materials)) {
@@ -1081,7 +1176,7 @@ select:focus,input:focus{border-color:#a78bfa}
 .select-value{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .select-arrow{position:absolute;right:12px;top:50%;width:15px;height:15px;transform:translateY(-50%);color:#8b73b7;pointer-events:none;transition:transform .16s,color .15s}
 .ui-select.open .select-arrow{transform:translateY(-50%) rotate(180deg);color:#6d4fb0}
-.select-menu{position:absolute;z-index:100;top:calc(100% + 7px);left:0;display:none;min-width:100%;max-height:248px;overflow:auto;padding:6px;border:1px solid #e5dcf2;border-radius:12px;background:#fff;box-shadow:0 14px 36px rgba(62,42,96,.16),0 3px 10px rgba(62,42,96,.06)}
+.select-menu{position:absolute;z-index:100;top:calc(100% + 7px);left:0;display:none;min-width:100%;max-height:min(52vh,520px);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;padding:6px;border:1px solid #e5dcf2;border-radius:12px;background:#fff;box-shadow:0 14px 36px rgba(62,42,96,.16),0 3px 10px rgba(62,42,96,.06)}
 .ui-select.open .select-menu{display:block;animation:select-in .14s ease-out}
 .ui-select.up .select-menu{top:auto;bottom:calc(100% + 7px)}
 .select-option{display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%;min-height:36px;padding:8px 10px;border:0;border-radius:8px;background:transparent;color:#514a61;font-family:inherit;font-size:13px;line-height:1.35;text-align:left;white-space:nowrap;cursor:pointer}
@@ -1110,21 +1205,37 @@ select:focus,input:focus{border-color:#a78bfa}
 .chart .cval{position:absolute;bottom:calc(100% + 3px);left:50%;transform:translateX(-50%);font-size:10px;color:#6d4fb0;font-weight:600;white-space:nowrap}
 .clabels{display:flex;gap:3px;margin-top:6px}
 .clabels span{flex:1;font-size:10px;color:#b0aac4;text-align:center;min-width:0;overflow:hidden}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:14px}
-.mat{background:#fff;border-radius:12px;padding:10px;box-shadow:0 2px 8px rgba(124,92,191,.07);text-align:center}
-.mat img{width:100%;height:96px;object-fit:contain;background:#faf9fd;border-radius:8px;border:1px solid #efeafb}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+.mat{background:#fff;border-radius:12px;padding:10px;box-shadow:0 2px 8px rgba(124,92,191,.07);text-align:center;position:relative}
+.mat-check{position:absolute;top:8px;left:8px;z-index:2;width:18px;height:18px;margin:0;accent-color:#7c5cbf;cursor:pointer}
+.mat:has(.mat-check:checked){outline:2px solid #a78bfa;outline-offset:-2px}
+.mat img{width:100%;height:240px;object-fit:contain;background:#faf9fd;border-radius:8px;border:1px solid #efeafb}
 .mat .t{font-size:12px;margin-top:6px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mat .mat-del{display:inline-block}
 .mat:hover .mat-del{display:inline-block}
 .mat .dl{font-size:11px;color:#a78bfa;margin:3px 0 6px}
+.mat[data-material-card]{cursor:pointer}
+[data-batch-toolbar]{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap}
+.batch-selected-wrap{display:inline-flex;align-items:center;gap:4px}
+.batch-selected-count{border:0;background:transparent;color:#8b84a3;font-size:12px;padding:6px 2px;cursor:pointer}
+.batch-select-all{visibility:hidden;border:0;border-radius:6px;background:#eee8fa;color:#6d4fb0;padding:4px 8px;font-size:12px;font-weight:600;cursor:pointer}
+.batch-selected-wrap:hover .batch-select-all,.batch-select-all:focus-visible{visibility:visible}
 .folder{background:#fff;border-radius:14px;padding:16px;box-shadow:0 2px 8px rgba(124,92,191,.07);cursor:pointer;transition:.15s;text-align:center;position:relative}
+.folder.empty{background:#e5e7eb;opacity:.5;box-shadow:none}
+.folder.empty:hover{opacity:.72;box-shadow:0 4px 12px rgba(107,114,128,.12)}
 .folder:hover{transform:translateY(-2px);box-shadow:0 6px 14px rgba(124,92,191,.15)}
 .folder .ic{font-size:34px}
 .folder .n{font-size:13px;font-weight:600;margin-top:6px}
 .folder .c{font-size:11px;color:#8b84a3}
 .folder.sorting,.mat.sorting{cursor:grab;outline:2px dashed #c4b5fd;outline-offset:-2px}
 .folder.sorting:hover,.mat.sorting:hover{outline-color:#7c5cbf;transform:none}
+.mat.sorting:has(.mat-check:checked){outline:2px solid #7c5cbf;outline-offset:-2px}
+.mat.sorting:active{cursor:grabbing}
+.folder-end-drop{display:flex;align-items:center;justify-content:center;min-height:112px;box-sizing:border-box;border:2px dashed #c4b5fd;border-radius:14px;background:#faf8ff;color:#7c5cbf;font-size:13px;font-weight:600;cursor:copy}
+.folder-end-drop:hover{border-color:#7c5cbf;background:#f3efff}
+.mat-end-drop{min-height:56px;margin-top:12px}
 .f-edit{position:absolute;top:8px;right:8px;display:none;padding:3px 9px;font-size:12px}
+.f-delete{left:8px;right:auto}
 .folder:hover .f-edit{display:inline-block}
 .vnav{position:absolute;top:44%;transform:translateY(-50%);width:38px;height:38px;border-radius:50%;border:none;background:rgba(255,255,255,.88);color:#6d4fb0;font-size:22px;line-height:1;cursor:pointer;box-shadow:0 2px 8px rgba(40,25,70,.25);font-weight:700}
 .vnav:hover{background:#fff}
@@ -1153,7 +1264,8 @@ select:focus,input:focus{border-color:#a78bfa}
 .modal .row{margin-bottom:12px}
 .modal .row label{display:block;font-size:12px;color:#8b84a3;margin-bottom:4px}
 .modal input,.modal select{width:100%}
-.modal .btns{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.modal .select-menu{position:fixed;max-height:min(52vh,520px)}
+.modal .btns{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;position:sticky;bottom:-22px;z-index:1;padding:10px 0 0;background:#fff;box-shadow:0 -10px 14px rgba(255,255,255,.96)}
 .toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);background:rgba(61,58,75,.82);backdrop-filter:blur(6px);color:#fff;padding:10px 20px;border-radius:999px;font-size:13px;display:none;z-index:60;pointer-events:none;box-shadow:0 4px 16px rgba(61,58,75,.25)}
 .login-mask{position:fixed;inset:0;background:linear-gradient(135deg,#f6f4fb,#e9dffb);display:none;align-items:center;justify-content:center;z-index:50}
 .login-card{background:#fff;border-radius:18px;padding:36px 34px;width:340px;max-width:92vw;box-shadow:0 14px 44px rgba(124,92,191,.2);text-align:center}
@@ -1253,7 +1365,7 @@ function renderView(){
   const it=VIEW_LIST[VIEW_I],src=it.src||it,t=it.t||'',multi=VIEW_LIST.length>1;
   showModal('<div style="background:#c9cad1;border-radius:12px;padding:12px;position:relative">'
     +(t?'<div style="text-align:center;font-weight:700;color:#3d3a4b;font-size:14px;margin-bottom:8px">'+esc(t)+'</div>':'')
-    +'<img src="'+src+'" style="max-width:76vw;max-height:72vh;object-fit:contain;display:block;margin:0 auto">'
+    +'<img src="'+src+'" style="width:min(420px,72vw);height:min(420px,72vh);max-width:76vw;max-height:72vh;object-fit:contain;display:block;margin:0 auto">'
     +(multi?'<button class="vnav" style="left:20px" onclick="viewNav(-1)">‹</button><button class="vnav" style="right:20px" onclick="viewNav(1)">›</button>':'')
     +(multi?'<div style="text-align:center;font-size:12px;color:#6d4fb0;margin-top:8px;font-weight:600">'+(VIEW_I+1)+' / '+VIEW_LIST.length+'</div>':'')
     +'</div>');
@@ -1274,6 +1386,7 @@ window.cpTxt=t=>{
   if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done).catch(fallback)}else fallback();
 };
 function closeModal(){
+  closeUiSelects();
   if(MODAL_BACK){
     const m=document.getElementById('modal'),back=MODAL_BACK;MODAL_BACK=null;
     m.innerHTML=back.html;m.style.width=back.width;delete m.dataset.nav;
@@ -1343,18 +1456,71 @@ window.setRange=r=>{window._range=r;route()};
 window.setCRange=r=>{window._crange=r;route()};
 
 /* ---------- 2. 素材管理 ---------- */
-let matView={series:null,hot:false,featured:false,q:''},sortMode=false,MAT_DATA=null,dragI=-1;
-window.toggleSort=()=>{sortMode=!sortMode;dragI=-1;route()};
-window.fDrag=(e,i)=>{dragI=i;e.dataTransfer.effectAllowed='move'};
-window.fDrop=async(e,i)=>{e.preventDefault();if(dragI<0||dragI===i){dragI=-1;return}
-  const arr=MAT_DATA.series;const[mv]=arr.splice(dragI,1);arr.splice(i,0,mv);dragI=-1;
+let matView={series:null,hot:false,featured:false,q:''},sortMode=false,MAT_DATA=null,dragFolder='',dragMaterial='';
+window.toggleSort=()=>{sortMode=!sortMode;dragFolder='';dragMaterial='';route()};
+window.fDrag=(e,folder)=>{dragFolder=folder;e.dataTransfer.effectAllowed='move'};
+window.fDrop=async(e,targetFolder)=>{e.preventDefault();e.stopPropagation();
+  const arr=MAT_DATA.series,from=arr.findIndex(x=>x.folder===dragFolder),to=arr.findIndex(x=>x.folder===targetFolder);
+  if(from<0||to<0||from===to){dragFolder='';return}
+  const[mv]=arr.splice(from,1);arr.splice(to,0,mv);dragFolder='';
   try{await api('/console/api/materials/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series:arr.map(x=>x.folder)})});toast('顺序已保存 ✅')}catch(err){toast(err.message)}
   route()};
-window.mDrag=(e,i)=>{dragI=i;e.dataTransfer.effectAllowed='move';e.stopPropagation()};
-window.mDrop=async(e,i)=>{e.preventDefault();e.stopPropagation();if(dragI<0||dragI===i){dragI=-1;return}
-  const sd=MAT_DATA.series.find(x=>x.folder===matView.series);const arr=sd.materials;const[mv]=arr.splice(dragI,1);arr.splice(i,0,mv);dragI=-1;
-  try{await api('/console/api/materials/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:matView.series,materials:arr.map(m=>m.title)})});toast('顺序已保存 ✅')}catch(err){toast(err.message)}
+window.fDropEnd=async e=>{
+  e.preventDefault();e.stopPropagation();if(!dragFolder)return;
+  const arr=MAT_DATA.series,from=arr.findIndex(x=>x.folder===dragFolder);if(from<0){dragFolder='';return}
+  const[mv]=arr.splice(from,1);arr.push(mv);dragFolder='';
+  try{await api('/console/api/materials/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series:arr.map(x=>x.folder)})});toast('已移到最后 ✅')}catch(err){toast(err.message)}
   route()};
+window.mDrag=(e,title)=>{
+  dragMaterial=title;
+  const key=matView.series+'/'+title;
+  if(!moveSelection.has(key)){
+    moveSelection.clear();moveSelection.add(key);
+    document.querySelectorAll('[data-material-select]').forEach(el=>{el.checked=el.dataset.series===matView.series&&el.dataset.title===title});
+    const bar=document.querySelector('[data-batch-toolbar]');if(bar)bar.innerHTML=batchMoveToolbar();
+  }
+  e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',title);e.stopPropagation()
+};
+const reorderDraggedMaterials=async(targetTitle,toEnd=false)=>{
+  const sd=MAT_DATA.series.find(x=>x.folder===matView.series);if(!sd||!dragMaterial)return;
+  const arr=sd.materials,dragKey=matView.series+'/'+dragMaterial,keys=moveSelection.has(dragKey)?moveSelection:new Set([dragKey]);
+  const moving=arr.filter(m=>!m.removed&&keys.has((m.series||matView.series)+'/'+m.title));
+  if(!moving.length){dragMaterial='';return}
+  const titles=new Set(moving.map(m=>m.title));
+  if(!toEnd&&titles.has(targetTitle)){dragMaterial='';return}
+  const before=JSON.stringify(arr.map(m=>m.title)),rest=arr.filter(m=>!titles.has(m.title)),to=toEnd?rest.length:rest.findIndex(m=>m.title===targetTitle);
+  if(to<0){dragMaterial='';return}
+  arr.splice(0,arr.length,...rest.slice(0,to),...moving,...rest.slice(to));
+  const changed=before!==JSON.stringify(arr.map(m=>m.title));dragMaterial='';
+  if(!changed)return;
+  try{await api('/console/api/materials/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:matView.series,materials:arr.map(m=>m.title)})});toast(moving.length>1?'已批量调整 '+moving.length+' 个素材顺序 ✅':'顺序已保存 ✅')}catch(err){toast(err.message)}
+  route()
+};
+window.mDrop=async(e,targetTitle)=>{e.preventDefault();e.stopPropagation();await reorderDraggedMaterials(targetTitle)};
+window.mDropEnd=async e=>{e.preventDefault();e.stopPropagation();await reorderDraggedMaterials(undefined,true)};
+let moveSelection=new Set(),batchMoving=false;
+window.openSeries=folder=>{matView.series=folder;moveSelection.clear();route()};
+window.closeSeries=()=>{matView.series=null;moveSelection.clear();route()};
+window.toggleMoveMaterial=(series,title,on)=>{const key=series+'/'+title;if(on)moveSelection.add(key);else moveSelection.delete(key);const bar=document.querySelector('[data-batch-toolbar]');if(bar)bar.innerHTML=batchMoveToolbar()};
+window.cardToggleMaterial=(series,title)=>{const key=series+'/'+title,on=!moveSelection.has(key);toggleMoveMaterial(series,title,on);const input=[...document.querySelectorAll('[data-material-select]')].find(el=>el.dataset.series===series&&el.dataset.title===title);if(input)input.checked=on};
+window.selectAllVisible=()=>{const sd=MAT_DATA.series.find(x=>x.folder===matView.series);if(!sd)return;(sd.materials||[]).filter(m=>!m.removed).forEach(m=>moveSelection.add((m.series||sd.folder)+'/'+m.title));document.querySelectorAll('[data-material-select]').forEach(el=>{el.checked=true});const bar=document.querySelector('[data-batch-toolbar]');if(bar)bar.innerHTML=batchMoveToolbar()};
+window.clearMoveSelection=()=>{moveSelection.clear();route()};
+const batchMoveToolbar=()=>moveSelection.size?' <span class="batch-selected-wrap"><button type="button" class="batch-selected-count" data-select-all onclick="selectAllVisible()" title="点击全选当前文件夹">已选 '+moveSelection.size+' 项</button><button type="button" class="batch-select-all" data-select-all onclick="selectAllVisible()">全选</button></span><button class="btn btn-p" data-batch-move onclick="batchMoveModal()">批量移动</button><button class="btn btn-g" onclick="clearMoveSelection()">清空</button>':'';
+window.batchMoveModal=async()=>{
+  if(!moveSelection.size)return toast('请先选择素材');
+  MAT_DATA=await api('/console/api/materials');
+  const sources=new Set([...moveSelection].map(key=>key.split('/')[0]));
+  const options=(MAT_DATA?.series||[]).filter(x=>!sources.has(x.folder)).map(x=>'<option value="'+esc(x.folder)+'">'+esc(x.folder)+'</option>').join('');
+  if(!options)return toast('没有可移动到的其他文件夹');
+  showModal('<h3>批量移动素材</h3><div class="row"><label>已选择</label><div><b>'+moveSelection.size+' 个素材</b></div></div><div class="row"><label>移动到</label><select id="m-batch-target" data-batch-target>'+options+'</select></div><div class="sub">会同时更新素材清单和实际文件；目标文件夹有同名素材时会先阻止整批移动。</div><div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" data-batch-confirm onclick="doBatchMoveMat()">确认移动</button></div>');
+};
+window.doBatchMoveMat=async()=>{
+  if(batchMoving)return;
+  const targetFolder=document.getElementById('m-batch-target').value;
+  const items=[...moveSelection].map(key=>{const i=key.indexOf('/');return{series:key.slice(0,i),title:key.slice(i+1)}});
+  batchMoving=true;
+  try{const r=await api('/console/api/materials/move-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items,targetFolder})});moveSelection.clear();closeModal();toast('已批量移动 '+r.moved+' 个素材 ✅');route()}catch(e){toast(e.message)}finally{batchMoving=false}
+};
 const sortBtn=()=>'<button class="btn '+(sortMode?'btn-p':'btn-g')+'" onclick="toggleSort()">'+(sortMode?'✅ 完成排序':'⇅ 调整顺序')+'</button>';
 window.matGlobalSearch=()=>{matView.q=document.getElementById('mat-global-q').value.trim();route()};
 window.matGlobalClear=()=>{matView.q='';route()};
@@ -1365,7 +1531,7 @@ H.materials=async()=>{
     const hot=await api('/console/api/materials?hot=1');CUR_IMGS=hot.list.map(m=>({src:matImg(m),t:m.title}));
     return '<div class="toolbar"><button class="btn btn-g" onclick="matView.hot=false;route()">← 返回</button><h2>🎨 热门排行</h2><div class="sp"></div></div>\
     <div class="panel" style="font-size:13px;color:#8b84a3;margin-bottom:16px">🏆 热门素材 TOP（按下载量）· 全库共 '+s.total+' 个素材，总下载 '+s.totalDownloads+' 次</div>\
-    <div class="grid">'+hot.list.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="renameMatInline(\\''+m.series+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' 次 · '+fmtSize(m.size)+' · '+esc(m.series.split('-')[1]||m.series)+'</div></div>').join('')+'</div>';
+    <div class="grid">'+hot.list.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="event.stopPropagation();renameMatInline(\\''+m.series+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' 次 · '+fmtSize(m.size)+' · '+esc(m.series.split('-')[1]||m.series)+'</div></div>').join('')+'</div>';
   }
   if(matView.featured){
     const starredSeries=s.series.filter(x=>x.featured);
@@ -1376,20 +1542,21 @@ H.materials=async()=>{
     <h3 style="font-size:15px;margin:14px 0 10px">📁 精选文件夹（'+starredSeries.length+'）</h3>\
     '+(starredSeries.length?'<div class="grid">'+starredSeries.map(x=>'<div class="folder"><button class="btn btn-g f-edit" style="display:inline-block;color:#b45309;background:#fef3c7" onclick="toggleFeature(\\'series\\',\\''+x.folder+'\\',null,false)">⭐</button><div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.filter(m=>!m.removed).length+' 个素材</div></div>').join('')+'</div>':'<div class="sub" style="margin-bottom:6px">暂无打星文件夹：回到素材管理，悬停文件夹卡片点左上角 ☆ 即可添加</div>')+'\
     <h3 style="font-size:15px;margin:18px 0 10px">🎨 精选素材（'+starredMats.length+'）</h3>\
-    '+(starredMats.length?'<div class="grid">'+starredMats.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="renameMatInline(\\''+m.folder+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">'+esc(m.folder)+'</div><button class="btn btn-g btn-xs mat-del" style="display:inline-block;color:#b45309;background:#fef3c7" onclick="toggleFeature(\\'material\\',\\''+m.folder+'\\',\\''+m.title+'\\',false)">⭐ 取消精选</button></div>').join('')+'</div>':'<div class="sub">暂无打星素材：回到素材管理，悬停素材卡片点「☆ 精选」即可添加</div>');
+    '+(starredMats.length?'<div class="grid">'+starredMats.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="event.stopPropagation();renameMatInline(\\''+m.folder+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">'+esc(m.folder)+'</div><button class="btn btn-g btn-xs mat-del" style="display:inline-block;color:#b45309;background:#fef3c7" onclick="toggleFeature(\\'material\\',\\''+m.folder+'\\',\\''+m.title+'\\',false)">⭐ 取消精选</button></div>').join('')+'</div>':'<div class="sub">暂无打星素材：回到素材管理，悬停素材卡片点「☆ 精选」即可添加</div>');
   }
   if(matView.series){
     const sd=s.series.find(x=>x.folder===matView.series) || {materials:[]};
     const ms=activeOf(sd);CUR_IMGS=ms.map(m=>({src:matImg(m),t:m.title}));
-    return '<div class="toolbar"><button class="btn btn-g" onclick="matView.series=null;route()">← 返回</button><h2>🎨 '+esc(matView.series)+'</h2><div class="sp"></div>'+sortBtn()+'<button class="btn btn-p" onclick="addMatModal()">＋ 添加素材</button></div>\
-    '+(sortMode?'<div class="sub" style="color:#7c5cbf;font-weight:600">⇅ 排序模式：拖动素材卡片换位，松手即保存，前台同步生效。点「✅ 完成排序」退出</div>':'')+'\
-    <div class="grid">'+ms.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'"'+(sortMode?' draggable="true" ondragstart="mDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="mDrop(event,'+i+')"':'')+'><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+(sortMode?'':' onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"')+'><div class="t" title="双击改名" ondblclick="renameMatInline(\\''+matView.series+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>';
+    return '<div class="toolbar"><button class="btn btn-g" onclick="closeSeries()">← 返回</button><h2>🎨 '+esc(matView.series)+'</h2><div class="sp"></div>'+sortBtn()+'<span data-batch-toolbar>'+batchMoveToolbar()+'</span><button class="btn btn-p" onclick="addMatModal()">＋ 添加素材</button></div>\
+    '+(sortMode?'<div class="sub" style="color:#7c5cbf;font-weight:600">⇅ 排序模式：点击素材可多选，拖动已选素材可整组换位，也可整组放到最后。松手即保存，前台同步生效。</div>':'')+'\
+    <div class="grid">'+ms.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'" data-material-card onclick="cardToggleMaterial(\\''+m.series+'\\',\\''+m.title+'\\')"'+(sortMode?' draggable="true" ondragstart="mDrag(event,\\''+m.title+'\\')" ondragover="event.preventDefault()" ondrop="mDrop(event,\\''+m.title+'\\')"':'')+'><input type="checkbox" class="mat-check" data-material-select data-series="'+esc(m.series)+'" data-title="'+esc(m.title)+'" '+(moveSelection.has(m.series+'/'+m.title)?'checked':'')+' onclick="event.stopPropagation()" onchange="toggleMoveMaterial(\\''+m.series+'\\',\\''+m.title+'\\',this.checked)"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+'><div class="t" title="双击改名" ondblclick="event.stopPropagation();renameMatInline(\\''+matView.series+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" onclick="event.stopPropagation();viewMatList(CUR_IMGS,'+i+')">预览</button> <button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="event.stopPropagation();toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-g btn-xs mat-del" data-move-material="'+esc(m.title)+'" onclick="event.stopPropagation();moveMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">移动</button> <button class="btn btn-d btn-xs mat-del" onclick="event.stopPropagation();delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>'+(sortMode?'<div class="folder-end-drop mat-end-drop" data-batch-sort-end ondragover="event.preventDefault()" ondrop="mDropEnd(event)">将所选素材放到最后</div>':'');
   }
   const removed=await api('/console/api/materials/removed').catch(()=>({list:[]}));
   const removedHtml=removed.list.length
     ? '<div class="panel" style="margin-top:18px"><h3 style="font-size:15px;margin-bottom:10px">🗑 下架记录（'+removed.list.length+'）</h3><div class="sub" style="margin-bottom:8px">下架只影响前台展示，历史下载的授权码仍可验真；同名重传或点「恢复上架」会保留原 ID。</div><table><tr><th>素材</th><th>系列</th><th>下架时间</th><th>操作</th></tr>'+removed.list.map(m=>'<tr><td><b>'+esc(m.title)+'</b></td><td>'+esc(m.series)+'</td><td>'+fmtT(m.removedAt)+'</td><td><button class="btn btn-g btn-xs" onclick="restoreMat(\\''+m.series+'\\',\\''+m.title+'\\')">↩️ 恢复上架</button> <button class="btn btn-d btn-xs" onclick="purgeMat(\\''+m.series+'\\',\\''+m.title+'\\')">彻底删除</button></td></tr>').join('')+'</table></div>'
     : '';
-  const folders=s.series.filter(x=>x.materials.some(m=>!m.removed));
+  // 素材全部移出后仍保留空文件夹，是否删除由管理员自行决定。
+  const folders=s.series;
   const searchBar='<input id="mat-global-q" placeholder="搜索素材名称，回车确认" value="'+esc(matView.q||'')+'" onchange="matGlobalSearch()" onkeydown="if(event.key===\\'Enter\\')matGlobalSearch()" style="width:240px">'+(matView.q?'<button class="btn btn-g" onclick="matGlobalClear()">清空</button>':'');
   if(matView.q){
     const q=matView.q.toLowerCase(),matches=[];
@@ -1397,16 +1564,33 @@ H.materials=async()=>{
     CUR_IMGS=matches.map(m=>({src:matImg(m),t:m.title}));
     return '<div class="toolbar"><h2>🎨 素材管理</h2><div class="sp"></div>'+searchBar+sortBtn()+'<button class="btn btn-g" onclick="matView.featured=true;route()">⭐ 精选管理</button><button class="btn btn-g" onclick="matView.hot=true;route()">🏆 热门排行</button><button class="btn btn-p" onclick="addSeriesModal()">＋ 新建文件夹</button></div>\
     <div class="sub">“'+esc(matView.q)+'” 找到 '+matches.length+' 个匹配素材 · 显示全部系列结果</div>'
-    +(matches.length?'<div class="grid">'+matches.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="renameMatInline(\\''+m.folder+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">📁 '+esc(m.folder)+' · ⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div><button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button></div>').join('')+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3;padding:36px">没有找到匹配素材，请换个名称试试</div>');
+    +(matches.length?'<div class="grid">'+matches.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="event.stopPropagation();renameMatInline(\\''+m.folder+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">📁 '+esc(m.folder)+' · ⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div><button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-g btn-xs mat-del" data-move-material="'+esc(m.title)+'" onclick="moveMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">移动</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button></div>').join('')+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3;padding:36px">没有找到匹配素材，请换个名称试试</div>');
   }
   return '<div class="toolbar"><h2>🎨 素材管理</h2><div class="sp"></div>'+searchBar+sortBtn()+'<button class="btn btn-g" onclick="matView.featured=true;route()">⭐ 精选管理</button><button class="btn btn-g" onclick="matView.hot=true;route()">🏆 热门排行</button><button class="btn btn-p" onclick="addSeriesModal()">＋ 新建文件夹</button></div>\
   <div class="sub">'+(sortMode?'⇅ 排序模式：拖动文件夹换位，松手即保存，前台网站同步生效。点「✅ 完成排序」退出':'共 '+s.total+' 个素材 · 点击文件夹查看和管理')+'</div>\
-  <div class="grid">'+folders.map((x,i)=>'<div class="folder'+(sortMode?' sorting':'')+'" '+(sortMode?'draggable="true" ondragstart="fDrag(event,'+i+')" ondragover="event.preventDefault()" ondrop="fDrop(event,'+i+')"':'onclick="matView.series=\\''+x.folder+'\\';route()"')+'>'+(sortMode?'':'<button class="btn btn-g f-edit" style="right:56px;'+(x.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="event.stopPropagation();toggleFeature(\\'series\\',\\''+x.folder+'\\',null,'+!x.featured+')">'+(x.featured?'⭐':'☆')+'</button><button class="btn btn-g f-edit" onclick="event.stopPropagation();renameSeriesModal(\\''+x.folder+'\\')">✏️</button>')+'<div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.filter(m=>!m.removed).length+' 个素材</div></div>').join('')+'</div>'+removedHtml;
+  <div class="grid">'+folders.map((x,i)=>'<div class="folder'+(sortMode?' sorting':'')+(!x.materials.some(m=>!m.removed)?' empty':'')+'" '+(sortMode?'draggable="true" ondragstart="fDrag(event,\\''+x.folder+'\\')" ondragover="event.preventDefault()" ondrop="fDrop(event,\\''+x.folder+'\\')"':'onclick="openSeries(\\''+x.folder+'\\')"')+'>'+(sortMode?'':'<button class="btn btn-g f-edit" style="right:56px;'+(x.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="event.stopPropagation();toggleFeature(\\'series\\',\\''+x.folder+'\\',null,'+!x.featured+')">'+(x.featured?'⭐':'☆')+'</button><button class="btn btn-g f-edit" onclick="event.stopPropagation();renameSeriesModal(\\''+x.folder+'\\')">✏️</button><button class="btn btn-d btn-xs f-edit f-delete" data-delete-folder="'+esc(x.folder)+'" onclick="event.stopPropagation();deleteSeriesModal(\\''+x.folder+'\\')">删除</button>')+'<div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.filter(m=>!m.removed).length+' 个素材</div></div>').join('')+(sortMode?'<div class="folder-end-drop" ondragover="event.preventDefault()" ondrop="fDropEnd(event)">放到最后</div>':'')+'</div>'+removedHtml;
+};
+window.moveMatModal=(series,title)=>{
+  const options=(MAT_DATA?.series||[]).filter(x=>x.folder!==series).map(x=>'<option value="'+esc(x.folder)+'">'+esc(x.folder)+'</option>').join('');
+  if(!options)return toast('请先创建另一个素材文件夹');
+  showModal('<h3>移动素材</h3><div class="row"><label>素材</label><div><b>'+esc(title)+'</b></div></div><div class="row"><label>从「'+esc(series)+'」移动到</label><select id="m-move-target" data-move-target>'+options+'</select></div><div class="sub">移动后按目标文件夹决定是否公开展示；Fig 中的素材移出后即可被普通用户使用。</div><div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" data-move-confirm onclick="doMoveMat(\\''+series+'\\',\\''+title+'\\')">确认移动</button></div>');
+};
+window.doMoveMat=async(series,title)=>{
+  const targetFolder=document.getElementById('m-move-target').value;
+  try{await api('/console/api/materials/move',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series,title,targetFolder})});moveSelection.clear();closeModal();toast('已移动到 '+targetFolder+' ✅');route()}catch(e){toast(e.message)}
 };
 window.delMat=async(series,title)=>{if(!confirm('确定下架「'+title+'」吗？\\n下架只隐藏前台展示，历史下载的授权码仍可验真。'))return;await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title),{method:'DELETE'});toast('已下架，授权码仍可验真');route()};
 window.toggleFeature=async(kind,folder,title,on)=>{try{await api('/console/api/materials/feature',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,folder,title,on})});toast(on?'⭐ 已加入首页精选':'已取消首页精选');route()}catch(e){toast(e.message)}};
 window.restoreMat=async(series,title)=>{try{await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title)+'/restore',{method:'POST'});toast('已恢复上架 ✅');route()}catch(e){toast(e.message)}};
 window.purgeMat=async(series,title)=>{if(!confirm('彻底删除「'+title+'」的清单条目？\\n下载流水和授权码快照会保留，旧码仍能验真。'))return;try{await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title)+'/permanent',{method:'DELETE'});toast('已彻底删除');route()}catch(e){toast(e.message)}};
+window.deleteSeriesModal=(folder)=>{
+  const sd=MAT_DATA.series.find(x=>x.folder===folder),count=sd?sd.materials.filter(m=>!m.removed).length:0;
+  const warning=count?'该文件夹还有 <b>'+count+' 个素材</b>，删除后文件夹和这些素材都会下架。':'这是一个空文件夹，确定删除吗？';
+  showModal('<h3>删除文件夹</h3><div class="row"><label>文件夹</label><div><b>'+esc(folder)+'</b></div></div><div class="sub" style="color:#c05555;line-height:1.7">'+warning+'</div><div class="sub" style="margin-top:8px">原文件和授权历史会保留，不会物理删除。</div><div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-d" data-delete-series onclick="doDeleteSeries(\\''+folder+'\\')">确认删除</button></div>');
+};
+window.doDeleteSeries=async(folder)=>{
+  try{await api('/console/api/series/'+encodeURIComponent(folder),{method:'DELETE'});closeModal();toast('文件夹已删除，素材已下架');if(matView.series===folder)closeSeries();else route()}catch(e){toast(e.message)}
+};
 window.renameSeriesModal=f=>showModal('<h3>✏️ 重命名文件夹</h3>\
   <div class="row"><label>新名称</label><input id="m-rn" value="'+esc(f)+'"></div>\
   <div class="sub">会同步修改服务器文件目录和 OSS 预览图目录，前台立即生效</div>\
@@ -1435,7 +1619,7 @@ window.renameMatInline=(s2,t,el)=>{
 };
 window.addMatModal=()=>showModal('<h3>添加素材（'+esc(matView.series)+'）</h3>\
   <div class="row"><label>素材名称（留空则使用图片文件名）</label><input id="m-title" placeholder="例如：线粒体-粉色版"></div>\
-  <div class="row"><label>素材图片（可多选，PNG 透明底最佳）</label><input id="m-img" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" style="padding:6px"><div class="sub" style="margin-top:4px">单张优先使用填写的名称，未填写时用图片文件名；多张逐张使用文件名。同名或失败不影响其他图片</div></div>\
+  <div class="row"><label>素材图片（可多选，PNG / SVG 透明底最佳）</label><input id="m-img" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml,.svg" style="padding:6px"><div class="sub" style="margin-top:4px">支持 PNG、JPG、WebP、GIF 与 SVG；单张优先使用填写的名称，未填写时用图片文件名；多张逐张使用文件名。同名或失败不影响其他图片</div></div>\
   <div id="m-progress" style="max-height:220px;overflow:auto;font-size:12px;line-height:1.8"></div>\
   <div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-g" id="m-batch-btn" onclick="batchSaveMat()">批量上传</button><button class="btn btn-p" id="m-save-btn" onclick="saveMat()">保存</button></div>');
 window.saveMat=async()=>{
@@ -1507,7 +1691,7 @@ const accountSourceBadge=u=>u.test
 H.users=async()=>{
   const s=await api('/console/api/users?q='+encodeURIComponent(userQ));
   const lvName={none:'—',basic:'青果会员',pro:'红果会员',team:'金果会员'};
-  const rows=s.list.map(u=>'<tr><td onclick="cpTxt(this.textContent)" oncontextmenu="userTestMenu(event,\\''+u.id+'\\')" style="cursor:pointer" title="点击复制，右键设置账号类型">'+accountSourceBadge(u)+'<b style="'+(u.test?'color:#7c5cbf':'')+'">'+esc(u.name)+'</b></td><td onclick="cpTxt(this.textContent)" style="cursor:pointer" title="点击复制">'+esc(u.email||u.contact||'—')+'</td>\
+  const rows=s.list.map(u=>'<tr><td onclick="cpTxt(this.textContent)" oncontextmenu="userTestMenu(event,\\''+u.id+'\\','+!!u.test+','+!!u.pricingAdmin+','+!!u.templateAdmin+')" style="cursor:pointer" title="点击复制，右键设置账号类型与管理权限">'+accountSourceBadge(u)+'<b style="'+(u.test?'color:#7c5cbf':'')+'">'+esc(u.name)+'</b></td><td onclick="cpTxt(this.textContent)" oncontextmenu="userTestMenu(event,\\''+u.id+'\\','+!!u.test+','+!!u.pricingAdmin+','+!!u.templateAdmin+')" style="cursor:pointer" title="点击复制，右键设置账号类型与管理权限">'+esc(u.email||u.contact||'—')+'</td>\
     <td><select onchange="setLevel(\\''+u.id+'\\',this.value)">'+Object.keys(lvName).map(k=>'<option value="'+k+'" '+(u.level===k?'selected':'')+'>'+lvName[k]+'</option>').join('')+'</select></td>\
     <td>'+(u.credits||0)+' ⚡</td>\
     <td>'+(u.memberSince?esc(u.memberSince.slice(0,10)):'—')+'</td><td>'+u.orderCount+' 笔</td><td><b>'+yuan(u.totalPaid)+'</b></td>\
@@ -1568,16 +1752,29 @@ window.creditLogModal=async()=>{const d=await api('/console/api/credit-log').cat
   showModal('<h3>⚡ 积分流水（最近 200 条）</h3><div style="max-height:320px;overflow:auto"><table><tr><th>时间</th><th>用户</th><th>变动</th><th>原因</th><th>操作者</th></tr>'+rows+'</table></div><div class="btns"><button class="btn btn-g" onclick="closeModal()">关闭</button></div>')};
 window.setLevel=async(id,level)=>{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({level})});toast('已修改 ✅')};
 window.hideUserTestMenu=()=>{const m=document.getElementById('user-test-menu');if(m)m.remove()};
-window.userTestMenu=(e,id)=>{
+window.userTestMenu=(e,id,test,pricingAdmin,templateAdmin)=>{
   e.preventDefault();e.stopPropagation();hideUserTestMenu();
-  const m=document.createElement('div');m.id='user-test-menu';
-  m.style.cssText='position:fixed;z-index:10000;display:flex;gap:4px;padding:5px;background:#fff;border:1px solid #d9d2ec;border-radius:9px;box-shadow:0 8px 24px rgba(45,35,80,.16)';
-  m.innerHTML='<button type="button" style="border:0;border-radius:6px;background:#f3efff;color:#6d4fb0;padding:7px 14px;cursor:pointer" onclick="setTestAccount(\\''+id+'\\',true)">测试</button><button type="button" style="border:0;border-radius:6px;background:#fff;color:#3d3a4b;padding:7px 14px;cursor:pointer" onclick="setTestAccount(\\''+id+'\\',false)">非测试</button>';
+  const m=document.createElement('div');m.id='user-test-menu';m.setAttribute('role','dialog');m.setAttribute('aria-label','账号类型与管理权限');m.dataset.accountMenu=id;
+  m.style.cssText='position:fixed;z-index:10000;width:296px;box-sizing:border-box;padding:16px;background:#fff;border:1px solid #ded7ed;border-radius:14px;box-shadow:0 14px 36px rgba(45,35,80,.18);font-family:inherit';
+  const option=(field,value,current,label)=>{
+    const active=current===value;
+    return '<button type="button" data-account-field="'+field+'" data-account-value="'+value+'" aria-pressed="'+active+'" style="flex:1;min-height:36px;border:1px solid '+(active?'#d5c6f3':'#e8e3ef')+';border-radius:8px;background:'+(active?'#eee8fb':'#f8f6fb')+';color:'+(active?'#6542aa':'#625c70')+';font-weight:'+(active?'700':'500')+';padding:8px 10px;cursor:pointer" onclick="setAccountPermission(\\''+id+'\\',\\''+field+'\\','+value+')">'+label+'</button>';
+  };
+  const group=(label,field,current,yes,no)=>'<div style="margin-top:14px"><div style="margin-bottom:7px;color:#777084;font-size:12px;font-weight:600">'+label+'</div><div style="display:flex;gap:8px">'+option(field,true,current,yes)+option(field,false,current,no)+'</div></div>';
+  m.innerHTML='<div style="color:#292432;font-size:15px;font-weight:700">账号设置</div><div style="margin-top:4px;color:#8a8297;font-size:12px">选择后立即保存</div>'
+    +group('账号类型','test',!!test,'测试','非测试')
+    +group('模板整体锁定','templateAdmin',!!templateAdmin,'管理员','非管理');
   document.body.appendChild(m);
   m.style.left=Math.max(8,Math.min(e.clientX,window.innerWidth-m.offsetWidth-8))+'px';
   m.style.top=Math.max(8,Math.min(e.clientY,window.innerHeight-m.offsetHeight-8))+'px';
+  m.querySelector('button')?.focus();
 };
-window.setTestAccount=async(id,test)=>{hideUserTestMenu();try{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({test})});toast(test?'已设为测试账号 ✅':'已设为非测试账号 ✅');route()}catch(e){toast(e.message)}};
+window.setAccountPermission=async(id,field,value)=>{
+  const labels={test:'账号类型',pricingAdmin:'价格表管理',templateAdmin:'模板整体锁定'};
+  if(!labels[field])return;
+  hideUserTestMenu();
+  try{await api('/console/api/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({[field]:value})});toast(labels[field]+'已更新 ✅');route()}catch(e){toast(e.message)}
+};
 document.addEventListener('click',hideUserTestMenu);
 document.addEventListener('keydown',e=>{if(e.key==='Escape')hideUserTestMenu()});
 window.adjCredits=async(id)=>{const delta=parseInt(document.getElementById('m-delta').value,10);if(!delta)return toast('填写调整数量');try{await api('/console/api/users/'+id+'/credits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({delta,reason:document.getElementById('m-reason').value.trim()})});toast('已调整 ✅');userDetail(id)}catch(e){toast(e.message)}};
@@ -1962,7 +2159,16 @@ function enhanceSelects(){
     }
     function open(focusCurrent){
       closeUiSelects(wrap);wrap.classList.add('open');control.setAttribute('aria-expanded','true');
-      const rect=control.getBoundingClientRect();wrap.classList.toggle('up',rect.bottom+260>window.innerHeight&&rect.top>280);
+      const rect=control.getBoundingClientRect(),modal=select.closest('.modal');
+      if(modal){
+        const desired=Math.min(window.innerHeight*.52,520),below=Math.max(80,window.innerHeight-rect.bottom-20),above=Math.max(80,rect.top-20);
+        const up=below<Math.min(desired,280)&&above>below;
+        wrap.classList.toggle('up',up);
+        menu.style.left=rect.left+'px';menu.style.width=rect.width+'px';menu.style.minWidth='0';
+        if(up){menu.style.top='auto';menu.style.bottom=(window.innerHeight-rect.top+7)+'px';menu.style.maxHeight=Math.min(desired,above)+'px'}
+        else{menu.style.bottom='auto';menu.style.top=(rect.bottom+7)+'px';menu.style.maxHeight=Math.min(desired,below)+'px'}
+        modal.addEventListener('scroll',()=>closeUiSelects(),{once:true});
+      }else wrap.classList.toggle('up',rect.bottom+260>window.innerHeight&&rect.top>280);
       if(focusCurrent)(buttons[select.selectedIndex]||buttons[0]||control).focus();
     }
     control.addEventListener('click',()=>wrap.classList.contains('open')?closeUiSelects():open(false));
