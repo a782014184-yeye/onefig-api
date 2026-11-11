@@ -827,6 +827,7 @@ module.exports = function registerConsole(app, deps) {
     // 下架而非物理删除：保留素材条目，前台隐藏，授权码与下载流水照常验真（2026-10-24）
     m.removed = true;
     m.removedAt = new Date().toISOString();
+    if (s.cover) s.cover = s.cover.filter(t => t !== m.title);
     save('materials.json', data);
     res.json({ ok: true, removed: true });
   });
@@ -851,11 +852,65 @@ module.exports = function registerConsole(app, deps) {
     if (!m.removed) return res.status(400).json({ ok: false, error: '请先下架，再彻底删除' });
     // 仅删除清单条目；downloads.json 中的授权码与快照保留，旧码仍可验真
     s.materials = s.materials.filter(x => x.title !== req.params.title);
+    if (s.cover) s.cover = s.cover.filter(t => t !== req.params.title);
     save('materials.json', data);
     res.json({ ok: true, purged: true });
   });
 
-  // 跨文件夹移动：同步清单、服务器文件和 OSS 预览，素材标题与历史下载记录保持不变。
+  // 素材地址变化后同步所有画板引用；分享链接读取同一画板文件，因此也一并生效。
+  const refChange = (from, to) => {
+    const encode = value => value.split('/').map(encodeURIComponent).join('/');
+    return [{ from, to }, { from: encode(from), to: encode(to) }];
+  };
+  const syncBoardRefs = changes => {
+    const pairs = changes.flatMap(change => refChange(change.from, change.to)).filter(change => change.from && change.to && change.from !== change.to);
+    if (!pairs.length) return { files: 0, refs: 0 };
+    const root = path.join(DATA_DIR, 'boards');
+    if (!fs.existsSync(root)) return { files: 0, refs: 0 };
+    let files = 0, refs = 0, touched = false;
+    const update = value => {
+      if (Array.isArray(value)) { value.forEach(update); return; }
+      if (!value || typeof value !== 'object') return;
+      for (const key of ['src', 'librarySrc', 'colorOriginalSrc']) {
+        if (typeof value[key] !== 'string') continue;
+        let next = value[key];
+        for (const pair of pairs) next = next.split(pair.from).join(pair.to);
+        if (next !== value[key]) { value[key] = next; refs++; touched = true; }
+      }
+      Object.values(value).forEach(update);
+    };
+    const walk = dir => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const file = path.join(dir, entry.name);
+        if (entry.isDirectory()) { walk(file); continue; }
+        if (!entry.name.endsWith('.json') || entry.name === 'index.json') continue;
+        try {
+          const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+          touched = false;
+          update(data);
+          if (!touched) continue;
+          const text = JSON.stringify(data, null, 2), tmp = file + '.tmp';
+          fs.writeFileSync(tmp, text); fs.renameSync(tmp, file); files++;
+        } catch (error) { console.error('同步画板素材地址失败：', file, error); }
+      }
+    };
+    walk(root);
+    return { files, refs };
+  };
+  // 移动时同名素材与同名文件统一递增命名，避免标题冲突或目标文件被覆盖。
+  const reserveMoveTarget = (target, title, file, targetFolder, local, reservedTitles = new Set(), reservedFiles = new Set()) => {
+    const roots = local ? [FILES_DIR, ORIG_DIR] : [ORIG_DIR], ext = path.extname(file), stem = file.slice(0, file.length - ext.length);
+    let n = 0, nextTitle = title, nextFile = file;
+    const conflict = () => target.materials.some(m => m.title === nextTitle) || reservedTitles.has(nextTitle) || roots.some(root => {
+      const p = path.join(root, targetFolder, nextFile);
+      return reservedFiles.has(p) || fs.existsSync(p);
+    });
+    while (conflict()) { n++; nextTitle = `${title}-${n}`; nextFile = `${stem}-${n}${ext}`; }
+    reservedTitles.add(nextTitle);
+    roots.forEach(root => reservedFiles.add(path.join(root, targetFolder, nextFile)));
+    return { title: nextTitle, file: nextFile };
+  };
+  // 跨文件夹移动：同步清单、服务器文件和 OSS 预览；目标同名时自动添加 -1、-2…
   app.post('/console/api/materials/move', consoleAuth, async (req, res) => {
     const series = cleanName(req.body?.series);
     const title = cleanName(req.body?.title);
@@ -868,21 +923,27 @@ module.exports = function registerConsole(app, deps) {
     if (!source || !target) return res.status(404).json({ ok: false, error: '源文件夹或目标文件夹不存在' });
     const index = source.materials.findIndex(m => m.title === title);
     if (index < 0) return res.status(404).json({ ok: false, error: '素材不存在' });
-    if (target.materials.some(m => m.title === title)) return res.status(400).json({ ok: false, error: '目标文件夹已存在同名素材' });
-    const m = source.materials[index];
-    const file = m.file || title + '.png';
+    const m = source.materials[index], sourceFile = m.file || title + '.png';
+    const next = reserveMoveTarget(target, title, sourceFile, targetFolder, !!m.local);
     fs.mkdirSync(path.join(FILES_DIR, targetFolder), { recursive: true });
     fs.mkdirSync(path.join(ORIG_DIR, targetFolder), { recursive: true });
-    if (m.local) mvIfExists(path.join(FILES_DIR, series, file), path.join(FILES_DIR, targetFolder, file));
-    mvIfExists(path.join(ORIG_DIR, series, file), path.join(ORIG_DIR, targetFolder, file));
+    if (m.local) mvIfExists(path.join(FILES_DIR, series, sourceFile), path.join(FILES_DIR, targetFolder, next.file));
+    mvIfExists(path.join(ORIG_DIR, series, sourceFile), path.join(ORIG_DIR, targetFolder, next.file));
     source.materials.splice(index, 1);
+    if (source.cover) source.cover = source.cover.filter(t => t !== title);
     m.series = targetFolder;
-    m.id = targetFolder + '/' + title;
+    m.title = next.title;
+    m.file = next.file;
+    m.id = targetFolder + '/' + next.title;
     m.updatedAt = new Date().toISOString();
     target.materials.push(m);
     save('materials.json', data);
-    const preview = title.replace(/\.[^.]+$/, '') + '.webp';
-    await ossMv('oss://onefig/previews/' + series + '/' + preview, 'oss://onefig/previews/' + targetFolder + '/' + preview, false);
+    const oldPreview = title.replace(/\.[^.]+$/, '') + '.webp', newPreview = next.title.replace(/\.[^.]+$/, '') + '.webp';
+    await ossMv('oss://onefig/previews/' + series + '/' + oldPreview, 'oss://onefig/previews/' + targetFolder + '/' + newPreview, false);
+    syncBoardRefs([
+      { from: `/files/${series}/${sourceFile}`, to: `/files/${targetFolder}/${next.file}` },
+      { from: `/previews/${series}/${oldPreview}`, to: `/previews/${targetFolder}/${newPreview}` },
+    ]);
     res.json({ ok: true, material: m });
   });
 
@@ -896,7 +957,7 @@ module.exports = function registerConsole(app, deps) {
     const originalData = JSON.parse(JSON.stringify(data));
     const target = data.find(x => x.folder === targetFolder);
     if (!target) return res.status(404).json({ ok: false, error: '目标文件夹不存在' });
-    const planned = [], seen = new Set(), fileMoves = [];
+    const planned = [], seen = new Set(), fileMoves = [], reservedTitles = new Set(), reservedFiles = new Set();
     try {
       for (const raw of items) {
         const series = cleanName(raw?.series), title = cleanName(raw?.title);
@@ -908,23 +969,21 @@ module.exports = function registerConsole(app, deps) {
         const source = data.find(x => x.folder === series);
         const m = source && source.materials.find(x => x.title === title);
         if (!m) return res.status(404).json({ ok: false, error: `素材不存在：${title}` });
-        if (target.materials.some(x => x.title === title)) return res.status(400).json({ ok: false, error: `目标文件夹已有同名素材：${title}` });
-        const file = m.file || title + '.png';
-        for (const root of m.local ? [FILES_DIR, ORIG_DIR] : [ORIG_DIR]) {
-          const from = path.join(root, series, file), to = path.join(root, targetFolder, file);
-          if (fs.existsSync(from) && fs.existsSync(to)) return res.status(400).json({ ok: false, error: `目标位置已有文件：${title}` });
-        }
-        planned.push({ source, m, series, title, file });
+        const sourceFile = m.file || title + '.png', next = reserveMoveTarget(target, title, sourceFile, targetFolder, !!m.local, reservedTitles, reservedFiles);
+        planned.push({ source, m, series, title: next.title, originalTitle: title, file: next.file, sourceFile });
       }
       fs.mkdirSync(path.join(FILES_DIR, targetFolder), { recursive: true });
       fs.mkdirSync(path.join(ORIG_DIR, targetFolder), { recursive: true });
       const moveFile = (from, to) => { if (fs.existsSync(from)) { fs.renameSync(from, to); fileMoves.push([from, to]); } };
       const now = new Date().toISOString();
       for (const item of planned) {
-        if (item.m.local) moveFile(path.join(FILES_DIR, item.series, item.file), path.join(FILES_DIR, targetFolder, item.file));
-        moveFile(path.join(ORIG_DIR, item.series, item.file), path.join(ORIG_DIR, targetFolder, item.file));
+        if (item.m.local) moveFile(path.join(FILES_DIR, item.series, item.sourceFile), path.join(FILES_DIR, targetFolder, item.file));
+        moveFile(path.join(ORIG_DIR, item.series, item.sourceFile), path.join(ORIG_DIR, targetFolder, item.file));
         item.source.materials.splice(item.source.materials.indexOf(item.m), 1);
+        if (item.source.cover) item.source.cover = item.source.cover.filter(t => t !== item.originalTitle);
         item.m.series = targetFolder;
+        item.m.title = item.title;
+        item.m.file = item.file;
         item.m.id = targetFolder + '/' + item.title;
         item.m.updatedAt = now;
         target.materials.push(item.m);
@@ -936,9 +995,16 @@ module.exports = function registerConsole(app, deps) {
       return res.status(500).json({ ok: false, error: '批量移动失败，已恢复原数据：' + (e.message || '未知错误') });
     }
     for (const item of planned) {
-      const preview = item.title.replace(/\.[^.]+$/, '') + '.webp';
-      await ossMv('oss://onefig/previews/' + item.series + '/' + preview, 'oss://onefig/previews/' + targetFolder + '/' + preview, false);
+      const oldPreview = item.originalTitle.replace(/\.[^.]+$/, '') + '.webp', newPreview = item.title.replace(/\.[^.]+$/, '') + '.webp';
+      await ossMv('oss://onefig/previews/' + item.series + '/' + oldPreview, 'oss://onefig/previews/' + targetFolder + '/' + newPreview, false);
     }
+    syncBoardRefs(planned.flatMap(item => {
+      const oldPreview = item.originalTitle.replace(/\.[^.]+$/, '') + '.webp', newPreview = item.title.replace(/\.[^.]+$/, '') + '.webp';
+      return [
+        { from: `/files/${item.series}/${item.sourceFile}`, to: `/files/${targetFolder}/${item.file}` },
+        { from: `/previews/${item.series}/${oldPreview}`, to: `/previews/${targetFolder}/${newPreview}` },
+      ];
+    }));
     res.json({ ok: true, moved: planned.length, targetFolder, materials: planned.map(x => x.m) });
   });
 
@@ -968,6 +1034,20 @@ module.exports = function registerConsole(app, deps) {
       return res.json({ ok: true });
     }
     res.status(400).json({ ok: false, error: '参数不对' });
+  });
+
+  // 文件夹自定义封面：按管理员选择的顺序保存 4 个素材标题。
+  app.post('/console/api/series/:folder/cover', consoleAuth, (req, res) => {
+    const titles = Array.isArray(req.body?.titles) ? req.body.titles.map(cleanName).filter(Boolean) : [];
+    if (titles.length !== 4 || new Set(titles).size !== 4) return res.status(400).json({ ok: false, error: '请选择 4 个不同的素材作为封面' });
+    const data = load('materials.json', []);
+    const s = data.find(x => x.folder === req.params.folder && !x.deleted);
+    if (!s) return res.status(404).json({ ok: false, error: '文件夹不存在' });
+    const activeTitles = new Set(s.materials.filter(m => !m.removed).map(m => m.title));
+    if (titles.some(title => !activeTitles.has(title))) return res.status(400).json({ ok: false, error: '封面中包含不存在或已下架的素材' });
+    s.cover = titles;
+    save('materials.json', data);
+    res.json({ ok: true, cover: titles });
   });
 
   // ---- 首页精选开关（2026-10-26）：素材/系列打 featured 标，首页精选区与系列大卡优先展示 ----
@@ -1008,16 +1088,39 @@ module.exports = function registerConsole(app, deps) {
     if (!oldN || !newN) return res.status(400).json({ ok: false, error: '请填写新名称' });
     if (newN === oldN) return res.json({ ok: true });
     const data = load('materials.json', []);
-    const s = data.find(x => x.folder === oldN);
+    const s = data.find(x => x.folder === oldN && !x.deleted);
     if (!s) return res.status(404).json({ ok: false, error: '文件夹不存在' });
-    if (data.some(x => x.folder === newN)) return res.status(400).json({ ok: false, error: '已存在同名文件夹' });
+    // 只有当前可见文件夹构成重名；已删除的历史文件夹合并留痕，不再阻止改名。
+    if (data.some(x => x.folder === newN && !x.deleted)) return res.status(400).json({ ok: false, error: '已存在同名文件夹' });
+    const archived = data.find(x => x.folder === newN && x.deleted);
+    if (archived) {
+      const titles = new Set(s.materials.map(m => m.title));
+      for (const m of archived.materials || []) {
+        if (!titles.has(m.title)) s.materials.push({ ...m, series: newN, id: newN + '/' + m.title, removed: true });
+      }
+      data.splice(data.indexOf(archived), 1);
+    }
     s.folder = newN;
     s.materials.forEach(m => { m.series = newN; m.id = newN + '/' + m.title; });
     save('materials.json', data);
-    mvIfExists(path.join(ORIG_DIR, oldN), path.join(ORIG_DIR, newN));
-    mvIfExists(path.join(FILES_DIR, oldN), path.join(FILES_DIR, newN));
+    const stamp = Date.now();
+    const moveFolder = (root) => {
+      const from = path.join(root, oldN), to = path.join(root, newN);
+      if (!fs.existsSync(from)) return;
+      fs.mkdirSync(root, { recursive: true });
+      // 历史目录不覆盖，先移到带时间戳的备份，再把当前文件夹改为新名称。
+      if (fs.existsSync(to)) fs.renameSync(to, `${to}.deleted-${stamp}`);
+      fs.renameSync(from, to);
+    };
+    moveFolder(ORIG_DIR);
+    moveFolder(FILES_DIR);
+    if (archived) await ossMv('oss://onefig/previews/' + newN + '/', 'oss://onefig/previews/' + newN + '.deleted-' + stamp + '/', true);
     await ossMv('oss://onefig/previews/' + oldN + '/', 'oss://onefig/previews/' + newN + '/', true);
-    res.json({ ok: true });
+    syncBoardRefs([
+      { from: `/files/${oldN}/`, to: `/files/${newN}/` },
+      { from: `/previews/${oldN}/`, to: `/previews/${newN}/` },
+    ]);
+    res.json({ ok: true, mergedArchived: !!archived });
   });
 
   app.post('/console/api/materials/rename', consoleAuth, async (req, res) => {
@@ -1038,8 +1141,13 @@ module.exports = function registerConsole(app, deps) {
     if (m.local) mvIfExists(path.join(FILES_DIR, series, oldFile), path.join(FILES_DIR, series, newFile));
     mvIfExists(path.join(ORIG_DIR, series, oldFile), path.join(ORIG_DIR, series, newFile));
     m.title = newT; m.id = series + '/' + newT; m.file = newFile;
+    if (s.cover) s.cover = s.cover.map(t => t === oldT ? newT : t);
     save('materials.json', data);
     await ossMv('oss://onefig/previews/' + series + '/' + oldT + '.webp', 'oss://onefig/previews/' + series + '/' + newT + '.webp', false);
+    syncBoardRefs([
+      { from: `/files/${series}/${oldFile}`, to: `/files/${series}/${newFile}` },
+      { from: `/previews/${series}/${oldT}.webp`, to: `/previews/${series}/${newT}.webp` },
+    ]);
     res.json({ ok: true });
   });
 
@@ -1205,7 +1313,9 @@ select:focus,input:focus{border-color:#a78bfa}
 .chart .cval{position:absolute;bottom:calc(100% + 3px);left:50%;transform:translateX(-50%);font-size:10px;color:#6d4fb0;font-weight:600;white-space:nowrap}
 .clabels{display:flex;gap:3px;margin-top:6px}
 .clabels span{flex:1;font-size:10px;color:#b0aac4;text-align:center;min-width:0;overflow:hidden}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+.grid{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:14px}
+@media(max-width:1200px){.grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:600px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .mat{background:#fff;border-radius:12px;padding:10px;box-shadow:0 2px 8px rgba(124,92,191,.07);text-align:center;position:relative}
 .mat-check{position:absolute;top:8px;left:8px;z-index:2;width:18px;height:18px;margin:0;accent-color:#7c5cbf;cursor:pointer}
 .mat:has(.mat-check:checked){outline:2px solid #a78bfa;outline-offset:-2px}
@@ -1214,7 +1324,11 @@ select:focus,input:focus{border-color:#a78bfa}
 .mat .mat-del{display:inline-block}
 .mat:hover .mat-del{display:inline-block}
 .mat .dl{font-size:11px;color:#a78bfa;margin:3px 0 6px}
+.folder-link{border:0;background:transparent;padding:0;color:#7c5cbf;font:inherit;cursor:pointer;text-decoration:underline;text-decoration-color:rgba(124,92,191,.35);text-underline-offset:2px}
+.folder-link:hover,.folder-link:focus-visible{color:#55349c;text-decoration-color:currentColor;outline:none}
 .mat[data-material-card]{cursor:pointer}
+[data-material-grid]{user-select:none}
+.material-marquee{position:fixed;z-index:20;border:1px solid #7c5cbf;background:rgba(124,92,191,.13);pointer-events:none;border-radius:4px;box-shadow:0 0 0 1px rgba(255,255,255,.65) inset}
 [data-batch-toolbar]{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap}
 .batch-selected-wrap{display:inline-flex;align-items:center;gap:4px}
 .batch-selected-count{border:0;background:transparent;color:#8b84a3;font-size:12px;padding:6px 2px;cursor:pointer}
@@ -1235,11 +1349,18 @@ select:focus,input:focus{border-color:#a78bfa}
 .folder-end-drop:hover{border-color:#7c5cbf;background:#f3efff}
 .mat-end-drop{min-height:56px;margin-top:12px}
 .f-edit{position:absolute;top:8px;right:8px;display:none;padding:3px 9px;font-size:12px}
-.f-delete{left:8px;right:auto}
+.f-delete{left:auto;right:8px;top:auto;bottom:8px}
+.f-cover-select{top:8px;bottom:auto;left:8px;right:auto}
 .folder:hover .f-edit{display:inline-block}
 .vnav{position:absolute;top:44%;transform:translateY(-50%);width:38px;height:38px;border-radius:50%;border:none;background:rgba(255,255,255,.88);color:#6d4fb0;font-size:22px;line-height:1;cursor:pointer;box-shadow:0 2px 8px rgba(40,25,70,.25);font-weight:700}
 .vnav:hover{background:#fff}
+.viewer-shell{box-sizing:border-box;height:100%;min-height:0;background:#c9cad1;border-radius:12px;padding:12px;position:relative;display:flex;flex-direction:column}
+.viewer-title{flex:none;text-align:center;font-weight:700;color:#3d3a4b;font-size:14px;margin-bottom:8px}
+.viewer-image-wrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center}
+.viewer-image-wrap img{width:100%;height:100%;object-fit:contain;display:block;margin:0 auto}
+.viewer-count{flex:none;text-align:center;font-size:12px;color:#6d4fb0;margin-top:8px;font-weight:600}
 .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.material-toolbar{position:sticky;top:0;z-index:8;margin-top:-14px;padding:14px 0 12px;background:rgba(246,244,251,.97);backdrop-filter:blur(12px);box-shadow:0 12px 18px rgba(246,244,251,.98)}
 .toolbar .sp{flex:1}
 .card{background:#fff;border-radius:14px;box-shadow:0 2px 10px rgba(124,92,191,.07);padding:16px;margin-bottom:12px;display:flex;gap:14px}
 .card.done{opacity:.55}
@@ -1266,6 +1387,15 @@ select:focus,input:focus{border-color:#a78bfa}
 .modal input,.modal select{width:100%}
 .modal .select-menu{position:fixed;max-height:min(52vh,520px)}
 .modal .btns{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;position:sticky;bottom:-22px;z-index:1;padding:10px 0 0;background:#fff;box-shadow:0 -10px 14px rgba(255,255,255,.96)}
+.modal .btns button:disabled{opacity:.45;cursor:not-allowed}
+.cover-pick-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;max-height:56vh;overflow-y:auto;padding:2px}
+.cover-pick{position:relative;min-width:0;border:2px solid transparent;border-radius:10px;background:#faf9fd;padding:6px;cursor:pointer;text-align:center}
+.cover-pick:hover{border-color:#c4b5fd}
+.cover-pick.selected{border-color:#7c5cbf;background:#f3efff}
+.cover-pick-img{display:block;height:94px;border-radius:7px;background:#fff;overflow:hidden}
+.cover-pick-img img{width:100%;height:100%;object-fit:contain;pointer-events:none}
+.cover-pick-title{display:block;margin-top:5px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cover-pick-check{position:absolute;top:5px;right:5px;width:20px;height:20px;border-radius:50%;background:#7c5cbf;color:#fff;font-size:12px;line-height:20px;font-weight:700}
 .toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);background:rgba(61,58,75,.82);backdrop-filter:blur(6px);color:#fff;padding:10px 20px;border-radius:999px;font-size:13px;display:none;z-index:60;pointer-events:none;box-shadow:0 4px 16px rgba(61,58,75,.25)}
 .login-mask{position:fixed;inset:0;background:linear-gradient(135deg,#f6f4fb,#e9dffb);display:none;align-items:center;justify-content:center;z-index:50}
 .login-card{background:#fff;border-radius:18px;padding:36px 34px;width:340px;max-width:92vw;box-shadow:0 14px 44px rgba(124,92,191,.2);text-align:center}
@@ -1357,19 +1487,19 @@ window.viewMat=src=>viewMatList([{src}],0);
 window.viewMatList=(list,i)=>{
   const m=document.getElementById('modal');
   // 从详情弹窗进入大图时记录父层；关闭大图应返回详情，而不是全部退出。
-  if(document.getElementById('mask').style.display==='flex'&&m.dataset.nav!=='1')MODAL_BACK={html:m.innerHTML,width:m.style.width};
+  if(document.getElementById('mask').style.display==='flex'&&m.dataset.nav!=='1')MODAL_BACK={html:m.innerHTML,width:m.style.width,height:m.style.height,maxHeight:m.style.maxHeight,overflowY:m.style.overflowY};
   VIEW_LIST=list;VIEW_I=i;renderView()
 };
 window.viewNav=d=>{if(document.getElementById('modal').dataset.nav!=='1')return;const n=VIEW_LIST.length;if(!n)return;VIEW_I=(VIEW_I+d+n)%n;renderView()};
 function renderView(){
   const it=VIEW_LIST[VIEW_I],src=it.src||it,t=it.t||'',multi=VIEW_LIST.length>1;
-  showModal('<div style="background:#c9cad1;border-radius:12px;padding:12px;position:relative">'
-    +(t?'<div style="text-align:center;font-weight:700;color:#3d3a4b;font-size:14px;margin-bottom:8px">'+esc(t)+'</div>':'')
-    +'<img src="'+src+'" style="width:min(420px,72vw);height:min(420px,72vh);max-width:76vw;max-height:72vh;object-fit:contain;display:block;margin:0 auto">'
-    +(multi?'<button class="vnav" style="left:20px" onclick="viewNav(-1)">‹</button><button class="vnav" style="right:20px" onclick="viewNav(1)">›</button>':'')
-    +(multi?'<div style="text-align:center;font-size:12px;color:#6d4fb0;margin-top:8px;font-weight:600">'+(VIEW_I+1)+' / '+VIEW_LIST.length+'</div>':'')
+  showModal('<div class="viewer-shell">'
+    +(t?'<div class="viewer-title">'+esc(t)+'</div>':'')
+    +'<div class="viewer-image-wrap"><img src="'+src+'" alt="'+esc(t)+'"></div>'
+    +(multi?'<button class="vnav" style="left:20px" onclick="viewNav(-1)" aria-label="上一张">‹</button><button class="vnav" style="right:20px" onclick="viewNav(1)" aria-label="下一张">›</button>':'')
+    +(multi?'<div class="viewer-count">'+(VIEW_I+1)+' / '+VIEW_LIST.length+'</div>':'')
     +'</div>');
-  const m=document.getElementById('modal');m.style.width='auto';m.dataset.nav='1';
+  const m=document.getElementById('modal');m.style.width='min(880px,92vw)';m.style.height='90vh';m.style.maxHeight='92vh';m.style.overflowY='hidden';m.dataset.nav='1';
 }
 document.addEventListener('keydown',e=>{
   if(document.getElementById('mask').style.display!=='flex')return;
@@ -1389,7 +1519,7 @@ function closeModal(){
   closeUiSelects();
   if(MODAL_BACK){
     const m=document.getElementById('modal'),back=MODAL_BACK;MODAL_BACK=null;
-    m.innerHTML=back.html;m.style.width=back.width;delete m.dataset.nav;
+    m.innerHTML=back.html;m.style.width=back.width;m.style.height=back.height;m.style.maxHeight=back.maxHeight;m.style.overflowY=back.overflowY;delete m.dataset.nav;
     document.getElementById('mask').style.display='flex';
     return;
   }
@@ -1498,13 +1628,62 @@ const reorderDraggedMaterials=async(targetTitle,toEnd=false)=>{
 };
 window.mDrop=async(e,targetTitle)=>{e.preventDefault();e.stopPropagation();await reorderDraggedMaterials(targetTitle)};
 window.mDropEnd=async e=>{e.preventDefault();e.stopPropagation();await reorderDraggedMaterials(undefined,true)};
-let moveSelection=new Set(),batchMoving=false;
-window.openSeries=folder=>{matView.series=folder;moveSelection.clear();route()};
-window.closeSeries=()=>{matView.series=null;moveSelection.clear();route()};
-window.toggleMoveMaterial=(series,title,on)=>{const key=series+'/'+title;if(on)moveSelection.add(key);else moveSelection.delete(key);const bar=document.querySelector('[data-batch-toolbar]');if(bar)bar.innerHTML=batchMoveToolbar()};
-window.cardToggleMaterial=(series,title)=>{const key=series+'/'+title,on=!moveSelection.has(key);toggleMoveMaterial(series,title,on);const input=[...document.querySelectorAll('[data-material-select]')].find(el=>el.dataset.series===series&&el.dataset.title===title);if(input)input.checked=on};
-window.selectAllVisible=()=>{const sd=MAT_DATA.series.find(x=>x.folder===matView.series);if(!sd)return;(sd.materials||[]).filter(m=>!m.removed).forEach(m=>moveSelection.add((m.series||sd.folder)+'/'+m.title));document.querySelectorAll('[data-material-select]').forEach(el=>{el.checked=true});const bar=document.querySelector('[data-batch-toolbar]');if(bar)bar.innerHTML=batchMoveToolbar()};
-window.clearMoveSelection=()=>{moveSelection.clear();route()};
+let moveSelection=new Set(),batchMoving=false,lastMaterialKey='';
+const syncMoveSelection=()=>{document.querySelectorAll('[data-material-select]').forEach(el=>{el.checked=moveSelection.has(el.dataset.series+'/'+el.dataset.title)});const bar=document.querySelector('[data-batch-toolbar]');if(bar)bar.innerHTML=batchMoveToolbar()};
+window.openSeries=folder=>{matView.series=folder;matView.q='';matView.hot=false;matView.featured=false;moveSelection.clear();lastMaterialKey='';route()};
+window.closeSeries=()=>{matView.series=null;moveSelection.clear();lastMaterialKey='';route()};
+window.toggleMoveMaterial=(series,title,on)=>{const key=series+'/'+title;if(on)moveSelection.add(key);else moveSelection.delete(key);syncMoveSelection()};
+window.cardToggleMaterial=(series,title,e)=>{
+  const key=series+'/'+title,inputs=[...document.querySelectorAll('[data-material-select]')];
+  if(e?.shiftKey&&lastMaterialKey){
+    const from=inputs.findIndex(el=>el.dataset.series+'/'+el.dataset.title===lastMaterialKey),to=inputs.findIndex(el=>el.dataset.series===series&&el.dataset.title===title);
+    if(from>=0&&to>=0){
+      const lo=Math.min(from,to),hi=Math.max(from,to);
+      if(!e.ctrlKey&&!e.metaKey)moveSelection.clear();
+      for(let i=lo;i<=hi;i++)moveSelection.add(inputs[i].dataset.series+'/'+inputs[i].dataset.title);
+      syncMoveSelection();return;
+    }
+  }
+  const on=!moveSelection.has(key);toggleMoveMaterial(series,title,on);lastMaterialKey=key;
+};
+window.selectAllVisible=()=>{const sd=MAT_DATA.series.find(x=>x.folder===matView.series);if(!sd)return;(sd.materials||[]).filter(m=>!m.removed).forEach(m=>moveSelection.add((m.series||sd.folder)+'/'+m.title));syncMoveSelection()};
+window.clearMoveSelection=()=>{moveSelection.clear();lastMaterialKey='';route()};
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape'||!moveSelection.size||document.getElementById('mask').style.display==='flex'||/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;
+  moveSelection.clear();lastMaterialKey='';syncMoveSelection();e.preventDefault();
+});
+let materialMarquee=null,suppressMaterialClick=false;
+document.addEventListener('mousedown',e=>{
+  if(e.button!==0||sortMode||!matView.series||document.getElementById('mask').style.display==='flex')return;
+  const grid=e.target.closest('[data-material-grid]');
+  if(!grid||e.target.closest('button,input,select,.ui-select'))return;
+  materialMarquee={grid,startX:e.clientX,startY:e.clientY,base:new Set(moveSelection),additive:e.shiftKey||e.ctrlKey||e.metaKey,moved:false,overlay:null,last:null};
+  e.preventDefault();
+});
+document.addEventListener('mousemove',e=>{
+  const m=materialMarquee;if(!m)return;
+  if(!m.moved&&Math.hypot(e.clientX-m.startX,e.clientY-m.startY)<6)return;
+  if(!m.moved){m.moved=true;m.overlay=document.createElement('div');m.overlay.className='material-marquee';document.body.appendChild(m.overlay)}
+  const left=Math.min(m.startX,e.clientX),top=Math.min(m.startY,e.clientY),right=Math.max(m.startX,e.clientX),bottom=Math.max(m.startY,e.clientY);
+  Object.assign(m.overlay.style,{left:left+'px',top:top+'px',width:(right-left)+'px',height:(bottom-top)+'px'});
+  m.grid.querySelectorAll('[data-material-select]').forEach(input=>{
+    const r=input.closest('[data-material-card]').getBoundingClientRect(),hit=r.left<right&&r.right>left&&r.top<bottom&&r.bottom>top;
+    input.checked=(m.additive&&m.base.has(input.dataset.series+'/'+input.dataset.title))||hit;
+    if(hit)m.last=input;
+  });
+  e.preventDefault();
+});
+document.addEventListener('mouseup',()=>{
+  const m=materialMarquee;if(!m)return;
+  if(m.moved){
+    const next=new Set(m.additive?m.base:[]);
+    m.grid.querySelectorAll('[data-material-select]').forEach(input=>{if(input.checked)next.add(input.dataset.series+'/'+input.dataset.title)});
+    moveSelection=next;if(m.last)lastMaterialKey=m.last.dataset.series+'/'+m.last.dataset.title;
+    m.overlay?.remove();syncMoveSelection();suppressMaterialClick=true;setTimeout(()=>{suppressMaterialClick=false},80);
+  }
+  materialMarquee=null;
+});
+document.addEventListener('click',e=>{if(suppressMaterialClick&&e.target.closest('[data-material-card]')){e.preventDefault();e.stopImmediatePropagation()}},true);
 const batchMoveToolbar=()=>moveSelection.size?' <span class="batch-selected-wrap"><button type="button" class="batch-selected-count" data-select-all onclick="selectAllVisible()" title="点击全选当前文件夹">已选 '+moveSelection.size+' 项</button><button type="button" class="batch-select-all" data-select-all onclick="selectAllVisible()">全选</button></span><button class="btn btn-p" data-batch-move onclick="batchMoveModal()">批量移动</button><button class="btn btn-g" onclick="clearMoveSelection()">清空</button>':'';
 window.batchMoveModal=async()=>{
   if(!moveSelection.size)return toast('请先选择素材');
@@ -1512,7 +1691,7 @@ window.batchMoveModal=async()=>{
   const sources=new Set([...moveSelection].map(key=>key.split('/')[0]));
   const options=(MAT_DATA?.series||[]).filter(x=>!sources.has(x.folder)).map(x=>'<option value="'+esc(x.folder)+'">'+esc(x.folder)+'</option>').join('');
   if(!options)return toast('没有可移动到的其他文件夹');
-  showModal('<h3>批量移动素材</h3><div class="row"><label>已选择</label><div><b>'+moveSelection.size+' 个素材</b></div></div><div class="row"><label>移动到</label><select id="m-batch-target" data-batch-target>'+options+'</select></div><div class="sub">会同时更新素材清单和实际文件；目标文件夹有同名素材时会先阻止整批移动。</div><div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" data-batch-confirm onclick="doBatchMoveMat()">确认移动</button></div>');
+  showModal('<h3>批量移动素材</h3><div class="row"><label>已选择</label><div><b>'+moveSelection.size+' 个素材</b></div></div><div class="row"><label>移动到</label><select id="m-batch-target" data-batch-target>'+options+'</select></div><div class="sub">会同时更新素材清单和实际文件；目标文件夹有同名素材时，移动的素材会自动命名为“名称-1”（已占用则递增为 -2、-3）。</div><div class="btns"><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" data-batch-confirm onclick="doBatchMoveMat()">确认移动</button></div>');
 };
 window.doBatchMoveMat=async()=>{
   if(batchMoving)return;
@@ -1524,6 +1703,34 @@ window.doBatchMoveMat=async()=>{
 const sortBtn=()=>'<button class="btn '+(sortMode?'btn-p':'btn-g')+'" onclick="toggleSort()">'+(sortMode?'✅ 完成排序':'⇅ 调整顺序')+'</button>';
 window.matGlobalSearch=()=>{matView.q=document.getElementById('mat-global-q').value.trim();route()};
 window.matGlobalClear=()=>{matView.q='';route()};
+let coverSelection=new Set(),coverFolder='';
+window.openCoverModal=folder=>{
+  const sd=MAT_DATA.series.find(x=>x.folder===folder),active=(sd?.materials||[]).filter(m=>!m.removed);
+  if(active.length<4)return toast('文件夹至少需要 4 个素材才能设置封面');
+  coverFolder=folder;
+  const activeTitles=new Set(active.map(m=>m.title));
+  coverSelection=new Set((sd.cover?.length?sd.cover:active.slice(0,4).map(m=>m.title)).filter(t=>activeTitles.has(t)));
+  renderCoverModal();
+};
+function renderCoverModal(){
+  const previousGrid=document.querySelector('.cover-pick-grid'),gridTop=previousGrid?.scrollTop||0,modalTop=document.getElementById('modal')?.scrollTop||0;
+  const sd=MAT_DATA.series.find(x=>x.folder===coverFolder),active=(sd?.materials||[]).filter(m=>!m.removed);
+  const cards=active.map(m=>'<button type="button" class="cover-pick'+(coverSelection.has(m.title)?' selected':'')+'" data-cover-item="'+esc(m.title)+'" onclick="toggleCoverMaterial(\\''+m.title+'\\')"><span class="cover-pick-img"><img src="'+matImg(m)+'" alt=""></span><span class="cover-pick-title">'+esc(m.title)+'</span><span class="cover-pick-check">'+(coverSelection.has(m.title)?'✓':'')+'</span></button>').join('');
+  showModal('<h3>设置「'+esc(coverFolder)+'」封面</h3><div class="sub">点选 4 个素材作为画板左侧的 2×2 封面，保存顺序即显示顺序。已选 <b>'+coverSelection.size+' / 4</b></div><div class="cover-pick-grid">'+cards+'</div><div class="btns"><button class="btn btn-g" data-cover-clear onclick="clearCoverSelection()" '+(coverSelection.size===0?'disabled':'')+'>清空选择</button><button class="btn btn-g" onclick="closeModal()">取消</button><button class="btn btn-p" data-cover-save onclick="saveCoverModal()" '+(coverSelection.size!==4?'disabled':'')+'>保存封面</button></div>');
+  const modal=document.getElementById('modal');modal.style.width='720px';modal.style.maxWidth='94vw';modal.scrollTop=modalTop;
+  const grid=document.querySelector('.cover-pick-grid');if(grid)grid.scrollTop=gridTop;
+}
+window.clearCoverSelection=()=>{coverSelection.clear();renderCoverModal()};
+window.toggleCoverMaterial=title=>{
+  if(coverSelection.has(title))coverSelection.delete(title);
+  else if(coverSelection.size>=4)return toast('最多选择 4 个素材');
+  else coverSelection.add(title);
+  renderCoverModal();
+};
+window.saveCoverModal=async()=>{
+  if(coverSelection.size!==4)return toast('请先选择 4 个素材');
+  try{await api('/console/api/series/'+encodeURIComponent(coverFolder)+'/cover',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({titles:[...coverSelection]})});closeModal();toast('封面已保存 ✅');route()}catch(e){toast(e.message)}
+};
 H.materials=async()=>{
   const s=await api('/console/api/materials');MAT_DATA=s;
   const activeOf = sd => (sd.materials || []).filter(m => !m.removed).map(m => ({ ...m, series: m.series ?? sd.folder }));
@@ -1547,9 +1754,8 @@ H.materials=async()=>{
   if(matView.series){
     const sd=s.series.find(x=>x.folder===matView.series) || {materials:[]};
     const ms=activeOf(sd);CUR_IMGS=ms.map(m=>({src:matImg(m),t:m.title}));
-    return '<div class="toolbar"><button class="btn btn-g" onclick="closeSeries()">← 返回</button><h2>🎨 '+esc(matView.series)+'</h2><div class="sp"></div>'+sortBtn()+'<span data-batch-toolbar>'+batchMoveToolbar()+'</span><button class="btn btn-p" onclick="addMatModal()">＋ 添加素材</button></div>\
-    '+(sortMode?'<div class="sub" style="color:#7c5cbf;font-weight:600">⇅ 排序模式：点击素材可多选，拖动已选素材可整组换位，也可整组放到最后。松手即保存，前台同步生效。</div>':'')+'\
-    <div class="grid">'+ms.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'" data-material-card onclick="cardToggleMaterial(\\''+m.series+'\\',\\''+m.title+'\\')"'+(sortMode?' draggable="true" ondragstart="mDrag(event,\\''+m.title+'\\')" ondragover="event.preventDefault()" ondrop="mDrop(event,\\''+m.title+'\\')"':'')+'><input type="checkbox" class="mat-check" data-material-select data-series="'+esc(m.series)+'" data-title="'+esc(m.title)+'" '+(moveSelection.has(m.series+'/'+m.title)?'checked':'')+' onclick="event.stopPropagation()" onchange="toggleMoveMaterial(\\''+m.series+'\\',\\''+m.title+'\\',this.checked)"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+'><div class="t" title="双击改名" ondblclick="event.stopPropagation();renameMatInline(\\''+matView.series+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" onclick="event.stopPropagation();viewMatList(CUR_IMGS,'+i+')">预览</button> <button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="event.stopPropagation();toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-g btn-xs mat-del" data-move-material="'+esc(m.title)+'" onclick="event.stopPropagation();moveMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">移动</button> <button class="btn btn-d btn-xs mat-del" onclick="event.stopPropagation();delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>'+(sortMode?'<div class="folder-end-drop mat-end-drop" data-batch-sort-end ondragover="event.preventDefault()" ondrop="mDropEnd(event)">将所选素材放到最后</div>':'');
+    return '<div class="toolbar"><button class="btn btn-g" onclick="closeSeries()">← 返回</button><h2>🎨 '+esc(matView.series)+'</h2>'+(sortMode?'<span class="sub" style="margin:0 0 0 6px;color:#7c5cbf;font-weight:600;font-size:12px">⇅ 排序模式：点击素材可多选，拖动已选素材可整组换位，也可整组放到最后。松手即保存，前台同步生效。</span>':'')+'<div class="sp"></div>'+sortBtn()+'<span data-batch-toolbar>'+batchMoveToolbar()+'</span><button class="btn btn-p" onclick="addMatModal()">＋ 添加素材</button></div>\
+    <div class="grid" data-material-grid>'+ms.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'" data-material-card onclick="cardToggleMaterial(\\''+m.series+'\\',\\''+m.title+'\\',event)"'+(sortMode?' draggable="true" ondragstart="mDrag(event,\\''+m.title+'\\')" ondragover="event.preventDefault()" ondrop="mDrop(event,\\''+m.title+'\\')"':'')+'><input type="checkbox" class="mat-check" data-material-select data-series="'+esc(m.series)+'" data-title="'+esc(m.title)+'" '+(moveSelection.has(m.series+'/'+m.title)?'checked':'')+' onclick="event.preventDefault();event.stopPropagation();cardToggleMaterial(\\''+m.series+'\\',\\''+m.title+'\\',event)"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+'><div class="t" title="双击改名" ondblclick="event.stopPropagation();renameMatInline(\\''+matView.series+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" onclick="event.stopPropagation();viewMatList(CUR_IMGS,'+i+')">预览</button> <button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="event.stopPropagation();toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-g btn-xs mat-del" data-move-material="'+esc(m.title)+'" onclick="event.stopPropagation();moveMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">移动</button> <button class="btn btn-d btn-xs mat-del" onclick="event.stopPropagation();delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>'+(sortMode?'<div class="folder-end-drop mat-end-drop" data-batch-sort-end ondragover="event.preventDefault()" ondrop="mDropEnd(event)">将所选素材放到最后</div>':'');
   }
   const removed=await api('/console/api/materials/removed').catch(()=>({list:[]}));
   const removedHtml=removed.list.length
@@ -1564,11 +1770,11 @@ H.materials=async()=>{
     CUR_IMGS=matches.map(m=>({src:matImg(m),t:m.title}));
     return '<div class="toolbar"><h2>🎨 素材管理</h2><div class="sp"></div>'+searchBar+sortBtn()+'<button class="btn btn-g" onclick="matView.featured=true;route()">⭐ 精选管理</button><button class="btn btn-g" onclick="matView.hot=true;route()">🏆 热门排行</button><button class="btn btn-p" onclick="addSeriesModal()">＋ 新建文件夹</button></div>\
     <div class="sub">“'+esc(matView.q)+'” 找到 '+matches.length+' 个匹配素材 · 显示全部系列结果</div>'
-    +(matches.length?'<div class="grid">'+matches.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="event.stopPropagation();renameMatInline(\\''+m.folder+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">📁 '+esc(m.folder)+' · ⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div><button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-g btn-xs mat-del" data-move-material="'+esc(m.title)+'" onclick="moveMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">移动</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button></div>').join('')+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3;padding:36px">没有找到匹配素材，请换个名称试试</div>');
+    +(matches.length?'<div class="grid">'+matches.map((m,i)=>'<div class="mat"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2" onclick="viewMatList(CUR_IMGS,'+i+')" style="cursor:zoom-in"><div class="t" title="双击改名" ondblclick="event.stopPropagation();renameMatInline(\\''+m.folder+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl"><button type="button" class="folder-link" onclick="openSeries(\\''+m.folder+'\\')">📁 '+esc(m.folder)+'</button> · ⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div><button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-g btn-xs mat-del" data-move-material="'+esc(m.title)+'" onclick="moveMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">移动</button> <button class="btn btn-d btn-xs mat-del" onclick="delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button></div>').join('')+'</div>':'<div class="panel" style="text-align:center;color:#8b84a3;padding:36px">没有找到匹配素材，请换个名称试试</div>');
   }
   return '<div class="toolbar"><h2>🎨 素材管理</h2><div class="sp"></div>'+searchBar+sortBtn()+'<button class="btn btn-g" onclick="matView.featured=true;route()">⭐ 精选管理</button><button class="btn btn-g" onclick="matView.hot=true;route()">🏆 热门排行</button><button class="btn btn-p" onclick="addSeriesModal()">＋ 新建文件夹</button></div>\
   <div class="sub">'+(sortMode?'⇅ 排序模式：拖动文件夹换位，松手即保存，前台网站同步生效。点「✅ 完成排序」退出':'共 '+s.total+' 个素材 · 点击文件夹查看和管理')+'</div>\
-  <div class="grid">'+folders.map((x,i)=>'<div class="folder'+(sortMode?' sorting':'')+(!x.materials.some(m=>!m.removed)?' empty':'')+'" '+(sortMode?'draggable="true" ondragstart="fDrag(event,\\''+x.folder+'\\')" ondragover="event.preventDefault()" ondrop="fDrop(event,\\''+x.folder+'\\')"':'onclick="openSeries(\\''+x.folder+'\\')"')+'>'+(sortMode?'':'<button class="btn btn-g f-edit" style="right:56px;'+(x.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="event.stopPropagation();toggleFeature(\\'series\\',\\''+x.folder+'\\',null,'+!x.featured+')">'+(x.featured?'⭐':'☆')+'</button><button class="btn btn-g f-edit" onclick="event.stopPropagation();renameSeriesModal(\\''+x.folder+'\\')">✏️</button><button class="btn btn-d btn-xs f-edit f-delete" data-delete-folder="'+esc(x.folder)+'" onclick="event.stopPropagation();deleteSeriesModal(\\''+x.folder+'\\')">删除</button>')+'<div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.filter(m=>!m.removed).length+' 个素材</div></div>').join('')+(sortMode?'<div class="folder-end-drop" ondragover="event.preventDefault()" ondrop="fDropEnd(event)">放到最后</div>':'')+'</div>'+removedHtml;
+  <div class="grid">'+folders.map((x,i)=>'<div class="folder'+(sortMode?' sorting':'')+(!x.materials.some(m=>!m.removed)?' empty':'')+'" '+(sortMode?'draggable="true" ondragstart="fDrag(event,\\''+x.folder+'\\')" ondragover="event.preventDefault()" ondrop="fDrop(event,\\''+x.folder+'\\')"':'onclick="openSeries(\\''+x.folder+'\\')"')+'>'+(sortMode?'':'<button class="btn btn-g f-edit f-cover-select" data-cover-folder="'+esc(x.folder)+'" onclick="event.stopPropagation();openCoverModal(\\''+x.folder+'\\')">封面</button><button class="btn btn-g f-edit" style="right:56px;'+(x.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="event.stopPropagation();toggleFeature(\\'series\\',\\''+x.folder+'\\',null,'+!x.featured+')">'+(x.featured?'⭐':'☆')+'</button><button class="btn btn-g f-edit" onclick="event.stopPropagation();renameSeriesModal(\\''+x.folder+'\\')">✏️</button><button class="btn btn-d btn-xs f-edit f-delete" data-delete-folder="'+esc(x.folder)+'" onclick="event.stopPropagation();deleteSeriesModal(\\''+x.folder+'\\')">删除</button>')+'<div class="ic">📁</div><div class="n">'+esc(x.folder)+'</div><div class="c">'+x.materials.filter(m=>!m.removed).length+' 个素材</div></div>').join('')+(sortMode?'<div class="folder-end-drop" ondragover="event.preventDefault()" ondrop="fDropEnd(event)">放到最后</div>':'')+'</div>'+removedHtml;
 };
 window.moveMatModal=(series,title)=>{
   const options=(MAT_DATA?.series||[]).filter(x=>x.folder!==series).map(x=>'<option value="'+esc(x.folder)+'">'+esc(x.folder)+'</option>').join('');
@@ -2127,6 +2333,7 @@ async function route(){
   document.querySelectorAll('.side a').forEach(a=>a.classList.toggle('active',a.dataset.r===h));
   const v=document.getElementById('view');
   try{v.innerHTML=await (H[h]||H.dashboard)()}catch(e){v.innerHTML='<div class="panel">加载失败：'+esc(e.message)+'</div>'}
+  if(h==='materials')v.querySelector(':scope > .toolbar')?.classList.add('material-toolbar');
 }
 /* ---------- 全局下拉框增强：动态页面与弹窗中的 select 自动套用，原 onchange 不变 ---------- */
 function closeUiSelects(except){
