@@ -1244,7 +1244,10 @@ module.exports = function registerConsole(app, deps) {
 
   // ---------- 页面（公开访问，内含登录界面；数据接口均有 consoleAuth 保护） ----------
   app.get(deps.ADMIN_PATH_FULL, (req, res) => res.send(PAGE));
-  app.get('/', (req, res) => res.redirect(deps.ADMIN_PATH_FULL));
+  // 本地 8090 同时承载前台预览时，server.js 末尾的静态站点路由负责首页；
+  // 生产环境仍把 / 指向后台入口。
+  const servesLocalPreview = process.env.ONEFIG_ENV === 'test' && !!process.env.ONEFIG_WEB_ROOT;
+  if (!servesLocalPreview) app.get('/', (req, res) => res.redirect(deps.ADMIN_PATH_FULL));
 };
 
 const OSS = 'http://onefig.oss-cn-hangzhou.aliyuncs.com/previews/';
