@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
+const { inspectTransparency, generateTransparentWithRetry } = require('./transparency');
 
 // 2026-10-21：默认模型升 Seedream 5.0 Pro（准确率代际提升），尺寸 2048² → 1536²
 // （1536×1536 = 236 万像素 ≤ 261 万，卡在 0.30 元/张档；2048² 会跳进 0.60 元档）
@@ -13,6 +14,8 @@ const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
 const CANDIDATES = 1; // 每次生成 = 1 张候选 = 30 积分（Seedream 5.0 Pro 1728² 成本 0.60 元/张，定价 3 元/张，毛利约 80%）；不满意再生成再扣 30 积分，无免费重抽
 const COST = 30; // 每次生成消耗积分（2026-10-22 晚按反馈调价 10→30）
 const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // 生成素材每人免费试用次数（2026-10-21 按反馈：1 次终身，与改图/风格转换同记 users.aiFreeUsed；0 = 纯积分制）
+const MATTE_MAX_ATTEMPTS = Math.min(3, Math.max(1, Number(process.env.ONEFIG_AI_MATTE_MAX_ATTEMPTS ?? 2) || 2)); // 初次 + 默认 1 次免费自动重试，上限 3 次防成本失控
+const GEN_BACKGROUND_RULE = '背景要求（覆盖前述背景描述）：使用均匀纯白背景，不要透明底棋盘格、灰白方格、纹理、渐变、地面或投影；主体完整居中，四周保留充足空白。透明化由后续抠图步骤完成。';
 
 // ---- 生成大图（2026-10-22 新增）：期刊封面 / 文内摘要图 / 文内机制图 ----
 // 面向科研用户的"大图"场景：保留背景（非透明底）、更高分辨率、单独定价
@@ -38,11 +41,13 @@ module.exports = function registerAI(app, deps) {
   const buildGenPrompt = (topic, style) => {
     const P = prompts.get();
     const cellular = new RegExp(P.cellularKeywords).test(topic);
-    return P.genTmpl
+    const assembled = P.genTmpl
       .split('{topic}').join(topic)
       .split('{styleSuffix}').join(P.styleSuffix[style] || P.styleSuffix.matte || '')
       .split('{scienceRules}').join(P.scienceRules || '')
       .split('{cellColorRules}').join(cellular ? (P.cellColorRules || '') : '');
+    // 兼容后台已保存的旧模板：生图阶段只画纯白底，避免模型把“透明背景”画成棋盘格。
+    return assembled.replace(/透明背景|透明底|transparent\s+background/gi, '纯白背景') + GEN_BACKGROUND_RULE;
   };
   const buildBigPrompt = (topic, bigType) => {
     const b = prompts.get().big[bigType];
@@ -263,18 +268,28 @@ module.exports = function registerAI(app, deps) {
   }
 
   async function matteImage(buf) {
-    // AI 生成内容抠底（2026-10-23 v3）：模型（anime 会话）与洪泛两路并行，
-    // alpha 取并集——小碎片/浅色边缘（洪泛保住）+ 纯白主体/柔和过渡（模型保住）。
-    // 两路都失败才回退旧洪泛。
+    // 仍优先使用“模型 ∪ 洪泛”保住细丝、浅色边缘和纯白主体；但并集若把任一路的
+    // 背景格子重新带回，则依次尝试单路结果。只有全部不干净时才交给外层重新生图。
     let modelBuf = null, floodBuf = null;
     try { modelBuf = await rembgTransparent(buf, 'anime'); }
     catch (e) { logLine('ai-op', 'anime 模型不可用：' + e.message); }
     try { floodBuf = floodMatte(buf); }
     catch (e) { logLine('ai-op', 'flood-matte 不适用（' + e.message + '）'); }
-    if (modelBuf && floodBuf) return alphaUnion(modelBuf, floodBuf);
-    if (modelBuf) return modelBuf;
-    if (floodBuf) return floodBuf;
-    return whiteToTransparent(buf);
+    const candidates = [];
+    if (modelBuf && floodBuf) candidates.push({ name: 'union', buf: alphaUnion(modelBuf, floodBuf) });
+    if (modelBuf) candidates.push({ name: 'model', buf: modelBuf });
+    if (floodBuf) candidates.push({ name: 'flood', buf: floodBuf });
+    if (!candidates.length) candidates.push({ name: 'white-flood', buf: whiteToTransparent(buf) });
+    for (const candidate of candidates) {
+      try {
+        const report = inspectTransparency(candidate.buf);
+        if (report.ok) {
+          if (candidate.name !== 'union') logLine('ai-op', `transparency matte selected=${candidate.name} borderOpaque=${report.borderOpaqueRatio.toFixed(4)}`);
+          return candidate.buf;
+        }
+      } catch (e) { logLine('ai-op', `transparency matte invalid=${candidate.name} ${e.message}`); }
+    }
+    return candidates[0].buf;
   }
 
   // ---- 生成大图：保留背景（不抠透明底），仅把 JPEG 字节统一转成 PNG 存储 ----
@@ -291,6 +306,10 @@ module.exports = function registerAI(app, deps) {
   async function runJob(job) {
     const dir = path.join(AI_DIR, job.id);
     fs.mkdirSync(dir, { recursive: true });
+    const saveDiagnostic = (name, data) => {
+      try { fs.writeFileSync(path.join(dir, name), data); }
+      catch (e) { logLine('ai-op', `diagnostic save failed job=${job.id} file=${name} ${e.message}`); }
+    };
     const isBig = !!job.bigType;
     let prompt, size;
     if (isBig) ({ prompt, size } = buildBigPrompt(job.prompt, job.bigType));
@@ -298,13 +317,33 @@ module.exports = function registerAI(app, deps) {
     const results = [];
     for (let i = 0; i < CANDIDATES; i++) {
       try {
-        const buf = await generateImage(prompt, size);
-        // 大图勾选"移除背景"时走本地 rembg 抠透明底；否则保留背景统一转 PNG
-        const out = isBig ? (job.transparent ? await matteImage(buf) : ensurePng(buf)) : await matteImage(buf);
+        let out;
+        if (isBig && !job.transparent) {
+          out = ensurePng(await generateImage(prompt, size));
+        } else {
+          const checked = await generateTransparentWithRetry({
+            maxAttempts: MATTE_MAX_ATTEMPTS,
+            generate: async attempt => {
+              const source = await generateImage(prompt, size);
+              // 原图仅供服务端排障，不通过公开图片路由暴露；删除生成记录时随目录一并删除。
+              saveDiagnostic(`source-c${i}-a${attempt}.png`, ensurePng(source));
+              return source;
+            },
+            matte: matteImage,
+            onRejected: ({ attempt, output, report }) => {
+              saveDiagnostic(`rejected-c${i}-a${attempt}.png`, output);
+              logLine('ai-op', `transparency QC rejected job=${job.id} candidate=${i} attempt=${attempt} reasons=${(report.reasons || []).join(',')} borderOpaque=${Number(report.borderOpaqueRatio || 0).toFixed(4)} opaque=${Number(report.opaqueRatio || 0).toFixed(4)}`);
+            },
+          });
+          out = checked.output;
+          saveDiagnostic(`qc-c${i}.json`, JSON.stringify(checked.attempts, null, 1));
+          logLine('ai-op', `transparency QC passed job=${job.id} candidate=${i} attempts=${checked.attempts.length} borderOpaque=${checked.report.borderOpaqueRatio.toFixed(4)}`);
+        }
         const f = path.join(dir, `c${i}.png`);
         fs.writeFileSync(f, out);
         results.push({ i, ok: true, size: out.length });
       } catch (e) {
+        if (e.code === 'TRANSPARENCY_QC_FAILED') saveDiagnostic(`qc-c${i}.json`, JSON.stringify(e.attempts || [], null, 1));
         results.push({ i, ok: false, err: e.message });
       }
     }
@@ -543,6 +582,8 @@ module.exports = function registerAI(app, deps) {
   }
   module.exports.recordAIResult = recordAIResult;
   module.exports.floodMatte = floodMatte; // 供合成测试与运维排障直接调用
+  module.exports.buildGenPrompt = buildGenPrompt; // 验证旧后台模板也会被强制改为纯白生图背景
+  module.exports.inspectTransparency = inspectTransparency;
 
   // ---- 我的任务列表 ----
   app.get('/api/ai/jobs', authUser, (req, res) => {

@@ -20,7 +20,15 @@
 5. 测试用隔离实例：在服务器 `/opt/onefig-api` 里跑 `PORT=8090 DATA_DIR=$(mktemp -d) node server.js`——用本目录的 server.js 本体，靠端口 8090 + 独立数据目录与 8080 生产实例隔离；停止用 `fuser -k 8090/tcp`，千万别 pkill node（会误杀生产）。
 6. **留底卫生**：服务器上的 `*.bak*` 只保留**最近 10 份**，超出即删。git（已推 Gitee）是权威历史，留底仅为最近部署的快速回滚；堆积旧副本正是历史事故的隐患来源。部署后顺手检查：`ls -t *.bak* | tail -n +11` 列出的都可删。
 
+## AI 透明底质检
+
+- 生成素材统一让生图模型输出纯白背景，再由本地抠图服务透明化，避免把“透明背景”画成灰白棋盘格。
+- 透明结果会检查边缘背景残留、空图和背景几乎未去除；默认最多尝试 2 次生图（初次 + 1 次自动重试），可用 `ONEFIG_AI_MATTE_MAX_ATTEMPTS` 调整，范围 1–3。重试不额外扣用户积分，最终失败沿用现有退款逻辑。
+- 任务目录中的 `source-c*-a*.png` 是生图原图，`rejected-c*-a*.png` 是被质检拦截的结果，`qc-c*.json` 是检测报告；均仅供服务端排障，不通过公开图片路由暴露，删除生成记录时一并删除。
+- `node test-transparency.cjs` 可运行透明底合成图、自动重试和旧提示词兼容测试，不请求外部 AI 服务。
+
 ## 联调脚本
 
 - `test-boards-api.sh` / `test-share-api.sh` / `test-lock-api.sh` / `test-comments-api.sh` — 各模块接口回归
 - `test-author-comments.cjs` / `test-comment-delete.cjs` / `test-replies-api.cjs` — 批注作者侧/删除/回复（Node 直跑，打 127.0.0.1:8090 隔离实例）
+- `test-transparency.cjs` — 透明底检查与重试（Node 直跑，无外部服务依赖）
