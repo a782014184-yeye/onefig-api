@@ -382,7 +382,7 @@ module.exports = function registerAI(app, deps) {
       const luminance = (s.data[si] + s.data[si + 1] + s.data[si + 2]) / 3;
       const darkFloor = darkSubject && colorSpan < 18 && luminance > 130 && y > H * 0.55;
       if (darkFloor) { f.data[fi + 3] = 0; continue; } // 深色主体下部的高亮中性灰地面，含被主体包围的阴影
-      const strongDetail = luminance < detailLuminance && ((colorSpan < 6 && dr * dr + dg * dg + db * db >= 42 * 42) || colorSpan >= 30); // 中性细线与高饱和结构，浅灰地面不补
+      const strongDetail = (colorSpan >= 30) || (luminance < detailLuminance && colorSpan < 6 && dr * dr + dg * dg + db * db >= 42 * 42); // 高饱和彩色结构始终保留；中性细线只在足够深时补
       if (f.data[fi + 3] > 0 && strongDetail) continue; // 只直接保留高反差洪泛细节
       if (darkSubject && !strongDetail && f.data[fi + 3] <= 24 && y > H * 0.55) { f.data[fi + 3] = 0; continue; } // 仅下部中性低反差地面；上方白色细节仍由模型恢复
       const mx = Math.min(m.width - 1, Math.floor(x * m.width / W));
