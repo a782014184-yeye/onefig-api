@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const express = require('express');
 const { PNG } = require('pngjs');
-const { inspectTransparency, removeBackgroundWithRetry } = require('./transparency');
+const { inspectTransparency, removeBackgroundWithRetry, cleanEdge } = require('./transparency');
 const { buildRembgMultipart } = require('./rembg-multipart');
 
 const W = 400, H = 400;
@@ -45,6 +45,32 @@ function ok(condition, name) {
   ok(!checkerReport.ok && checkerReport.reasons.includes('edge-background-residue'), `棋盘格边缘残留被拦截（${(checkerReport.borderOpaqueRatio * 100).toFixed(1)}%）`);
   ok(!blankReport.ok && blankReport.reasons.includes('no-visible-subject'), '全透明空图被拦截');
   ok(!opaqueReport.ok && opaqueReport.reasons.includes('background-almost-intact'), '背景几乎未去除被拦截');
+
+  const fringeSource = new PNG({ width: 100, height: 100 });
+  const fringeMatte = new PNG({ width: 100, height: 100 });
+  for (let p = 0; p < 100 * 100; p++) {
+    const i = p << 2;
+    fringeSource.data[i] = fringeSource.data[i + 1] = fringeSource.data[i + 2] = 255;
+    fringeSource.data[i + 3] = 255;
+    fringeMatte.data[i] = fringeMatte.data[i + 1] = fringeMatte.data[i + 2] = 255;
+    fringeMatte.data[i + 3] = 0;
+  }
+  const setPixel = (png, x, y, rgb, alpha) => {
+    const i = (100 * y + x) << 2;
+    png.data[i] = rgb[0]; png.data[i + 1] = rgb[1]; png.data[i + 2] = rgb[2]; png.data[i + 3] = alpha;
+  };
+  for (let y = 30; y <= 70; y++) for (let x = 30; x <= 70; x++) {
+    setPixel(fringeSource, x, y, [40, 40, 40], 255);
+    setPixel(fringeMatte, x, y, [40, 40, 40], 255);
+  }
+  setPixel(fringeSource, 30, 30, [255, 255, 255], 255); // 近白色外缘，应减弱
+  setPixel(fringeSource, 30, 50, [235, 180, 170], 255); // 粉色外缘，不 targeted erosion
+  setPixel(fringeSource, 60, 60, [255, 255, 255], 255); // 白色主体内部，必须保留
+  const fringeCleaned = PNG.sync.read(cleanEdge(PNG.sync.write(fringeSource), PNG.sync.write(fringeMatte)));
+  const cleanedAlpha = (x, y) => fringeCleaned.data[((100 * y + x) << 2) + 3];
+  ok(cleanedAlpha(30, 30) < 255 && cleanedAlpha(50, 50) === 255 && cleanedAlpha(30, 50) > 240, '近白色 fringe 减弱，深色主体与粉色边缘保留');
+  const whiteCore = (60 * 100 + 60) << 2;
+  ok(cleanedAlpha(60, 60) === 255 && fringeCleaned.data[whiteCore] === 255 && fringeCleaned.data[whiteCore + 1] === 255 && fringeCleaned.data[whiteCore + 2] === 255, '白色主体内部不被边缘清理误删');
 
   const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01, 0x02, 0x03]);
   const animeMultipart = buildRembgMultipart(imageBytes, 'anime', 'gen.png');

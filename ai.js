@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
-const { inspectTransparency, removeBackgroundWithRetry } = require('./transparency');
+const { inspectTransparency, removeBackgroundWithRetry, cleanEdge } = require('./transparency');
 const { buildRembgMultipart } = require('./rembg-multipart');
 
 // 2026-10-21：默认模型升 Seedream 5.0 Pro（准确率代际提升），尺寸 2048² → 1536²
@@ -292,14 +292,15 @@ module.exports = function registerAI(app, deps) {
     }
     for (const candidate of candidates) {
       try {
-        const report = inspectTransparency(candidate.buf);
+        const cleaned = cleanEdge(buf, candidate.buf);
+        const report = inspectTransparency(cleaned);
         if (report.ok) {
           logLine('ai-op', `transparency matte selected=${candidate.name} attempt=${attempt} borderOpaque=${report.borderOpaqueRatio.toFixed(4)}`);
-          return candidate.buf;
+          return cleaned;
         }
       } catch (e) { logLine('ai-op', `transparency matte invalid=${candidate.name} ${e.message}`); }
     }
-    return candidates[0].buf;
+    return cleanEdge(buf, candidates[0].buf);
   }
 
   // ---- 生成大图：保留背景（不抠透明底），仅把 JPEG 字节统一转成 PNG 存储 ----
