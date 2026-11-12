@@ -54,7 +54,17 @@ async function removeBackgroundWithRetry({ source, matte, maxAttempts = 2, onRej
   const attempts = [];
 
   for (let attempt = 1; attempt <= attemptsLimit; attempt++) {
-    const output = await matte(source, attempt);
+    let output;
+    try {
+      output = await matte(source, attempt);
+    } catch (e) {
+      // anime 不可用时仍可使用同一原图尝试 general；其他异常不盲目重试。
+      if (e.code === 'MATTE_MODEL_UNAVAILABLE' && attempt < attemptsLimit) {
+        attempts.push({ attempt, report: { ok: false, reasons: [e.code], error: e.message } });
+        continue;
+      }
+      throw e;
+    }
     let report;
     try {
       report = inspectTransparency(output);

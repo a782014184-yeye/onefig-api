@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { publishLocalMaterial, sanitizeSvg } = require('./material-publish');
+const { buildRembgMultipart } = require('./rembg-multipart');
 
 const PORT = process.env.PORT || 8080;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -1704,13 +1705,10 @@ function refundAIEdit(uid, paidWith, feature) {
 // model='anime' 走插画/卡通/3D 渲染专用会话（AI 生成内容误删更少，2026-10-23）
 function rembgLocal(buf, model) {
   return new Promise((resolve, reject) => {
-    const boundary = '----onefig' + Date.now();
-    const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="edit.png"\r\nContent-Type: image/png\r\n\r\n`);
-    const field = model ? Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${model}\r\n`) : Buffer.alloc(0);
-    const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const { boundary, body } = buildRembgMultipart(buf, model, 'edit.png');
     const req = require('http').request({
       host: '127.0.0.1', port: 9000, path: '/remove-bg', method: 'POST',
-      headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': head.length + field.length + buf.length + tail.length },
+      headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': body.length },
       timeout: 120000,
     }, (res) => {
       const chunks = [];
@@ -1722,7 +1720,7 @@ function rembgLocal(buf, model) {
     });
     req.on('timeout', () => req.destroy(new Error('rembg 超时')));
     req.on('error', reject);
-    req.write(head); if (field.length) req.write(field); req.write(buf); req.write(tail); req.end();
+    req.end(body);
   });
 }
 function wantTransparent(req) { return req.body && (req.body.transparent === '1' || req.body.transparent === 'true'); }

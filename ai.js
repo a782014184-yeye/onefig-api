@@ -4,6 +4,7 @@ const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
 const { inspectTransparency, removeBackgroundWithRetry } = require('./transparency');
+const { buildRembgMultipart } = require('./rembg-multipart');
 
 // 2026-10-21：默认模型升 Seedream 5.0 Pro（准确率代际提升），尺寸 2048² → 1536²
 // （1536×1536 = 236 万像素 ≤ 261 万，卡在 0.30 元/张档；2048² 会跳进 0.60 元档）
@@ -223,13 +224,10 @@ module.exports = function registerAI(app, deps) {
   // 浅色主体误删更少，2026-10-23）；缺省/其他值走 general（照片/通用）
   function rembgTransparent(buf, model) {
     return new Promise((resolve, reject) => {
-      const boundary = '----onefig' + crypto.randomBytes(8).toString('hex');
-      const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="gen.png"\r\nContent-Type: image/png\r\n\r\n`);
-      const field = model ? Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${model}\r\n`) : Buffer.alloc(0);
-      const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+      const { boundary, body } = buildRembgMultipart(buf, model, 'gen.png');
       const req = require('http').request({
         host: '127.0.0.1', port: 9000, path: '/remove-bg', method: 'POST',
-        headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': head.length + field.length + buf.length + tail.length },
+        headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': body.length },
         timeout: 120000,
       }, (res) => {
         const chunks = [];
@@ -241,7 +239,7 @@ module.exports = function registerAI(app, deps) {
       });
       req.on('timeout', () => req.destroy(new Error('rembg 超时')));
       req.on('error', reject);
-      req.write(head); if (field.length) req.write(field); req.write(buf); req.write(tail); req.end();
+      req.end(body);
     });
   }
   // 双 alpha 并集：模型结果（ anime 会话，≤1024）与洪泛结果（原尺寸）取 max。
@@ -278,17 +276,20 @@ module.exports = function registerAI(app, deps) {
     catch (e) { logLine('ai-op', `${modelName} 模型不可用：` + e.message); }
     try { floodBuf = floodMatte(buf); }
     catch (e) { logLine('ai-op', 'flood-matte 不适用（' + e.message + '）'); }
+    // 洪泛只用于补充模型边缘，不能在模型失败时单独交付：白色/浅色主体会被挖空。
+    if (!modelBuf) {
+      const error = new Error('本地 AI 抠图模型暂时不可用，请稍后重试（本次不扣积分）');
+      error.code = 'MATTE_MODEL_UNAVAILABLE';
+      throw error;
+    }
     const candidates = [];
     if (!retry) {
-      if (modelBuf && floodBuf) candidates.push({ name: 'anime-union', buf: alphaUnion(modelBuf, floodBuf) });
-      if (modelBuf) candidates.push({ name: 'anime', buf: modelBuf });
-      if (floodBuf) candidates.push({ name: 'flood', buf: floodBuf });
+      if (floodBuf) candidates.push({ name: 'anime-union', buf: alphaUnion(modelBuf, floodBuf) });
+      candidates.push({ name: 'anime', buf: modelBuf });
     } else {
-      if (modelBuf) candidates.push({ name: 'general', buf: modelBuf });
-      if (modelBuf && floodBuf) candidates.push({ name: 'general-union', buf: alphaUnion(modelBuf, floodBuf) });
-      if (floodBuf) candidates.push({ name: 'flood-retry', buf: floodBuf });
+      candidates.push({ name: 'general', buf: modelBuf });
+      if (floodBuf) candidates.push({ name: 'general-union', buf: alphaUnion(modelBuf, floodBuf) });
     }
-    if (!candidates.length) candidates.push({ name: 'white-flood', buf: whiteToTransparent(buf) });
     for (const candidate of candidates) {
       try {
         const report = inspectTransparency(candidate.buf);

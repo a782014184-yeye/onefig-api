@@ -1,4 +1,4 @@
-// 透明底质量门禁测试：棋盘格残留、空图、背景未去除、同一原图二次去背景、旧提示词兼容。
+// 透明底质量门禁测试：棋盘格、空图、同图二次去背景、rembg 表单顺序、模型降级与旧提示词兼容。
 // 用法：node test-transparency.cjs（仅合成图片与临时目录，不请求外部 AI 服务）
 const fs = require('fs');
 const os = require('os');
@@ -6,6 +6,7 @@ const path = require('path');
 const express = require('express');
 const { PNG } = require('pngjs');
 const { inspectTransparency, removeBackgroundWithRetry } = require('./transparency');
+const { buildRembgMultipart } = require('./rembg-multipart');
 
 const W = 400, H = 400;
 function makeImage(kind) {
@@ -45,6 +46,16 @@ function ok(condition, name) {
   ok(!blankReport.ok && blankReport.reasons.includes('no-visible-subject'), '全透明空图被拦截');
   ok(!opaqueReport.ok && opaqueReport.reasons.includes('background-almost-intact'), '背景几乎未去除被拦截');
 
+  const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01, 0x02, 0x03]);
+  const animeMultipart = buildRembgMultipart(imageBytes, 'anime', 'gen.png');
+  const modelPos = animeMultipart.body.indexOf(Buffer.from('name="model"'));
+  const imagePos = animeMultipart.body.indexOf(Buffer.from('name="image"'));
+  const dataPos = animeMultipart.body.indexOf(imageBytes);
+  const transition = Buffer.from(`\r\n\r\nanime\r\n--${animeMultipart.boundary}\r\nContent-Disposition: form-data; name="image"`);
+  ok(modelPos >= 0 && imagePos > modelPos && dataPos > imagePos && animeMultipart.body.includes(transition), 'rembg 的 model 字段完整结束后才发送 image 文件');
+  const generalMultipart = buildRembgMultipart(imageBytes, null, 'gen.png');
+  ok(!generalMultipart.body.includes(Buffer.from('name="model"')) && generalMultipart.body.indexOf(imageBytes) > generalMultipart.body.indexOf(Buffer.from('name="image"')), '未指定模型时图片字段与二进制内容完整');
+
   const source = Buffer.from('only-one-generated-source');
   let calls = 0, rejected = 0, sameSource = true;
   const recovered = await removeBackgroundWithRetry({
@@ -58,6 +69,22 @@ function ok(condition, name) {
     onRejected: () => { rejected++; },
   });
   ok(calls === 2 && rejected === 1 && sameSource && recovered.source === source && recovered.output.equals(good), '首次带格子时复用同一原图再次去背景成功');
+
+  calls = 0;
+  const modelRecovered = await removeBackgroundWithRetry({
+    source,
+    matte: () => {
+      calls++;
+      if (calls === 1) {
+        const error = new Error('anime unavailable');
+        error.code = 'MATTE_MODEL_UNAVAILABLE';
+        throw error;
+      }
+      return good;
+    },
+    maxAttempts: 2,
+  });
+  ok(calls === 2 && modelRecovered.output.equals(good) && modelRecovered.attempts.length === 2, '插画模型不可用时可换通用模型，不交付洪泛单路结果');
 
   calls = 0; rejected = 0;
   let finalError = null;
@@ -76,7 +103,7 @@ function ok(condition, name) {
   try {
     await removeBackgroundWithRetry({ source, matte: () => { calls++; throw new Error('local matte down'); } });
   } catch (e) { matteError = e; }
-  ok(calls === 1 && matteError && matteError.message === 'local matte down', '本地抠图异常不会被误当作透明底残留重复调用');
+  ok(calls === 1 && matteError && matteError.message === 'local matte down', '其他本地抠图异常不会被误当作透明底残留重复调用');
 
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onefig-transparency-'));
   try {
