@@ -16,6 +16,9 @@ const CANDIDATES = 1; // 每次生成 = 1 张候选 = 30 积分（Seedream 5.0 P
 const COST = 30; // 每次生成消耗积分（2026-10-22 晚按反馈调价 10→30）
 const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // 生成素材每人免费试用次数（2026-10-21 按反馈：1 次终身，与改图/风格转换同记 users.aiFreeUsed；0 = 纯积分制）
 const MATTE_MAX_ATTEMPTS = 1; // 每个任务只生图 1 次、同图本地去背景也只执行 1 次，不自动重试
+// 2026-11-12：当前 2 核 4G 小服务器先用全局队列保稳定；不升级配置时默认只同时跑 1 个重任务。
+const GEN_WORKERS = Math.max(1, Number(process.env.ONEFIG_AI_GEN_WORKERS ?? 1));
+const GEN_JOB_TIMEOUT_MS = Math.max(1000, Number(process.env.ONEFIG_AI_GEN_TIMEOUT_MS ?? 5 * 60 * 1000));
 const GEN_BACKGROUND_RULE = '背景要求（覆盖前述背景描述）：使用均匀纯白背景，不要透明底棋盘格、灰白方格、纹理、渐变、地面或投影；主体完整居中，四周保留充足空白。透明化由后续抠图步骤完成。';
 
 // ---- 生成大图（2026-10-22 新增）：期刊封面 / 文内摘要图 / 文内机制图 ----
@@ -73,13 +76,13 @@ module.exports = function registerAI(app, deps) {
   (function recoverStuckJobs() {
     try {
       const jobs = loadJobs();
-      const stuck = jobs.filter(j => j.status === 'running');
+      const stuck = jobs.filter(j => j.status === 'running' || j.status === 'queued');
       if (!stuck.length) return;
       const users = loadUsers();
       let usersDirty = false;
       for (const j of stuck) {
         j.status = 'failed';
-        j.error = '生成中断（服务维护），已自动退还';
+        j.error = '生成排队中断（服务维护），已自动退还';
         j.finishedAt = new Date().toISOString();
         const u = users.find(x => x.id === j.userId);
         if (u) {
@@ -92,6 +95,105 @@ module.exports = function registerAI(app, deps) {
       if (usersDirty) saveUsers(users);
     } catch (e) { logLine('ai-op', `recover FAIL ${e && e.message}`); }
   })();
+
+  // 2026-11-12 全局 AI 生成队列：不升级服务器时，先把重任务限制为串行，避免多人同时生成把整台机器压死。
+  let activeGenJobs = 0;
+  const cancelledGenJobs = new Set();
+
+  const refundJob = (j) => {
+    const users = loadUsers();
+    const u = users.find(x => x.id === j.userId);
+    if (!u) return false;
+    let dirty = false;
+    if (j.paidWith === 'credit') { u.credits = (u.credits || 0) + (j.cost || COST); dirty = true; }
+    else if (j.paidWith === 'free' && u.aiFreeUsed) {
+      const key = j.kind === 'big' ? 'big' : 'gen';
+      u.aiFreeUsed[key] = Math.max(0, (u.aiFreeUsed[key] || 0) - 1);
+      dirty = true;
+    }
+    if (dirty) saveUsers(users);
+    return dirty;
+  };
+
+  const failActiveJob = (jobId, error) => {
+    const jobs = loadJobs();
+    const j = jobs.find(x => x.id === jobId);
+    if (!j || j.status !== 'running') return;
+    j.status = 'failed';
+    j.error = error;
+    j.finishedAt = new Date().toISOString();
+    cancelledGenJobs.add(jobId);
+    const refunded = refundJob(j);
+    saveJobs(jobs);
+    logLine('ai-op', `job timeout/fail id=${jobId.slice(0, 8)} refund=${refunded ? 'yes' : 'no'} error=${error}`);
+  };
+
+  const genQueuePosition = (jobs, job) => {
+    if (job.status !== 'queued') return 0;
+    const queued = jobs
+      .filter(j => j.status === 'queued')
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    const idx = queued.findIndex(j => j.id === job.id);
+    return idx >= 0 ? idx + 1 : queued.length + 1;
+  };
+
+  const launchGenJob = (job, runner) => {
+    activeGenJobs += 1;
+    const timer = setTimeout(() => {
+      failActiveJob(job.id, `生成超时（${Math.round(GEN_JOB_TIMEOUT_MS / 60000)} 分钟），已自动退还`);
+    }, GEN_JOB_TIMEOUT_MS);
+    timer.unref?.();
+    Promise.resolve()
+      .then(() => runner(job))
+      .catch((e) => failActiveJob(job.id, e?.message || '生成中断，已自动退还'))
+      .finally(() => {
+        clearTimeout(timer);
+        cancelledGenJobs.delete(job.id);
+        activeGenJobs = Math.max(0, activeGenJobs - 1);
+        setImmediate(pumpGenQueue);
+      });
+  };
+
+  function pumpGenQueue() {
+    while (activeGenJobs < GEN_WORKERS) {
+      const jobs = loadJobs();
+      const next = jobs
+        .filter(j => j.status === 'queued')
+        .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0];
+      if (!next) return;
+      const runner = runnerByJobId.get(next.id);
+      if (!runner) return;
+      runnerByJobId.delete(next.id);
+      next.status = 'running';
+      next.startedAt = new Date().toISOString();
+      saveJobs(jobs);
+      logLine('ai-op', `job start id=${next.id.slice(0, 8)} user=${next.userId} queuedBehind=${Math.max(0, activeGenJobs)}`);
+      launchGenJob(next, runner);
+    }
+  }
+
+  // runner 不能序列化到 jobs.json，用进程内映射保存；服务重启后 recover 会把 running 退掉，queued 重新 pump。
+  const runnerByJobId = new Map();
+  const enqueueGenJob = (job, runner) => {
+    const jobs = loadJobs();
+    const canRun = activeGenJobs < GEN_WORKERS && !jobs.some(j => j.status === 'running');
+    job.status = canRun ? 'running' : 'queued';
+    if (canRun) job.startedAt = new Date().toISOString();
+    jobs.unshift(job);
+    saveJobs(jobs);
+    runnerByJobId.set(job.id, runner);
+    const queuePosition = genQueuePosition(loadJobs(), job);
+    if (canRun) {
+      logLine('ai-op', `job start id=${job.id.slice(0, 8)} user=${job.userId} immediate=true`);
+      launchGenJob(job, runner);
+    } else {
+      logLine('ai-op', `job queued id=${job.id.slice(0, 8)} user=${job.userId} position=${queuePosition}`);
+      setImmediate(pumpGenQueue);
+    }
+    return queuePosition;
+  };
+
+  setImmediate(pumpGenQueue);
 
   function today() { return new Date().toISOString().slice(0, 10); }
   function freeLeft() { return 0; } // 每日免费已取消，一律走积分
@@ -257,7 +359,7 @@ module.exports = function registerAI(app, deps) {
 
   // 选择性并集：模型负责主体；洪泛只补充与背景色反差明显的小碎片。
   // 深色主体使用更严格的白底洪泛，低反差地面即使被模型误判为前景也不再保留。
-  function alphaUnion(modelBuf, floodBuf, sourceBuf, darkSubject = false) {
+  function alphaUnion(modelBuf, floodBuf, sourceBuf, darkSubject = false, detailLuminance = 180) {
     const { PNG } = require('pngjs');
     const m = PNG.sync.read(modelBuf);
     const f = PNG.sync.read(floodBuf);
@@ -280,7 +382,7 @@ module.exports = function registerAI(app, deps) {
       const luminance = (s.data[si] + s.data[si + 1] + s.data[si + 2]) / 3;
       const darkFloor = darkSubject && colorSpan < 18 && luminance > 130 && y > H * 0.55;
       if (darkFloor) { f.data[fi + 3] = 0; continue; } // 深色主体下部的高亮中性灰地面，含被主体包围的阴影
-      const strongDetail = (dr * dr + dg * dg + db * db >= 42 * 42 && luminance < 180) || colorSpan >= 6; // 浅粉色与中性灰色阴影分开
+      const strongDetail = luminance < detailLuminance && ((colorSpan < 6 && dr * dr + dg * dg + db * db >= 42 * 42) || colorSpan >= 30); // 中性细线与高饱和结构，浅灰地面不补
       if (f.data[fi + 3] > 0 && strongDetail) continue; // 只直接保留高反差洪泛细节
       if (darkSubject && !strongDetail && f.data[fi + 3] <= 24 && y > H * 0.55) { f.data[fi + 3] = 0; continue; } // 仅下部中性低反差地面；上方白色细节仍由模型恢复
       const mx = Math.min(m.width - 1, Math.floor(x * m.width / W));
@@ -393,22 +495,13 @@ module.exports = function registerAI(app, deps) {
     const jobs = loadJobs();
     const j = jobs.find(x => x.id === job.id);
     if (!j) return;
+    // 超时守护可能已把任务标记为失败并退款；后台 runner 晚到一步时不得覆盖该结果。
+    if (cancelledGenJobs.has(job.id) || j.status !== 'running') return;
     const okCount = results.filter(r => r.ok).length;
     if (okCount === 0) {
       j.status = 'failed';
       j.error = results[0] && results[0].err;
-      // 全部失败 → 退还消耗（积分退回，或恢复免费试用次数）
-      const users = loadUsers();
-      const u = users.find(x => x.id === j.userId);
-      if (u) {
-        // 原路退还：积分退回（按实际扣费），或恢复对应功能的免费试用次数
-        if (j.paidWith === 'credit') u.credits = (u.credits || 0) + (j.cost || COST);
-        else if (j.paidWith === 'free' && u.aiFreeUsed) {
-          const fk = j.kind === 'big' ? 'big' : 'gen';
-          u.aiFreeUsed[fk] = Math.max(0, (u.aiFreeUsed[fk] || 0) - 1);
-        }
-        saveUsers(users);
-      }
+      refundJob(j);
     } else {
       j.status = 'done';
       j.candidates = results.filter(r => r.ok).map(r => r.i);
@@ -476,6 +569,7 @@ module.exports = function registerAI(app, deps) {
       const jobs = loadJobs();
       const j = jobs.find(x => x.id === job.id);
       if (!j) return;
+      if (cancelledGenJobs.has(job.id) || j.status !== 'running') return;
       j.status = 'done';
       j.candidates = [0, ...layers.map(l => l.i)];
       j.layers = layers;
@@ -485,11 +579,13 @@ module.exports = function registerAI(app, deps) {
     } catch (e) {
       const jobs = loadJobs();
       const j = jobs.find(x => x.id === job.id);
-      if (j) { j.status = 'failed'; j.error = e.message; j.finishedAt = new Date().toISOString(); saveJobs(jobs); }
-      // 失败全额退还
-      const users = loadUsers();
-      const u = users.find(x => x.id === job.userId);
-      if (u && job.paidWith === 'credit') { u.credits = (u.credits || 0) + (job.cost || SPLIT_COST); saveUsers(users); }
+      if (!j) return;
+      if (cancelledGenJobs.has(job.id) || j.status !== 'running') return;
+      j.status = 'failed';
+      j.error = e.message;
+      j.finishedAt = new Date().toISOString();
+      refundJob(j);
+      saveJobs(jobs);
       logLine('ai-op', `split FAIL user=${job.userId} err=${e && e.message} cost=${job.cost} refund`);
     }
   }
@@ -525,21 +621,16 @@ module.exports = function registerAI(app, deps) {
           return res.status(403).json({ ok: false, error: `图层拆分每次 ${SPLIT_COST} 积分，当前余额不足`, code: 'no-credit', credits: u.credits || 0, cost: SPLIT_COST });
         u.credits -= SPLIT_COST;
         const jobs = loadJobs();
-        if (jobs.some(j => j.userId === u.id && j.status === 'running')) {
+        if (jobs.some(j => j.userId === u.id && (j.status === 'running' || j.status === 'queued'))) {
           u.credits += SPLIT_COST;
           saveUsers(users);
-          return res.status(429).json({ ok: false, error: '上一个生成任务还在跑，等它出图后再试～' });
+          return res.status(429).json({ ok: false, error: '你已有生成任务在排队或处理中，等它完成后再试～' });
         }
-        const job = { id: crypto.randomUUID(), userId: u.id, prompt: instruction, kind: 'split', status: 'running', candidates: [], picked: null, paidWith: 'credit', cost: SPLIT_COST, createdAt: new Date().toISOString() };
-        jobs.unshift(job);
-        saveJobs(jobs);
+        const job = { id: crypto.randomUUID(), userId: u.id, prompt: instruction, kind: 'split', status: 'queued', candidates: [], picked: null, paidWith: 'credit', cost: SPLIT_COST, createdAt: new Date().toISOString() };
         saveUsers(users);
-        logLine('ai-op', `split start user=${u.name} src=${srcDesc} cost=${SPLIT_COST}`);
-        res.json({ ok: true, jobId: job.id, credits: u.credits });
-        setImmediate(() => runSplitJob(job, imgBuf).catch(() => {
-          const js = loadJobs(); const jj = js.find(x => x.id === job.id);
-          if (jj && jj.status === 'running') { jj.status = 'failed'; jj.error = '拆分中断'; saveJobs(js); }
-        }));
+        logLine('ai-op', `split submit user=${u.name} src=${srcDesc} cost=${SPLIT_COST}`);
+        const queuePosition = enqueueGenJob(job, j => runSplitJob(j, imgBuf));
+        res.json({ ok: true, jobId: job.id, credits: u.credits, status: job.status, queuePosition });
       } catch (e) { res.status(500).json({ ok: false, error: '服务器开小差了' }); }
     });
   });
@@ -583,25 +674,19 @@ module.exports = function registerAI(app, deps) {
       else if ((u.credits || 0) < cost) return res.status(403).json({ ok: false, error: 'no-credit', credits: u.credits || 0, unverified: req.user.verified === false || undefined });
       else u.credits -= cost;
 
-      // 简易限流：每用户同时只能跑 1 个任务
+      // 每用户同时只能有 1 个进行中/排队中的任务；全局任务再进队列，避免多人同时压满小服务器。
       const jobs = loadJobs();
-      if (jobs.some(j => j.userId === u.id && j.status === 'running')) {
-        // 不放行：把刚扣的免费试用 / 积分原路退回
+      if (jobs.some(j => j.userId === u.id && (j.status === 'running' || j.status === 'queued'))) {
         if (paidWith === 'free') fu[freeKey] = Math.max(0, (fu[freeKey] || 0) - 1); else u.credits += cost;
         saveUsers(users);
-        return res.status(429).json({ ok: false, error: '上一个生成任务还在跑，等它出图后再试～' });
+        return res.status(429).json({ ok: false, error: '你已有生成任务在排队或处理中，等它完成后再试～' });
       }
 
-      const job = { id: crypto.randomUUID(), userId: u.id, prompt, style: bigType ? undefined : style, bigType, transparent, kind: bigType ? 'big' : 'gen', status: 'running', candidates: [], picked: null, paidWith, cost, createdAt: new Date().toISOString() };
-      jobs.unshift(job);
-      saveJobs(jobs);
+      const job = { id: crypto.randomUUID(), userId: u.id, prompt, style: bigType ? undefined : style, bigType, transparent, kind: bigType ? 'big' : 'gen', status: 'queued', candidates: [], picked: null, paidWith, cost, createdAt: new Date().toISOString() };
       saveUsers(users);
-      logLine('ai-op', `generate start user=${u.name} kind=${bigType ? 'big' : 'gen'} bigType=${bigType || '-'} prompt="${prompt.slice(0, 40)}" style=${style} paidWith=${paidWith} cost=${paidWith === 'credit' ? cost : 0}`);
-      res.json({ ok: true, jobId: job.id, paidWith });
-      setImmediate(() => runJob(job).catch(() => {
-        const js = loadJobs(); const jj = js.find(x => x.id === job.id);
-        if (jj && jj.status === 'running') { jj.status = 'failed'; jj.error = '生成中断'; saveJobs(js); }
-      }));
+      logLine('ai-op', `generate submit user=${u.name} kind=${bigType ? 'big' : 'gen'} bigType=${bigType || '-'} prompt="${prompt.slice(0, 40)}" style=${style} paidWith=${paidWith} cost=${paidWith === 'credit' ? cost : 0}`);
+      const queuePosition = enqueueGenJob(job, j => runJob(j));
+      res.json({ ok: true, jobId: job.id, paidWith, status: job.status, queuePosition });
     } catch { res.status(500).json({ ok: false, error: '服务器开小差了' }); }
   });
 
@@ -630,11 +715,12 @@ module.exports = function registerAI(app, deps) {
   module.exports.buildGenPrompt = buildGenPrompt; // 验证旧后台模板也会被强制改为纯白生图背景
   module.exports.inspectTransparency = inspectTransparency;
 
-  // ---- 我的任务列表 ----
+  // ---- 我的任务列表（含全站排队位置，便于前端展示“当前第几位”） ----
   app.get('/api/ai/jobs', authUser, (req, res) => {
-    const list = loadJobs().filter(j => j.userId === req.user.id)
-      .map(j => ({ id: j.id, kind: j.kind || 'gen', bigType: j.bigType, transparent: j.transparent, layers: j.layers, prompt: j.prompt, style: j.style, ext: j.ext || 'png', status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error }));
-    res.json({ ok: true, list });
+    const all = loadJobs();
+    const list = all.filter(j => j.userId === req.user.id)
+      .map(j => ({ id: j.id, kind: j.kind || 'gen', bigType: j.bigType, transparent: j.transparent, layers: j.layers, prompt: j.prompt, style: j.style, ext: j.ext || 'png', status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error, queuePosition: genQueuePosition(all, j) }));
+    res.json({ ok: true, list, genWorkers: GEN_WORKERS });
   });
 
   // ---- 图层打包下载：ZIP（store 无压缩——PNG 本已压缩；免依赖手写 ZIP，2026-10-22）----
@@ -713,6 +799,7 @@ module.exports = function registerAI(app, deps) {
     const jobs = loadJobs();
     const j = jobs.find(x => x.id === req.params.id && x.userId === req.user.id);
     if (!j) return res.status(404).json({ ok: false, error: '记录不存在' });
+    if (j.status === 'running' || j.status === 'queued') return res.status(400).json({ ok: false, error: '任务进行中，暂时不能删除' });
     saveJobs(jobs.filter(x => x.id !== j.id));
     fs.rmSync(path.join(AI_DIR, j.id), { recursive: true, force: true });
     logLine('ai-op', `record delete user=${req.user.name} kind=${j.kind || 'gen'} prompt="${j.prompt.slice(0, 40)}"`);
