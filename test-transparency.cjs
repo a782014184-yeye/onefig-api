@@ -173,6 +173,22 @@ function ok(condition, name) {
     const union = PNG.sync.read(aiModule.alphaUnion(PNG.sync.write(unionModel), PNG.sync.write(unionFlood), PNG.sync.write(unionSource)));
     const unionAlpha = (x, y) => union.data[((100 * y + x) << 2) + 3];
     ok(unionAlpha(50, 80) === 0 && unionAlpha(50, 20) === 255 && unionAlpha(50, 50) === 255, '低反差地面不并回，高反差细节与白色主体保留');
+
+    setPixel(unionSource, 50, 80, [200, 200, 200], 255); // 深色主体下部中性灰阴影
+    setPixel(unionModel, 50, 80, [200, 200, 200], 255);
+    setPixel(unionFlood, 50, 80, [200, 200, 200], 255);
+    setPixel(unionSource, 50, 75, [235, 180, 170], 255); // 粉色脚趾必须恢复
+    setPixel(unionModel, 50, 75, [235, 180, 170], 255);
+    setPixel(unionFlood, 50, 75, [235, 180, 170], 0);
+    setPixel(unionSource, 50, 20, [240, 240, 240], 255); // 上方白色胡须必须恢复
+    setPixel(unionModel, 50, 20, [240, 240, 240], 255);
+    setPixel(unionFlood, 50, 20, [240, 240, 240], 0);
+    setPixel(unionSource, 40, 50, [40, 40, 40], 255);
+    setPixel(unionModel, 40, 50, [40, 40, 40], 255);
+    setPixel(unionFlood, 40, 50, [40, 40, 40], 255);
+    const darkUnion = PNG.sync.read(aiModule.alphaUnion(PNG.sync.write(unionModel), PNG.sync.write(unionFlood), PNG.sync.write(unionSource), true));
+    const darkAlpha = (x, y) => darkUnion.data[((100 * y + x) << 2) + 3];
+    ok(darkAlpha(50, 80) === 0 && darkAlpha(50, 75) === 255 && darkAlpha(50, 20) === 255 && darkAlpha(40, 50) === 255, '深色主体去阴影时保留粉色脚趾、白色胡须和黑色身体');
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }

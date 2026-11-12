@@ -177,7 +177,7 @@ module.exports = function registerAI(app, deps) {
   // 洪泛"只删与边缘连通的背景色"能 100% 保留小碎片元素（Y 形抗体/细丝等），
   // 这是 DL 分割模型的固有弱项。背景色取四角均值（白底/彩色纯色底都适用），
   // 覆盖率异常（主体贴边/复杂背景）时抛错走 AI 模型兜底。----
-  function floodMatte(buf) {
+  function floodMatte(buf, luminanceTolerance = 13) {
     const { PNG } = require('pngjs');
     let rgb, w, h;
     if (buf.length > 3 && buf[0] === 0xFF && buf[1] === 0xD8) {
@@ -194,12 +194,8 @@ module.exports = function registerAI(app, deps) {
     corner(0, 0); corner(w - 6, 0); corner(0, h - 6); corner(w - 6, h - 6);
     br /= bn; bg /= bn; bb /= bn;
     const cornerLum = (br + bg + bb) / 3;
-    // 亮度容差（2026-10-23 v2）：按与四角背景色的"亮度差"判定——
-    // 背景渐变是"中性"的（各通道同步变化），而浅米/浅蓝主体与白色背景的差异
-    // 远大于背景自身的不均匀度（米色 lum≈234 vs 白 255，差 21），
-    // 亮度阈值 13 既能吞掉白底渐变噪点，又能让米色边缘挡住洪泛。
-    // 注意：纯白主体（白鼠）会被吃掉——由 matteImage 的"模型∪洪泛"并集兜底。
-    const isBg = (i) => Math.abs((rgb[i] + rgb[i + 1] + rgb[i + 2]) / 3 - cornerLum) < 13;
+    // 默认阈值 13 保护浅色主体；仅深色主体提高到 85，用于清理近白色地面阴影。
+    const isBg = (i) => Math.abs((rgb[i] + rgb[i + 1] + rgb[i + 2]) / 3 - cornerLum) < luminanceTolerance;
     const visited = new Uint8Array(w * h);
     const stack = [];
     for (let x = 0; x < w; x++) { stack.push(x, w * (h - 1) + x); }
@@ -242,9 +238,26 @@ module.exports = function registerAI(app, deps) {
       req.end(body);
     });
   }
+  function isDarkSubject(modelBuf, sourceBuf) {
+    const { PNG } = require('pngjs');
+    const m = PNG.sync.read(modelBuf);
+    const s = PNG.sync.read(ensurePng(sourceBuf));
+    const luminance = [];
+    for (let y = 0; y < m.height; y += 16) for (let x = 0; x < m.width; x += 16) {
+      if (m.data[((m.width * y + x) << 2) + 3] <= 128) continue;
+      const sx = Math.min(s.width - 1, Math.floor(x * s.width / m.width));
+      const sy = Math.min(s.height - 1, Math.floor(y * s.height / m.height));
+      const si = (s.width * sy + sx) << 2;
+      luminance.push((s.data[si] + s.data[si + 1] + s.data[si + 2]) / 3);
+    }
+    if (luminance.length < 100) return false;
+    luminance.sort((a, b) => a - b);
+    return luminance[Math.floor(luminance.length / 2)] < 150;
+  }
+
   // 选择性并集：模型负责主体；洪泛只补充与背景色反差明显的小碎片。
-  // 低反差的白色地面/投影若已被模型判为背景，不再被洪泛重新并回（2026-11-12）。
-  function alphaUnion(modelBuf, floodBuf, sourceBuf) {
+  // 深色主体使用更严格的白底洪泛，低反差地面即使被模型误判为前景也不再保留。
+  function alphaUnion(modelBuf, floodBuf, sourceBuf, darkSubject = false) {
     const { PNG } = require('pngjs');
     const m = PNG.sync.read(modelBuf);
     const f = PNG.sync.read(floodBuf);
@@ -263,8 +276,13 @@ module.exports = function registerAI(app, deps) {
       const fi = (W * y + x) << 2;
       const si = (s.width * y + x) << 2;
       const dr = s.data[si] - br, dg = s.data[si + 1] - bg, db = s.data[si + 2] - bb;
-      const strongDetail = dr * dr + dg * dg + db * db >= 42 * 42;
+      const colorSpan = Math.max(s.data[si], s.data[si + 1], s.data[si + 2]) - Math.min(s.data[si], s.data[si + 1], s.data[si + 2]);
+      const luminance = (s.data[si] + s.data[si + 1] + s.data[si + 2]) / 3;
+      const darkFloor = darkSubject && colorSpan < 18 && luminance > 130 && y > H * 0.55;
+      if (darkFloor) { f.data[fi + 3] = 0; continue; } // 深色主体下部的高亮中性灰地面，含被主体包围的阴影
+      const strongDetail = (dr * dr + dg * dg + db * db >= 42 * 42 && luminance < 180) || colorSpan >= 6; // 浅粉色与中性灰色阴影分开
       if (f.data[fi + 3] > 0 && strongDetail) continue; // 只直接保留高反差洪泛细节
+      if (darkSubject && !strongDetail && f.data[fi + 3] <= 24 && y > H * 0.55) { f.data[fi + 3] = 0; continue; } // 仅下部中性低反差地面；上方白色细节仍由模型恢复
       const mx = Math.min(m.width - 1, Math.floor(x * m.width / W));
       const my = Math.min(m.height - 1, Math.floor(y * m.height / H));
       const mi = (m.width * my + mx) << 2;
@@ -288,8 +306,10 @@ module.exports = function registerAI(app, deps) {
     let modelBuf = null, floodBuf = null;
     try { modelBuf = await rembgTransparent(buf, retry ? undefined : 'anime'); }
     catch (e) { logLine('ai-op', `${modelName} 模型不可用：` + e.message); }
-    try { floodBuf = floodMatte(buf); }
+    const darkSubject = modelBuf ? isDarkSubject(modelBuf, buf) : false;
+    try { floodBuf = floodMatte(buf, darkSubject ? 85 : 13); }
     catch (e) { logLine('ai-op', 'flood-matte 不适用（' + e.message + '）'); }
+    if (darkSubject) logLine('ai-op', 'transparency dark subject: flood tolerance=85');
     // 洪泛只用于补充模型边缘，不能在模型失败时单独交付：白色/浅色主体会被挖空。
     if (!modelBuf) {
       const error = new Error('本地 AI 抠图模型暂时不可用，请稍后重试（本次不扣积分）');
@@ -298,11 +318,11 @@ module.exports = function registerAI(app, deps) {
     }
     const candidates = [];
     if (!retry) {
-      if (floodBuf) candidates.push({ name: 'anime-union', buf: alphaUnion(modelBuf, floodBuf, buf) });
+      if (floodBuf) candidates.push({ name: 'anime-union', buf: alphaUnion(modelBuf, floodBuf, buf, darkSubject) });
       candidates.push({ name: 'anime', buf: modelBuf });
     } else {
       candidates.push({ name: 'general', buf: modelBuf });
-      if (floodBuf) candidates.push({ name: 'general-union', buf: alphaUnion(modelBuf, floodBuf, buf) });
+      if (floodBuf) candidates.push({ name: 'general-union', buf: alphaUnion(modelBuf, floodBuf, buf, darkSubject) });
     }
     for (const candidate of candidates) {
       try {
@@ -606,6 +626,7 @@ module.exports = function registerAI(app, deps) {
   module.exports.recordAIResult = recordAIResult;
   module.exports.floodMatte = floodMatte; // 供合成测试与运维排障直接调用
   module.exports.alphaUnion = alphaUnion; // 验证低反差地面不会再被洪泛并回
+  module.exports.isDarkSubject = isDarkSubject; // 深色主体自适应洪泛阈值测试
   module.exports.buildGenPrompt = buildGenPrompt; // 验证旧后台模板也会被强制改为纯白生图背景
   module.exports.inspectTransparency = inspectTransparency;
 
