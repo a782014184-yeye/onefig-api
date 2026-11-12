@@ -131,6 +131,13 @@ function ok(condition, name) {
   } catch (e) { matteError = e; }
   ok(calls === 1 && matteError && matteError.message === 'local matte down', '其他本地抠图异常不会被误当作透明底残留重复调用');
 
+  calls = 0;
+  let singleError = null;
+  try {
+    await removeBackgroundWithRetry({ source, matte: () => { calls++; return checker; }, maxAttempts: 1 });
+  } catch (e) { singleError = e; }
+  ok(calls === 1 && singleError && singleError.code === 'TRANSPARENCY_QC_FAILED', '配置为 1 次时不做第二次去背景');
+
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onefig-transparency-'));
   try {
     const promptStore = require('./ai-prompts')(null);
@@ -146,6 +153,26 @@ function ok(condition, name) {
     });
     const prompt = aiModule.buildGenPrompt('一只科研鼠', 'matte');
     ok(!prompt.includes('，透明背景，') && prompt.includes('一只科研鼠，纯白背景') && prompt.includes('背景要求（覆盖前述背景描述）'), '后台旧模板中的透明背景措辞被自动兼容');
+
+    const unionSource = new PNG({ width: 100, height: 100 });
+    const unionModel = new PNG({ width: 100, height: 100 });
+    const unionFlood = new PNG({ width: 100, height: 100 });
+    for (let p = 0; p < 100 * 100; p++) {
+      const i = p << 2;
+      unionSource.data[i] = unionSource.data[i + 1] = unionSource.data[i + 2] = 255;
+      unionSource.data[i + 3] = 255;
+      unionModel.data[i + 3] = 0;
+      unionFlood.data[i + 3] = 0;
+    }
+    setPixel(unionSource, 50, 80, [235, 235, 235], 255); // 低反差地面
+    setPixel(unionFlood, 50, 80, [235, 235, 235], 255);
+    setPixel(unionSource, 50, 20, [30, 30, 30], 255); // 高反差胡须
+    setPixel(unionFlood, 50, 20, [30, 30, 30], 255);
+    setPixel(unionSource, 50, 50, [250, 250, 250], 255); // 模型保住的白色主体
+    setPixel(unionModel, 50, 50, [250, 250, 250], 255);
+    const union = PNG.sync.read(aiModule.alphaUnion(PNG.sync.write(unionModel), PNG.sync.write(unionFlood), PNG.sync.write(unionSource)));
+    const unionAlpha = (x, y) => union.data[((100 * y + x) << 2) + 3];
+    ok(unionAlpha(50, 80) === 0 && unionAlpha(50, 20) === 255 && unionAlpha(50, 50) === 255, '低反差地面不并回，高反差细节与白色主体保留');
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }

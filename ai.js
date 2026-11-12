@@ -15,7 +15,7 @@ const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
 const CANDIDATES = 1; // 每次生成 = 1 张候选 = 30 积分（Seedream 5.0 Pro 1728² 成本 0.60 元/张，定价 3 元/张，毛利约 80%）；不满意再生成再扣 30 积分，无免费重抽
 const COST = 30; // 每次生成消耗积分（2026-10-22 晚按反馈调价 10→30）
 const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // 生成素材每人免费试用次数（2026-10-21 按反馈：1 次终身，与改图/风格转换同记 users.aiFreeUsed；0 = 纯积分制）
-const MATTE_MAX_ATTEMPTS = Math.min(3, Math.max(1, Number(process.env.ONEFIG_AI_MATTE_MAX_ATTEMPTS ?? 2) || 2)); // 同一原图最多本地抠图次数；默认 2 次，不增加生图费用
+const MATTE_MAX_ATTEMPTS = 1; // 每个任务只生图 1 次、同图本地去背景也只执行 1 次，不自动重试
 const GEN_BACKGROUND_RULE = '背景要求（覆盖前述背景描述）：使用均匀纯白背景，不要透明底棋盘格、灰白方格、纹理、渐变、地面或投影；主体完整居中，四周保留充足空白。透明化由后续抠图步骤完成。';
 
 // ---- 生成大图（2026-10-22 新增）：期刊封面 / 文内摘要图 / 文内机制图 ----
@@ -242,24 +242,38 @@ module.exports = function registerAI(app, deps) {
       req.end(body);
     });
   }
-  // 双 alpha 并集：模型结果（ anime 会话，≤1024）与洪泛结果（原尺寸）取 max。
-  // 模型保住纯白主体/柔和过渡，洪泛保住小碎片与浅色边缘——各取所长（2026-10-23）
-  function alphaUnion(modelBuf, floodBuf) {
+  // 选择性并集：模型负责主体；洪泛只补充与背景色反差明显的小碎片。
+  // 低反差的白色地面/投影若已被模型判为背景，不再被洪泛重新并回（2026-11-12）。
+  function alphaUnion(modelBuf, floodBuf, sourceBuf) {
     const { PNG } = require('pngjs');
     const m = PNG.sync.read(modelBuf);
     const f = PNG.sync.read(floodBuf);
+    const s = PNG.sync.read(ensurePng(sourceBuf));
     const W = f.width, H = f.height;
+    let br = 0, bg = 0, bb = 0, bn = 0;
+    const corner = (x0, y0) => {
+      for (let y = y0; y < y0 + 6; y++) for (let x = x0; x < x0 + 6; x++) {
+        const i = (s.width * y + x) << 2;
+        br += s.data[i]; bg += s.data[i + 1]; bb += s.data[i + 2]; bn++;
+      }
+    };
+    corner(0, 0); corner(s.width - 6, 0); corner(0, s.height - 6); corner(s.width - 6, s.height - 6);
+    br /= bn; bg /= bn; bb /= bn;
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const fi = (W * y + x) << 2;
-      if (f.data[fi + 3] > 0) continue; // 洪泛已保留，无需补
-      // 最近邻取模型 alpha（模型输出 ≤1024，缩回原尺寸）
+      const si = (s.width * y + x) << 2;
+      const dr = s.data[si] - br, dg = s.data[si + 1] - bg, db = s.data[si + 2] - bb;
+      const strongDetail = dr * dr + dg * dg + db * db >= 42 * 42;
+      if (f.data[fi + 3] > 0 && strongDetail) continue; // 只直接保留高反差洪泛细节
       const mx = Math.min(m.width - 1, Math.floor(x * m.width / W));
       const my = Math.min(m.height - 1, Math.floor(y * m.height / H));
       const mi = (m.width * my + mx) << 2;
       const ma = m.data[mi + 3];
-      if (ma > 24) { // 模型认为此处有内容：回填其 RGB，避免边缘色偏
+      if (ma > 24) {
         f.data[fi] = m.data[mi]; f.data[fi + 1] = m.data[mi + 1]; f.data[fi + 2] = m.data[mi + 2];
         f.data[fi + 3] = ma;
+      } else {
+        f.data[fi + 3] = 0; // 低反差地面、阴影或背景噪点
       }
     }
     return PNG.sync.write({ width: W, height: H, data: f.data });
@@ -284,11 +298,11 @@ module.exports = function registerAI(app, deps) {
     }
     const candidates = [];
     if (!retry) {
-      if (floodBuf) candidates.push({ name: 'anime-union', buf: alphaUnion(modelBuf, floodBuf) });
+      if (floodBuf) candidates.push({ name: 'anime-union', buf: alphaUnion(modelBuf, floodBuf, buf) });
       candidates.push({ name: 'anime', buf: modelBuf });
     } else {
       candidates.push({ name: 'general', buf: modelBuf });
-      if (floodBuf) candidates.push({ name: 'general-union', buf: alphaUnion(modelBuf, floodBuf) });
+      if (floodBuf) candidates.push({ name: 'general-union', buf: alphaUnion(modelBuf, floodBuf, buf) });
     }
     for (const candidate of candidates) {
       try {
@@ -591,6 +605,7 @@ module.exports = function registerAI(app, deps) {
   }
   module.exports.recordAIResult = recordAIResult;
   module.exports.floodMatte = floodMatte; // 供合成测试与运维排障直接调用
+  module.exports.alphaUnion = alphaUnion; // 验证低反差地面不会再被洪泛并回
   module.exports.buildGenPrompt = buildGenPrompt; // 验证旧后台模板也会被强制改为纯白生图背景
   module.exports.inspectTransparency = inspectTransparency;
 
