@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
-const { inspectTransparency, generateTransparentWithRetry } = require('./transparency');
+const { inspectTransparency, removeBackgroundWithRetry } = require('./transparency');
 
 // 2026-10-21：默认模型升 Seedream 5.0 Pro（准确率代际提升），尺寸 2048² → 1536²
 // （1536×1536 = 236 万像素 ≤ 261 万，卡在 0.30 元/张档；2048² 会跳进 0.60 元档）
@@ -14,7 +14,7 @@ const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
 const CANDIDATES = 1; // 每次生成 = 1 张候选 = 30 积分（Seedream 5.0 Pro 1728² 成本 0.60 元/张，定价 3 元/张，毛利约 80%）；不满意再生成再扣 30 积分，无免费重抽
 const COST = 30; // 每次生成消耗积分（2026-10-22 晚按反馈调价 10→30）
 const GEN_FREE = Math.max(0, Number(process.env.ONEFIG_AI_GEN_FREE ?? 1)); // 生成素材每人免费试用次数（2026-10-21 按反馈：1 次终身，与改图/风格转换同记 users.aiFreeUsed；0 = 纯积分制）
-const MATTE_MAX_ATTEMPTS = Math.min(3, Math.max(1, Number(process.env.ONEFIG_AI_MATTE_MAX_ATTEMPTS ?? 2) || 2)); // 初次 + 默认 1 次免费自动重试，上限 3 次防成本失控
+const MATTE_MAX_ATTEMPTS = Math.min(3, Math.max(1, Number(process.env.ONEFIG_AI_MATTE_MAX_ATTEMPTS ?? 2) || 2)); // 同一原图最多本地抠图次数；默认 2 次，不增加生图费用
 const GEN_BACKGROUND_RULE = '背景要求（覆盖前述背景描述）：使用均匀纯白背景，不要透明底棋盘格、灰白方格、纹理、渐变、地面或投影；主体完整居中，四周保留充足空白。透明化由后续抠图步骤完成。';
 
 // ---- 生成大图（2026-10-22 新增）：期刊封面 / 文内摘要图 / 文内机制图 ----
@@ -267,24 +267,33 @@ module.exports = function registerAI(app, deps) {
     return PNG.sync.write({ width: W, height: H, data: f.data });
   }
 
-  async function matteImage(buf) {
-    // 仍优先使用“模型 ∪ 洪泛”保住细丝、浅色边缘和纯白主体；但并集若把任一路的
-    // 背景格子重新带回，则依次尝试单路结果。只有全部不干净时才交给外层重新生图。
+  async function matteImage(buf, attempt = 1) {
+    // 第一次沿用“anime 模型 ∪ 洪泛”保住细丝、浅色边缘和纯白主体；不合格时
+    // 第二次复用同一张原图，改用普通移除背景功能已在用的 general 模型。
+    // 全程只调用本地抠图服务，不会再次请求生图供应商。
+    const retry = attempt > 1;
+    const modelName = retry ? 'general' : 'anime';
     let modelBuf = null, floodBuf = null;
-    try { modelBuf = await rembgTransparent(buf, 'anime'); }
-    catch (e) { logLine('ai-op', 'anime 模型不可用：' + e.message); }
+    try { modelBuf = await rembgTransparent(buf, retry ? undefined : 'anime'); }
+    catch (e) { logLine('ai-op', `${modelName} 模型不可用：` + e.message); }
     try { floodBuf = floodMatte(buf); }
     catch (e) { logLine('ai-op', 'flood-matte 不适用（' + e.message + '）'); }
     const candidates = [];
-    if (modelBuf && floodBuf) candidates.push({ name: 'union', buf: alphaUnion(modelBuf, floodBuf) });
-    if (modelBuf) candidates.push({ name: 'model', buf: modelBuf });
-    if (floodBuf) candidates.push({ name: 'flood', buf: floodBuf });
+    if (!retry) {
+      if (modelBuf && floodBuf) candidates.push({ name: 'anime-union', buf: alphaUnion(modelBuf, floodBuf) });
+      if (modelBuf) candidates.push({ name: 'anime', buf: modelBuf });
+      if (floodBuf) candidates.push({ name: 'flood', buf: floodBuf });
+    } else {
+      if (modelBuf) candidates.push({ name: 'general', buf: modelBuf });
+      if (modelBuf && floodBuf) candidates.push({ name: 'general-union', buf: alphaUnion(modelBuf, floodBuf) });
+      if (floodBuf) candidates.push({ name: 'flood-retry', buf: floodBuf });
+    }
     if (!candidates.length) candidates.push({ name: 'white-flood', buf: whiteToTransparent(buf) });
     for (const candidate of candidates) {
       try {
         const report = inspectTransparency(candidate.buf);
         if (report.ok) {
-          if (candidate.name !== 'union') logLine('ai-op', `transparency matte selected=${candidate.name} borderOpaque=${report.borderOpaqueRatio.toFixed(4)}`);
+          logLine('ai-op', `transparency matte selected=${candidate.name} attempt=${attempt} borderOpaque=${report.borderOpaqueRatio.toFixed(4)}`);
           return candidate.buf;
         }
       } catch (e) { logLine('ai-op', `transparency matte invalid=${candidate.name} ${e.message}`); }
@@ -321,14 +330,12 @@ module.exports = function registerAI(app, deps) {
         if (isBig && !job.transparent) {
           out = ensurePng(await generateImage(prompt, size));
         } else {
-          const checked = await generateTransparentWithRetry({
+          // 生图只在透明候选开始时调用一次；后续重试全部复用这份原图。
+          const source = await generateImage(prompt, size);
+          saveDiagnostic(`source-c${i}.png`, ensurePng(source));
+          const checked = await removeBackgroundWithRetry({
+            source,
             maxAttempts: MATTE_MAX_ATTEMPTS,
-            generate: async attempt => {
-              const source = await generateImage(prompt, size);
-              // 原图仅供服务端排障，不通过公开图片路由暴露；删除生成记录时随目录一并删除。
-              saveDiagnostic(`source-c${i}-a${attempt}.png`, ensurePng(source));
-              return source;
-            },
             matte: matteImage,
             onRejected: ({ attempt, output, report }) => {
               saveDiagnostic(`rejected-c${i}-a${attempt}.png`, output);
@@ -337,7 +344,7 @@ module.exports = function registerAI(app, deps) {
           });
           out = checked.output;
           saveDiagnostic(`qc-c${i}.json`, JSON.stringify(checked.attempts, null, 1));
-          logLine('ai-op', `transparency QC passed job=${job.id} candidate=${i} attempts=${checked.attempts.length} borderOpaque=${checked.report.borderOpaqueRatio.toFixed(4)}`);
+          logLine('ai-op', `transparency QC passed job=${job.id} candidate=${i} localMatteAttempts=${checked.attempts.length} borderOpaque=${checked.report.borderOpaqueRatio.toFixed(4)}`);
         }
         const f = path.join(dir, `c${i}.png`);
         fs.writeFileSync(f, out);

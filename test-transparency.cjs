@@ -1,11 +1,11 @@
-// 透明底质量门禁测试：棋盘格残留、空图、背景未去除、自动重试、供应商错误不重试、旧提示词兼容。
+// 透明底质量门禁测试：棋盘格残留、空图、背景未去除、同一原图二次去背景、旧提示词兼容。
 // 用法：node test-transparency.cjs（仅合成图片与临时目录，不请求外部 AI 服务）
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const express = require('express');
 const { PNG } = require('pngjs');
-const { inspectTransparency, generateTransparentWithRetry } = require('./transparency');
+const { inspectTransparency, removeBackgroundWithRetry } = require('./transparency');
 
 const W = 400, H = 400;
 function makeImage(kind) {
@@ -45,33 +45,38 @@ function ok(condition, name) {
   ok(!blankReport.ok && blankReport.reasons.includes('no-visible-subject'), '全透明空图被拦截');
   ok(!opaqueReport.ok && opaqueReport.reasons.includes('background-almost-intact'), '背景几乎未去除被拦截');
 
-  let calls = 0, rejected = 0;
-  const recovered = await generateTransparentWithRetry({
-    generate: async () => Buffer.from([++calls]),
-    matte: source => source[0] === 1 ? checker : good,
+  const source = Buffer.from('only-one-generated-source');
+  let calls = 0, rejected = 0, sameSource = true;
+  const recovered = await removeBackgroundWithRetry({
+    source,
+    matte: (input, attempt) => {
+      calls++;
+      sameSource = sameSource && input === source && attempt === calls;
+      return calls === 1 ? checker : good;
+    },
     maxAttempts: 2,
     onRejected: () => { rejected++; },
   });
-  ok(calls === 2 && rejected === 1 && recovered.output.equals(good) && recovered.attempts.length === 2, '首次带格子、第二次干净时自动重试成功');
+  ok(calls === 2 && rejected === 1 && sameSource && recovered.source === source && recovered.output.equals(good), '首次带格子时复用同一原图再次去背景成功');
 
   calls = 0; rejected = 0;
   let finalError = null;
   try {
-    await generateTransparentWithRetry({
-      generate: async () => Buffer.from([++calls]),
-      matte: () => checker,
+    await removeBackgroundWithRetry({
+      source,
+      matte: () => { calls++; return checker; },
       maxAttempts: 2,
       onRejected: () => { rejected++; },
     });
   } catch (e) { finalError = e; }
-  ok(calls === 2 && rejected === 2 && finalError && finalError.code === 'TRANSPARENCY_QC_FAILED' && finalError.attempts.length === 2, '连续不干净时停止重试并返回明确错误');
+  ok(calls === 2 && rejected === 2 && finalError && finalError.code === 'TRANSPARENCY_QC_FAILED' && finalError.attempts.length === 2, '连续不干净时停止本地重试并返回明确错误');
 
   calls = 0;
-  let providerError = null;
+  let matteError = null;
   try {
-    await generateTransparentWithRetry({ generate: async () => { calls++; throw new Error('provider down'); }, matte: () => good });
-  } catch (e) { providerError = e; }
-  ok(calls === 1 && providerError && providerError.message === 'provider down', '供应商错误不做额外生图重试');
+    await removeBackgroundWithRetry({ source, matte: () => { calls++; throw new Error('local matte down'); } });
+  } catch (e) { matteError = e; }
+  ok(calls === 1 && matteError && matteError.message === 'local matte down', '本地抠图异常不会被误当作透明底残留重复调用');
 
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onefig-transparency-'));
   try {

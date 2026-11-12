@@ -1,4 +1,4 @@
-// 透明 PNG 质量检查与生成重试：不依赖外部服务，便于隔离测试。
+// 透明 PNG 质量检查与同图本地抠图重试：不依赖外部生图服务，便于隔离测试。
 const DEFAULTS = {
   alphaThreshold: 24,
   borderBandRatio: 0.03,
@@ -48,13 +48,12 @@ function inspectTransparency(buf, options = {}) {
   };
 }
 
-// 仅“透明底检查失败”触发生图重试；供应商报错仍立即失败，避免无意义地增加费用。
-async function generateTransparentWithRetry({ generate, matte, maxAttempts = 2, onRejected }) {
+// 只复用同一张原图做本地抠图，不重新调用生图模型，因此不会产生额外生图费用。
+async function removeBackgroundWithRetry({ source, matte, maxAttempts = 2, onRejected }) {
   const attemptsLimit = Math.min(3, Math.max(1, Number(maxAttempts) || 2));
   const attempts = [];
 
   for (let attempt = 1; attempt <= attemptsLimit; attempt++) {
-    const source = await generate(attempt);
     const output = await matte(source, attempt);
     let report;
     try {
@@ -67,10 +66,10 @@ async function generateTransparentWithRetry({ generate, matte, maxAttempts = 2, 
     if (onRejected) await onRejected({ attempt, source, output, report });
   }
 
-  const error = new Error('透明底检查未通过，已自动重试，本次不会扣除积分，请再试一次');
+  const error = new Error('透明底检查未通过，已自动再次去背景；本次不扣积分，请再试一次');
   error.code = 'TRANSPARENCY_QC_FAILED';
   error.attempts = attempts;
   throw error;
 }
 
-module.exports = { inspectTransparency, generateTransparentWithRetry };
+module.exports = { inspectTransparency, removeBackgroundWithRetry };
