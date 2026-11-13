@@ -465,7 +465,8 @@ module.exports = function registerAI(app, deps) {
     for (let i = 0; i < CANDIDATES; i++) {
       try {
         let out;
-        if (isBig && !job.transparent) {
+        if (!job.transparent) {
+          // 默认直接交付生图原图（白底），不再自动做本地透明底重处理；需要透明底时可单独移除。
           out = ensurePng(await generateImage(prompt, size));
         } else {
           // 生图只在透明候选开始时调用一次；后续重试全部复用这份原图。
@@ -655,7 +656,7 @@ module.exports = function registerAI(app, deps) {
       const prompt = String((req.body || {}).prompt || '').trim().slice(0, 500);
       const style = ['flat', 'matte', 'threed'].includes((req.body || {}).style) ? req.body.style : 'matte';
       const bigType = ['cover', 'abstract', 'mechanism'].includes((req.body || {}).bigType) ? req.body.bigType : null;
-      const transparent = !!((req.body || {}).transparent) && !!bigType; // 仅生成大图可选（生成素材本就透明底）
+      const transparent = !!((req.body || {}).transparent); // 默认不自动移除背景；需要透明底时再显式开启（2026-11-13）
       if (!prompt) return res.status(400).json({ ok: false, error: bigType ? '先描述一下想要什么大图吧' : '先描述一下想要什么素材吧' });
       if (prompt.length < 4) return res.status(400).json({ ok: false, error: '描述再具体一点点，太简短容易画歪' });
       const hit = BLOCKWORDS.find(w => prompt.includes(w));

@@ -1620,6 +1620,34 @@ function aiLocalLeft(u) {
   return { unlimited: false, nobg: left('nobg'), vec: left('vec') };
 }
 
+// 2026-11-13：本地抠图也进入全局串行队列。rembg 是 CPU 密集服务，不升级配置时先限制同时处理 1 个，
+// 让请求排队等待，避免“生成素材改成白底后，压力全部转移到单独移除背景”再次拖垮整站。
+const LOCAL_BG_WORKERS = Math.max(1, Number(process.env.ONEFIG_LOCAL_BG_WORKERS ?? 1));
+const LOCAL_BG_MAX_WAITING = Math.max(0, Number(process.env.ONEFIG_LOCAL_BG_MAX_WAITING ?? 8));
+let localBgActive = 0;
+const localBgQueue = [];
+const enqueueLocalBg = (task) => new Promise((resolve, reject) => {
+  if (localBgQueue.length >= LOCAL_BG_MAX_WAITING) {
+    reject(new Error('当前移除背景任务较多，请稍后再试'));
+    return;
+  }
+  localBgQueue.push({ task, resolve, reject });
+  logLine('ai-op', `remove-bg queued depth=${localBgQueue.length} active=${localBgActive}`);
+  pumpLocalBg();
+});
+function pumpLocalBg() {
+  while (localBgActive < LOCAL_BG_WORKERS && localBgQueue.length) {
+    const item = localBgQueue.shift();
+    localBgActive += 1;
+    item.task()
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        localBgActive = Math.max(0, localBgActive - 1);
+        setImmediate(pumpLocalBg);
+      });
+  }
+}
+
 // ---- 移除背景（服务器本地 rembg 抠图；每日额度规则与位图转矢量一致，单价单独 5 积分/次，见 chargeAILocal）----
 app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
   upload.single('image')(req, res, async (err) => {
@@ -1633,7 +1661,7 @@ app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
       return res.status(403).json({ ok: false, error: charge.error, code: charge.code, credits: charge.credits, cost: AI_NOBG_COST });
     }
     const refund = () => refundAILocal(req.user.id, charge.paidWith, 'nobg');
-    try {
+    const processRemoveBg = async () => {
       const buf = fs.readFileSync(req.file.path);
       fs.unlinkSync(req.file.path);
       const fd = new FormData();
@@ -1649,10 +1677,15 @@ app.post('/api/remove-bg', authUser, aiLocalRateLimit, (req, res) => {
       recordAIResult({ userId: req.user.id, kind: 'nobg', prompt: '移除背景：' + String(req.file.originalname || '图片').slice(0, 60), ext: 'png', buf: out });
       logLine('ai-op', `remove-bg ok user=${req.user.name} paidWith=${charge.paidWith} ${Date.now() - t0}ms`);
       res.json({ ok: true, url: baseUrl + '/files/' + encodeURIComponent(outName), paidWith: charge.paidWith, credits: charge.paidWith === 'credit' ? charge.credits : undefined });
+    };
+    try {
+      await enqueueLocalBg(processRemoveBg);
     } catch (e) {
       refund();
+      fs.unlink(req.file.path, () => {});
+      const busy = /任务较多/.test(e?.message || '');
       logLine('ai-op', `remove-bg FAIL user=${req.user.name} ${e && e.message}`);
-      res.status(502).json({ ok: false, error: '抠图服务开小差了，请稍后重试（未扣积分）' });
+      res.status(busy ? 429 : 502).json({ ok: false, error: busy ? e.message : '抠图服务开小差了，请稍后重试（未扣积分）' });
     }
   });
 });
