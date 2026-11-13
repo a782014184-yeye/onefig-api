@@ -3,8 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
-const { inspectTransparency, removeBackgroundWithRetry, cleanEdge } = require('./transparency');
+const { inspectTransparency, removeBackgroundWithRetry } = require('./transparency');
 const { buildRembgMultipart } = require('./rembg-multipart');
+// 2026-11-13 阶段1：像素级图像算法迁入 image-ops.js，经 worker 线程池执行（主进程零阻塞）
+const imageOps = require('./image-ops');
 
 // 2026-10-21：默认模型升 Seedream 5.0 Pro（准确率代际提升），尺寸 2048² → 1536²
 // （1536×1536 = 236 万像素 ≤ 261 万，卡在 0.30 元/张档；2048² 会跳进 0.60 元档）
@@ -275,51 +277,9 @@ module.exports = function registerAI(app, deps) {
   // 服务不可用时回退到洪泛算法 whiteToTransparent。
   // 背景：Seedream 5.0 Pro 出图底色接近纯白（249-255），洪泛容差 42 会把浅蓝/浅紫主体边缘
   // （距白 <40/通道）一起抠掉，用户反馈"生成的图被扣了底色"。
-  // ---- 洪泛抠底（2026-10-23 升级）：AI 生成图背景为纯色（提示词保证），
-  // 洪泛"只删与边缘连通的背景色"能 100% 保留小碎片元素（Y 形抗体/细丝等），
-  // 这是 DL 分割模型的固有弱项。背景色取四角均值（白底/彩色纯色底都适用），
-  // 覆盖率异常（主体贴边/复杂背景）时抛错走 AI 模型兜底。----
-  function floodMatte(buf, luminanceTolerance = 13) {
-    const { PNG } = require('pngjs');
-    let rgb, w, h;
-    if (buf.length > 3 && buf[0] === 0xFF && buf[1] === 0xD8) {
-      const jpeg = require('jpeg-js');
-      const d = jpeg.decode(buf, { useTArray: true, maxMemoryUsageInMB: 1024 });
-      rgb = d.data; w = d.width; h = d.height;
-    } else {
-      const png = PNG.sync.read(buf);
-      rgb = png.data; w = png.width; h = png.height;
-    }
-    // 背景参考色 = 四角 6x6 块均值
-    let br = 0, bg = 0, bb = 0, bn = 0;
-    const corner = (x0, y0) => { for (let y = y0; y < y0 + 6; y++) for (let x = x0; x < x0 + 6; x++) { const i = (w * y + x) << 2; br += rgb[i]; bg += rgb[i + 1]; bb += rgb[i + 2]; bn++; } };
-    corner(0, 0); corner(w - 6, 0); corner(0, h - 6); corner(w - 6, h - 6);
-    br /= bn; bg /= bn; bb /= bn;
-    const cornerLum = (br + bg + bb) / 3;
-    // 默认阈值 13 保护浅色主体；仅深色主体提高到 85，用于清理近白色地面阴影。
-    const isBg = (i) => Math.abs((rgb[i] + rgb[i + 1] + rgb[i + 2]) / 3 - cornerLum) < luminanceTolerance;
-    const visited = new Uint8Array(w * h);
-    const stack = [];
-    for (let x = 0; x < w; x++) { stack.push(x, w * (h - 1) + x); }
-    for (let y = 0; y < h; y++) { stack.push(w * y, w * y + w - 1); }
-    while (stack.length) {
-      const p = stack.pop();
-      if (visited[p] || !isBg(p << 2)) continue;
-      visited[p] = 1;
-      rgb[(p << 2) + 3] = 0;
-      const x = p % w, y = (p / w) | 0;
-      if (x > 0) stack.push(p - 1);
-      if (x < w - 1) stack.push(p + 1);
-      if (y > 0) stack.push(p - w);
-      if (y < h - 1) stack.push(p + w);
-    }
-    const cov = visited.reduce((a, b) => a + b, 0) / (w * h);
-    if (!(cov > 0.03 && cov < 0.93)) throw new Error('flood coverage abnormal: ' + cov.toFixed(3));
-    return PNG.sync.write({ width: w, height: h, data: rgb });
-  }
-
-  // model：'anime'=插画/卡通/3D 渲染专用会话（对 AI 生成的科研插画分布更匹配，
-  // 浅色主体误删更少，2026-10-23）；缺省/其他值走 general（照片/通用）
+  // ---- 洪泛抠底 / 明暗判定 / 选择性并集 / ensurePng：2026-11-13 阶段1 迁入 image-ops.js ----
+  // 生产路径经 imageOps.run() 在 worker 线程执行（主进程零阻塞）；
+  // 同步实现仍通过 module.exports 暴露给测试与运维脚本（同一份代码）。
   function rembgTransparent(buf, model) {
     return new Promise((resolve, reject) => {
       const { boundary, body } = buildRembgMultipart(buf, model, 'gen.png');
@@ -340,114 +300,100 @@ module.exports = function registerAI(app, deps) {
       req.end(body);
     });
   }
-  function isDarkSubject(modelBuf, sourceBuf) {
-    const { PNG } = require('pngjs');
-    const m = PNG.sync.read(modelBuf);
-    const s = PNG.sync.read(ensurePng(sourceBuf));
-    const luminance = [];
-    for (let y = 0; y < m.height; y += 16) for (let x = 0; x < m.width; x += 16) {
-      if (m.data[((m.width * y + x) << 2) + 3] <= 128) continue;
-      const sx = Math.min(s.width - 1, Math.floor(x * s.width / m.width));
-      const sy = Math.min(s.height - 1, Math.floor(y * s.height / m.height));
-      const si = (s.width * sy + sx) << 2;
-      luminance.push((s.data[si] + s.data[si + 1] + s.data[si + 2]) / 3);
-    }
-    if (luminance.length < 100) return false;
-    luminance.sort((a, b) => a - b);
-    return luminance[Math.floor(luminance.length / 2)] < 150;
+  // ---- 阶段2：整条透明底流水线下沉 rembg 服务 /matte-full（numpy 一次完成，~0.5s）----
+  // 优先远程；端点不存在/服务不可达时回退本地 JS 流水线（matteImageLocal，image-ops worker 执行）。
+  function matteFullRemote(buf, model) {
+    return new Promise((resolve, reject) => {
+      const { boundary, body } = buildRembgMultipart(buf, model, 'gen.png', { max_side: 1536 });
+      const req = require('http').request({
+        host: '127.0.0.1', port: 9000, path: '/matte-full', method: 'POST',
+        headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': body.length },
+        timeout: 150000,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          if (res.statusCode === 200 && chunks.length) return resolve(Buffer.concat(chunks));
+          if (res.statusCode === 503) {
+            const error = new Error('本地 AI 抠图模型暂时不可用，请稍后重试（本次不扣积分）');
+            error.code = 'MATTE_MODEL_UNAVAILABLE';
+            return reject(error);
+          }
+          const e = new Error('matte-full ' + res.statusCode);
+          if (res.statusCode === 404) e.code = 'MATTE_FULL_UNSUPPORTED'; // 旧版服务：回退本地流水线
+          reject(e);
+        });
+      });
+      req.on('timeout', () => req.destroy(new Error('matte-full 超时')));
+      req.on('error', (e) => { e.code = e.code || 'MATTE_FULL_UNSUPPORTED'; reject(e); });
+      req.end(body);
+    });
   }
-
-  // 选择性并集：模型负责主体；洪泛只补充与背景色反差明显的小碎片。
-  // 深色主体使用更严格的白底洪泛，低反差地面即使被模型误判为前景也不再保留。
-  function alphaUnion(modelBuf, floodBuf, sourceBuf, darkSubject = false, detailLuminance = 180) {
-    const { PNG } = require('pngjs');
-    const m = PNG.sync.read(modelBuf);
-    const f = PNG.sync.read(floodBuf);
-    const s = PNG.sync.read(ensurePng(sourceBuf));
-    const W = f.width, H = f.height;
-    let br = 0, bg = 0, bb = 0, bn = 0;
-    const corner = (x0, y0) => {
-      for (let y = y0; y < y0 + 6; y++) for (let x = x0; x < x0 + 6; x++) {
-        const i = (s.width * y + x) << 2;
-        br += s.data[i]; bg += s.data[i + 1]; bb += s.data[i + 2]; bn++;
-      }
-    };
-    corner(0, 0); corner(s.width - 6, 0); corner(0, s.height - 6); corner(s.width - 6, s.height - 6);
-    br /= bn; bg /= bn; bb /= bn;
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      const fi = (W * y + x) << 2;
-      const si = (s.width * y + x) << 2;
-      const dr = s.data[si] - br, dg = s.data[si + 1] - bg, db = s.data[si + 2] - bb;
-      const colorSpan = Math.max(s.data[si], s.data[si + 1], s.data[si + 2]) - Math.min(s.data[si], s.data[si + 1], s.data[si + 2]);
-      const luminance = (s.data[si] + s.data[si + 1] + s.data[si + 2]) / 3;
-      const darkFloor = darkSubject && colorSpan < 18 && luminance > 130 && y > H * 0.55;
-      if (darkFloor) { f.data[fi + 3] = 0; continue; } // 深色主体下部的高亮中性灰地面，含被主体包围的阴影
-      const strongDetail = (colorSpan >= 30) || (luminance < detailLuminance && colorSpan < 6 && dr * dr + dg * dg + db * db >= 42 * 42); // 高饱和彩色结构始终保留；中性细线只在足够深时补
-      if (f.data[fi + 3] > 0 && strongDetail) continue; // 只直接保留高反差洪泛细节
-      if (darkSubject && !strongDetail && f.data[fi + 3] <= 24 && y > H * 0.55) { f.data[fi + 3] = 0; continue; } // 仅下部中性低反差地面；上方白色细节仍由模型恢复
-      const mx = Math.min(m.width - 1, Math.floor(x * m.width / W));
-      const my = Math.min(m.height - 1, Math.floor(y * m.height / H));
-      const mi = (m.width * my + mx) << 2;
-      const ma = m.data[mi + 3];
-      if (ma > 24) {
-        f.data[fi] = m.data[mi]; f.data[fi + 1] = m.data[mi + 1]; f.data[fi + 2] = m.data[mi + 2];
-        f.data[fi + 3] = ma;
-      } else {
-        f.data[fi + 3] = 0; // 低反差地面、阴影或背景噪点
-      }
-    }
-    return PNG.sync.write({ width: W, height: H, data: f.data });
-  }
-
   async function matteImage(buf, attempt = 1) {
+    const retry = attempt > 1;
+    const modelName = retry ? 'general' : 'anime';
+    try {
+      const out = await matteFullRemote(buf, modelName);
+      logLine('ai-op', `matte-full remote ok attempt=${attempt} model=${modelName} bytes=${out.length}`);
+      return out;
+    } catch (e) {
+      if (e && e.code === 'MATTE_MODEL_UNAVAILABLE') throw e; // 与本地语义一致：禁止洪泛单路交付
+      logLine('ai-op', `matte-full 不可用/异常（${e && e.message}），回退本地流水线 attempt=${attempt}`);
+      return matteImageLocal(buf, attempt);
+    }
+  }
+  async function matteImageLocal(buf, attempt = 1) {
     // 第一次沿用“anime 模型 ∪ 洪泛”保住细丝、浅色边缘和纯白主体；不合格时
     // 第二次复用同一张原图，改用普通移除背景功能已在用的 general 模型。
     // 全程只调用本地抠图服务，不会再次请求生图供应商。
+    // 2026-11-13 阶段1：洪泛(13) 与 rembg 并行起跑（原串行 await 白白多花约 1 秒；
+    // 深色主体判定依赖模型结果，确为深色再按 85 容差重跑洪泛，结果与原实现一致）；
+    // 洪泛/并集/边缘/质检全部经 imageOps 线程池执行，主进程事件循环零阻塞。
     const retry = attempt > 1;
     const modelName = retry ? 'general' : 'anime';
     let modelBuf = null, floodBuf = null;
+    const floodSoft = () => imageOps.run('floodMatte', buf, 13).catch(e => { logLine('ai-op', 'flood-matte 不适用（' + e.message + '）'); return null; });
+    const floodLightP = floodSoft();
     try { modelBuf = await rembgTransparent(buf, retry ? undefined : 'anime'); }
     catch (e) { logLine('ai-op', `${modelName} 模型不可用：` + e.message); }
-    const darkSubject = modelBuf ? isDarkSubject(modelBuf, buf) : false;
-    try { floodBuf = floodMatte(buf, darkSubject ? 85 : 13); }
-    catch (e) { logLine('ai-op', 'flood-matte 不适用（' + e.message + '）'); }
-    if (darkSubject) logLine('ai-op', 'transparency dark subject: flood tolerance=85');
+    const darkSubject = modelBuf ? await imageOps.run('isDarkSubject', modelBuf, buf) : false;
+    if (darkSubject) {
+      floodBuf = await imageOps.run('floodMatte', buf, 85).catch(e => { logLine('ai-op', 'flood-matte 不适用（' + e.message + '）'); return null; });
+      logLine('ai-op', 'transparency dark subject: flood tolerance=85');
+    } else {
+      floodBuf = await floodLightP;
+    }
     // 洪泛只用于补充模型边缘，不能在模型失败时单独交付：白色/浅色主体会被挖空。
     if (!modelBuf) {
       const error = new Error('本地 AI 抠图模型暂时不可用，请稍后重试（本次不扣积分）');
       error.code = 'MATTE_MODEL_UNAVAILABLE';
       throw error;
     }
-    const candidates = [];
+    const unionJobs = [];
     if (!retry) {
-      if (floodBuf) candidates.push({ name: 'anime-union', buf: alphaUnion(modelBuf, floodBuf, buf, darkSubject) });
-      candidates.push({ name: 'anime', buf: modelBuf });
+      if (floodBuf) unionJobs.push({ name: 'anime-union', p: imageOps.run('alphaUnion', modelBuf, floodBuf, buf, darkSubject) });
+      unionJobs.push({ name: 'anime', p: Promise.resolve(modelBuf) });
     } else {
-      candidates.push({ name: 'general', buf: modelBuf });
-      if (floodBuf) candidates.push({ name: 'general-union', buf: alphaUnion(modelBuf, floodBuf, buf, darkSubject) });
+      unionJobs.push({ name: 'general', p: Promise.resolve(modelBuf) });
+      if (floodBuf) unionJobs.push({ name: 'general-union', p: imageOps.run('alphaUnion', modelBuf, floodBuf, buf, darkSubject) });
     }
-    for (const candidate of candidates) {
+    const resolved = await Promise.all(unionJobs.map(j => j.p));
+    const candidates = unionJobs.map((j, i) => ({ name: j.name, buf: resolved[i] }));
+    const cleanedList = await Promise.all(candidates.map(async (candidate) => {
       try {
-        const cleaned = cleanEdge(buf, candidate.buf);
-        const report = inspectTransparency(cleaned);
-        if (report.ok) {
-          logLine('ai-op', `transparency matte selected=${candidate.name} attempt=${attempt} borderOpaque=${report.borderOpaqueRatio.toFixed(4)}`);
-          return cleaned;
-        }
-      } catch (e) { logLine('ai-op', `transparency matte invalid=${candidate.name} ${e.message}`); }
+        const cleaned = await imageOps.run('cleanEdge', buf, candidate.buf);
+        const report = await imageOps.run('inspectTransparency', cleaned);
+        return { candidate, cleaned, report, err: null };
+      } catch (e) { return { candidate, cleaned: null, report: null, err: e }; }
+    }));
+    for (const { candidate, cleaned, report, err } of cleanedList) {
+      if (err) { logLine('ai-op', `transparency matte invalid=${candidate.name} ${err.message}`); continue; }
+      if (report.ok) {
+        logLine('ai-op', `transparency matte selected=${candidate.name} attempt=${attempt} borderOpaque=${report.borderOpaqueRatio.toFixed(4)}`);
+        return cleaned;
+      }
     }
-    return cleanEdge(buf, candidates[0].buf);
-  }
-
-  // ---- 生成大图：保留背景（不抠透明底），仅把 JPEG 字节统一转成 PNG 存储 ----
-  function ensurePng(buf) {
-    if (buf.length > 3 && buf[0] === 0xFF && buf[1] === 0xD8) {
-      const jpeg = require('jpeg-js');
-      const { PNG } = require('pngjs');
-      const d = jpeg.decode(buf, { useTArray: true, maxMemoryUsageInMB: 1024 });
-      return PNG.sync.write({ width: d.width, height: d.height, data: d.data });
-    }
-    return buf; // 已是 PNG
+    return imageOps.run('cleanEdge', buf, candidates[0].buf);
   }
 
   async function runJob(job) {
@@ -467,11 +413,11 @@ module.exports = function registerAI(app, deps) {
         let out;
         if (!job.transparent) {
           // 默认直接交付生图原图（白底），不再自动做本地透明底重处理；需要透明底时可单独移除。
-          out = ensurePng(await generateImage(prompt, size));
+          out = await imageOps.run('ensurePng', await generateImage(prompt, size));
         } else {
           // 生图只在透明候选开始时调用一次；后续重试全部复用这份原图。
           const source = await generateImage(prompt, size);
-          saveDiagnostic(`source-c${i}.png`, ensurePng(source));
+          saveDiagnostic(`source-c${i}.png`, await imageOps.run('ensurePng', source));
           const checked = await removeBackgroundWithRetry({
             source,
             maxAttempts: MATTE_MAX_ATTEMPTS,
@@ -555,11 +501,11 @@ module.exports = function registerAI(app, deps) {
     const dir = path.join(AI_DIR, job.id);
     fs.mkdirSync(dir, { recursive: true });
     // 原图一并保存：生成结果区主预览显示"拆分前的大图"（2026-10-22 按反馈）
-    try { fs.writeFileSync(path.join(dir, 'orig.png'), ensurePng(imgBuf)); } catch {}
+    try { fs.writeFileSync(path.join(dir, 'orig.png'), await imageOps.run('ensurePng', imgBuf)); } catch {}
     try {
       const items = await arkSplitLayers(imgBuf, job.prompt);
       // data[0] 底图 → c0.png；图层按 z_index 从底到顶 → c1..cN.png
-      fs.writeFileSync(path.join(dir, 'c0.png'), ensurePng(Buffer.from(items[0].b64, 'base64')));
+      fs.writeFileSync(path.join(dir, 'c0.png'), await imageOps.run('ensurePng', Buffer.from(items[0].b64, 'base64')));
       const layers = items.slice(1)
         .sort((a, b) => (a.z_index || 0) - (b.z_index || 0))
         .map((it, k) => {
@@ -710,9 +656,9 @@ module.exports = function registerAI(app, deps) {
     } catch (e) { logLine('ai-op', `record FAIL kind=${kind} ${e && e.message}`); return null; }
   }
   module.exports.recordAIResult = recordAIResult;
-  module.exports.floodMatte = floodMatte; // 供合成测试与运维排障直接调用
-  module.exports.alphaUnion = alphaUnion; // 验证低反差地面不会再被洪泛并回
-  module.exports.isDarkSubject = isDarkSubject; // 深色主体自适应洪泛阈值测试
+  module.exports.floodMatte = imageOps.floodMatte; // 供合成测试与运维排障直接调用（同步实现，同一份代码）
+  module.exports.alphaUnion = imageOps.alphaUnion; // 验证低反差地面不会再被洪泛并回
+  module.exports.isDarkSubject = imageOps.isDarkSubject; // 深色主体自适应洪泛阈值测试
   module.exports.buildGenPrompt = buildGenPrompt; // 验证旧后台模板也会被强制改为纯白生图背景
   module.exports.inspectTransparency = inspectTransparency;
 

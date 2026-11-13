@@ -29,6 +29,9 @@
 - `cleanEdge` 只收缩邻近透明区域的近白色 fringe，并对半透明像素做白色去污染与轻微 Alpha 柔化；不整体缩边、不改变不透明主体。黑鼠白边与白鼠完整性均须离线样本验证。
 - 任务目录中的 `source-c*.png` 是唯一一次生图的原图，`rejected-c*-a*.png` 是被质检拦截的结果，`qc-c*.json` 是检测报告；均仅供服务端排障，不通过公开图片路由暴露，删除生成记录时一并删除。
 - `node test-transparency.cjs` 可运行透明底合成图、自动重试和旧提示词兼容测试，不请求外部 AI 服务。
+- `node test-image-ops-pool.cjs` 验证图像算法 worker 线程池（2026-11-13 阶段1）：worker 与同步实现逐字节一致、事件循环零阻塞、异常正确传递。图像算子同步实现在 `image-ops.js`（生产路径经 `imageOps.run()` 派发到 `image-ops-worker.js`，主进程不跑像素计算）；bgserver.py 的 git 权威副本在 `ops/bgserver.py`（服务器 /opt/rembg-venv/bgserver.py）。
+- 透明底全流水线自 2026-11-13 起在 rembg 服务 `/matte-full` 端点内完成（numpy 版洪泛/并集/边缘/质检，与 JS 实现逐像素一致）；ai.js `matteImage` 远程优先、端点不可用时自动回退 image-ops 本地流水线。
+- rembg 服务内存形态（2026-11-13 实测）：双 ISNet 会话 + arena 稳态 RSS 约 2.2-2.8G，硬限 5.5G、禁 swap；model 字段必须 `Form()` 声明否则被当查询参数忽略（历史 Bug，已修）。
 
 ## 联调脚本
 

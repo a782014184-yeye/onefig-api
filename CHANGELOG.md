@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+### Added
+- AI 工坊并发架构升级（2026-11-13，issue：ai工坊并发架构升级-issue-20261113）：生图全局队列 `ONEFIG_AI_GEN_WORKERS` 与本地抠图队列 `ONEFIG_LOCAL_BG_WORKERS` 升配后并行化（默认 2/3，环境变量可调）；像素级图像算法迁入 `image-ops.js`，生产路径经 worker_threads 线程池执行（`ONEFIG_IMAGE_WORKERS` 可调），主进程事件循环零阻塞；rembg 服务新增 `/matte-full` 端点，整条透明底流水线（推理+洪泛+选择性并集+白边清理+质检）在服务端以 numpy 一次完成（1536²，算法耗时 0.1-0.4s），ai.js `matteImage` 远程优先、端点不可用时自动回退本地 worker 流水线；rembg 服务启动预热双模型、会话懒加载加锁、`MATTE_INTRA_THREADS` 可调
+- 新增 `test-image-ops-pool.cjs`：验证 worker 与同步实现逐字节一致、事件循环零阻塞、异常传递
+
+### Fixed
+- 修复 rembg 服务 `model` 参数绑定 Bug（影响期 2026-10-23 至 2026-11-13）：`model: str = "general"` 被 FastAPI 当查询参数，multipart 中的 model 字段被静默忽略，"anime" 自双模型上线以来实际一直运行 isnet-general-use；改为 `Form("general")` 后 matte 路径真正使用 isnet-anime（真实生成图两模型差异 <0.3%，无用户感知损失）
+- matteImage 洪泛(13) 与 rembg 并行起跑（原串行 await 白等约 1 秒），深色主体判定后再按 85 容差重跑，结果与原实现一致
+- 巡检探针 `ops/ai-probe.sh` 的 Seedream 模型 ID 从已下线的 `doubao-seedream-4-5-251128` 更正为生产一致的 `doubao-seedream-5-0-pro-260628`（1728²，消除生图链路的误报）
+- DASHSCOPE_API_KEY 从 systemd drop-in 迁移至 `onefig-api.env`（600 权限）统一管理
+
+### Changed
+- rembg-multipart.js `buildRembgMultipart` 支持 extraFields（如 max_side），model 字段仍先于 image
+- rembg 服务端并发护栏改为信号量 2 路（onnxruntime arena 随并发峰值膨胀不回缩，3 路曾致内存抖动）
+
+### 运维（服务器侧，不在本仓库）
+- onefig-rembg systemd：CPUQuota=300%、MemoryHigh=5G / MemoryMax=5.5G / 禁用 swap（2C4G 时代的 2.5G 硬限与双会话稳态内存错配，曾致 OOM kill 与 swap 抖动活锁）；onefig-api env 新增 `ONEFIG_AI_GEN_WORKERS=2`、`ONEFIG_LOCAL_BG_WORKERS=3`
+- bgserver.py 的 git 权威副本纳入本仓库 `ops/bgserver.py`（服务器部署于 /opt/rembg-venv/bgserver.py）
+
 ### Fixed
 - 生成素材不再要求生图模型直接画“透明背景”，统一改为均匀纯白底并明确排除棋盘格、灰白方格、纹理、渐变和投影；后台已保存的旧模板也会在组装时自动兼容
 - 每个任务固定只生图 1 次、同图本地去背景 1 次，不做第二次生成或本地重试；透明 PNG 保留质量门禁，最终不合格不交付并沿用现有退款逻辑

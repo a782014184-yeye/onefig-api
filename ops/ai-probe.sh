@@ -50,7 +50,7 @@ if [ -z "$ARK_KEY" ]; then
 else
   RESP=$(curl -s -m 120 -X POST https://ark.cn-beijing.volces.com/api/v3/images/generations \
     -H "Authorization: Bearer $ARK_KEY" -H "Content-Type: application/json" \
-    -d '{"model":"doubao-seedream-4-5-251128","prompt":"一个紫色无花果，扁平插画","size":"2048x2048","response_format":"b64_json","watermark":false}')
+    -d '{"model":"doubao-seedream-5-0-pro-260628","prompt":"一个紫色无花果，扁平插画","size":"1728x1728","response_format":"b64_json","watermark":false}')
   if echo "$RESP" | grep -q 'b64_json'; then
     ok "出图正常"
   else
