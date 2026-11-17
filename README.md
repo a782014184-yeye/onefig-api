@@ -20,6 +20,13 @@
 5. 测试用隔离实例：在服务器 `/opt/onefig-api` 里跑 `PORT=8090 DATA_DIR=$(mktemp -d) node server.js`——用本目录的 server.js 本体，靠端口 8090 + 独立数据目录与 8080 生产实例隔离；停止用 `fuser -k 8090/tcp`，千万别 pkill node（会误杀生产）。
 6. **留底卫生**：服务器上的 `*.bak*` 只保留**最近 10 份**，超出即删。git（已推 Gitee）是权威历史，留底仅为最近部署的快速回滚；堆积旧副本正是历史事故的隐患来源。部署后顺手检查：`ls -t *.bak* | tail -n +11` 列出的都可删。
 
+## 化学结构式渲染（chem-render sidecar，2026-11-17）
+
+- 渲染服务：/opt/chem-render/chem-render.py（git 权威副本在 ops/chem-render.py），systemd 单元 chem-render.service，常驻 127.0.0.1:8098，MemoryMax=400M。
+- 环境：/opt/chem-venv（Python 3.11 + rdkit + fastapi + uvicorn）。
+- Node 侧：server.js POST /api/chem/render 代理转发，8s 超时，502 透传。
+- 前端 chem 组件服务端优先；sidecar 挂掉自动回退浏览器本地 wasm 渲染，功能零依赖。排查时先 curl 127.0.0.1:8098/health。
+
 ## AI 透明底质检
 
 - 生成素材统一让生图模型输出纯白背景，再由本地抠图服务透明化，避免把“透明背景”画成灰白棋盘格。
