@@ -123,6 +123,7 @@ function clientIp(req) {
 app.use('/api/boards', express.json({ limit: '12mb' }));
 app.use('/api/shared', express.json({ limit: '12mb' }));   // 可编辑分享的保存通道同样要走大 payload
 app.use('/api/designs', express.json({ limit: '14mb' })); // SVG 模板作品与画板分离存储
+app.use('/api/chem', express.json({ limit: '256kb' }));   // 结构式渲染请求（SMILES + 可选 molblock）
 app.use('/api/fig-assets', express.json({ limit: '12mb' })); // Fig 编组保存为独立 SVG 素材
 // 微信支付回调需要原始报文验签（2026-10-08）：必须在全局 json 解析器之前挂载 raw
 app.use('/api/pay/wechat/notify', express.raw({ type: '*/*' }));
@@ -418,6 +419,27 @@ app.get('/api/materials', (req, res) => {
     res.json({ ok: true, series: data, total: data.reduce((s, x) => s + x.materials.length, 0) });
   } catch { res.json({ ok: true, series: [], total: 0 }); }
 });
+// ---- 结构式服务端渲染代理：转发到 chem-render sidecar（:8098，Python RDKit 完整版）
+// sidecar 不可用/超时返回 502，前端 chem 组件自动回退浏览器本地渲染（行为不变）----
+app.post('/api/chem/render', (req, res) => {
+  const body = JSON.stringify(req.body || {});
+  const up = require('http').request({
+    host: '127.0.0.1', port: 8098, path: '/render', method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    timeout: 8000,
+  }, (r2) => {
+    let data = '';
+    r2.on('data', c => data += c);
+    r2.on('end', () => {
+      if (r2.statusCode === 200) { res.set('Content-Type', 'application/json'); res.send(data); }
+      else res.status(502).json({ error: 'chem-render ' + r2.statusCode });
+    });
+  });
+  up.on('timeout', () => up.destroy(new Error('chem-render 超时')));
+  up.on('error', () => { if (!res.headersSent) res.status(502).json({ error: 'chem-render unavailable' }); });
+  up.write(body); up.end();
+});
+
 app.post('/api/fig-assets', (req, res) => {
   try {
     if (!canUseFig(req)) return res.status(403).json({ ok: false, error: '没有 Fig 素材管理权限' });
@@ -439,11 +461,24 @@ app.post('/api/fig-assets', (req, res) => {
     const material = { id: `Fig/${title}`, series: 'Fig', file, title, downloads: 0, createdAt: new Date().toISOString(), local: true, vector: true, size: Buffer.byteLength(svg) };
     series.materials.push(material);
     saveJSON(materialsFile, data);
-    res.json({ ok: true, material, src: `/files/Fig/${encodeURIComponent(file)}` });
+    res.json({ ok: true, material, src: `/api/fig-assets/${encodeURIComponent(file)}` });
   } catch (e) {
     logLine('error', 'fig-save-fail ' + (e && e.message));
     res.status(500).json({ ok: false, error: 'Fig 保存失败，请稍后重试' });
   }
+});
+
+// Fig 是管理员工作区：不再经匿名 /files/Fig 暴露；画板用请求头鉴权后转 Blob 加载。
+app.get('/api/fig-assets/:file', (req, res) => {
+  if (!canUseFig(req)) return res.status(401).json({ ok: false, error: '请先登录 Fig 管理账号' });
+  const file = String(req.params.file || '');
+  if (!/^fig-\d+-[a-f0-9]{8}\.svg$/.test(file)) return res.status(404).json({ ok: false, error: 'Fig 素材不存在' });
+  const fullPath = path.join(FILES_DIR, 'Fig', file);
+  if (!fs.existsSync(fullPath)) return res.status(404).json({ ok: false, error: 'Fig 素材不存在' });
+  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'");
+  fs.createReadStream(fullPath).pipe(res);
 });
 
 app.post('/api/auth/register', authRateLimit, async (req, res) => {
@@ -687,9 +722,7 @@ app.get('/api/me', authUser, (req, res) => {
       for (const s of materials) for (const m of s.materials || []) if (m.id === o.materialId) { hit = { s, m }; break; }
       if (!hit) return { ...o, preview: '' };
       const file = hit.m.file || (hit.m.title + '.png');
-      const preview = hit.m.local
-        ? '/files/' + encodeURIComponent(hit.m.series || hit.s.folder) + '/' + encodeURIComponent(file)
-        : '/previews/' + encodeURIComponent(hit.m.series || hit.s.folder) + '/' + encodeURIComponent(file.replace(/\.png$/, '.webp'));
+      const preview = '/previews/' + encodeURIComponent(hit.m.series || hit.s.folder) + '/' + encodeURIComponent(file.replace(/\.[^.]+$/, '.webp'));
       return { ...o, preview };
     }
     return { ...o, preview: '' };
@@ -1251,9 +1284,7 @@ app.get('/api/verify', verifyRateLimit, optionalAuth, (req, res) => {
         try { image = loadBoardIndex(hit.userId).boards.find(b => b.id === hit.boardId)?.thumb || null; } catch {}
       }
     } else if (mat) {
-      image = mat.local
-        ? '/files/' + encodeURIComponent(mat.folder) + '/' + encodeURIComponent(mat.file)
-        : '/previews/' + encodeURIComponent(mat.folder) + '/' + encodeURIComponent(mat.file.replace(/\.png$/, '.webp'));
+      image = '/previews/' + encodeURIComponent(mat.folder) + '/' + encodeURIComponent(mat.file.replace(/\.[^.]+$/, '.webp'));
     }
     res.json({
       ok: true,
@@ -1422,8 +1453,14 @@ app.post('/' + ADMIN_PATH + '/delete', consoleAuth, (req, res) => {
 
 app.use('/uploads', consoleAuth, express.static(UPLOAD_DIR));
 
-// 后台上传的素材图片（公开可读，供网站前台展示）
-app.use('/files', express.static(FILES_DIR));
+// /files 只公开根目录 AI 输入/结果文件；素材原图、Fig 和任意子目录一律不再匿名直出。
+const PUBLIC_FILE_RE = /^\/(?:ai-out|ai-sty|ai-nobg|ai-vec|ai-src)-[A-Za-z0-9._-]+$/;
+app.use('/files', (req, res, next) => {
+  let requestPath;
+  try { requestPath = decodeURIComponent(req.path); } catch { return res.status(400).json({ ok: false, error: '文件路径无效' }); }
+  if (!PUBLIC_FILE_RE.test(requestPath)) return res.status(404).json({ ok: false, error: '文件不存在' });
+  next();
+}, express.static(FILES_DIR, { fallthrough: false }));
 
 // 后台上传素材图片：multipart（series + title + image），存服务器并登记
 // TinyPNG 压缩：key 存在 data/console/tinify.json（{"key":"..."}），未配置或失败时静默跳过
@@ -1498,12 +1535,12 @@ app.post('/console/api/materials/upload', consoleAuth, (req, res) => {
         fs.unlink(req.file.path, () => {});
         return res.status(400).json({ ok: false, error: '该文件夹下已存在同名素材' });
       }
-      // 一份原图生成 originals、公开文件、干净预览、水印预览和网格缩略图；全部就绪后才写清单。
+      // 一份原图生成 originals、干净预览、水印预览和网格缩略图；不再复制到公开 files。
       const uploadSize = fs.statSync(req.file.path).size;
       await publishLocalMaterial({
         sourcePath: req.file.path, series, title, ext,
         dataDir: DATA_DIR, webRoot: process.env.ONEFIG_WEB_ROOT || '/opt/onefig-web',
-        filesDir: FILES_DIR, originalsDir: ORIG_DIR,
+        originalsDir: ORIG_DIR,
         commit: () => {
           const s = existingSeries || { folder: series, materials: [] };
           if (!existingSeries) data.push(s);
