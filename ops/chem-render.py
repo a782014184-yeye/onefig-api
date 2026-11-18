@@ -143,26 +143,32 @@ def _crop(svg: str) -> str:
         nums = [float(x) for x in re.findall(r"-?\d+\.?\d*", mm.group(1))]
         for i in range(0, len(nums) - 1, 2):
             eat(nums[i], nums[i + 1])
-    for mm in re.finditer(r"<(line|circle|ellipse)\b[^>]*>", svg):
+    def _g(tag, a):
+        m2 = re.search(a + r"='([\d.-]+)'", tag)
+        return float(m2.group(1)) if m2 else None
+    for mm in re.finditer(r"<line\b[^>]*>", svg):
         tag = mm.group(0)
-        for attr in ("x1", "x2", "cx", "x"):
-            v = re.search(attr + r"='([\d.-]+)'", tag)
-            if v:
-                eat(float(v.group(1)), 0)
-        for attr in ("y1", "y2", "cy", "y"):
-            v = re.search(attr + r"='([\d.-]+)'", tag)
-            if v:
-                eat(0, float(v.group(1)))
+        x1, y1, x2, y2 = _g(tag, "x1"), _g(tag, "y1"), _g(tag, "x2"), _g(tag, "y2")
+        if x1 is not None and y1 is not None:
+            eat(x1, y1)
+            eat(x2, y2)
+    for mm in re.finditer(r"<(circle|ellipse)\b[^>]*>", svg):
+        tag = mm.group(0)
+        cx, cy = _g(tag, "cx") or 0.0, _g(tag, "cy") or 0.0
+        rx = _g(tag, "r") or _g(tag, "rx") or 0.0
+        ry = _g(tag, "r") or _g(tag, "ry") or 0.0
+        eat(cx - rx, cy - ry)
+        eat(cx + rx, cy + ry)
     for mm in re.finditer(r"<text\b[^>]*>", svg):
         tag = mm.group(0)
         fx = re.search(r"x='([\d.-]+)'", tag)
         fy = re.search(r"y='([\d.-]+)'", tag)
         fs = re.search(r"font-size='([\d.]+)'", tag) or re.search(r"font-size='([\d.]+)px'", tag)
         half = float(fs.group(1)) * 0.45 if fs else 10.0
-        if fx:
-            eat(float(fx.group(1)) - half, 0); eat(float(fx.group(1)) + half, 0)
-        if fy:
-            eat(0, float(fy.group(1)) - half); eat(0, float(fy.group(1)) + half)
+        tx = float(fx.group(1)) if fx else 0.0
+        ty = float(fy.group(1)) if fy else 0.0
+        eat(tx - half, ty - half)
+        eat(tx + half, ty + half)
 
     if not math.isfinite(minx):
         return svg
@@ -269,9 +275,9 @@ def _inject_carbon(svg: str) -> str:
     svg = re.sub(r"(<path class='bond-[^']*' d=')([^']+)(')", fix_path, svg)
 
     # stroke 加粗描边：RDKit 标签是实心粗字形，纯 text 字重偏细（v47 报告）
-    sw = fs * 0.055
+    sw = fs * 0.01
     text = ("<text x='%.2f' y='%.2f' text-anchor='middle' dominant-baseline='central' "
-            "font-family='Arial, Helvetica, sans-serif' font-weight='bold' font-size='%.1f' "
+            "font-family='Arial, Helvetica, sans-serif' font-weight='normal' font-size='%.1f' "
             "stroke='#000000' stroke-width='%.2f' paint-order='stroke fill' "
             "fill='#000000' class='atom-carbon'>C</text>") % (cx, cy, fs, sw)
     return svg.replace("</svg>", text + "</svg>")
@@ -288,7 +294,10 @@ def render(req: RenderReq):
     if m is None:
         return {"ok": False, "error": "smiles parse failed"}
     canon = _canon(req.smiles) or req.smiles
-    key = (canon, round(req.bondScale, 2), round(req.fontScale, 2), req.colorMode)
+    # 缓存键必须区分"模板 molblock 渲染"与"SMILES 渲染"——同 canon 两种来源产物不同
+    # （曾发生无模板请求污染缓存，把甲烷的十字构象变成 CH₄ 缩写字母：v52 报告）
+    key = (canon, round(req.bondScale, 2), round(req.fontScale, 2), req.colorMode,
+           "mb" if req.molblock else "smi")
     with _lock:
         cached = _svg_cache.get(key)
     if cached:
