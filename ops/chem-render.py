@@ -63,6 +63,15 @@ def _mol_from(req: RenderReq):
     m0 = Chem.MolFromSmiles(req.smiles)
     if m0 is None:
         return None
+    # 全碳邻居 + 单个隐式 H 的手性碳：加显式 H——否则三根实线 C-C 键画不出构型
+    # （VD3 C17 案例：17-H 缺失导致构型无法判读；有杂原子邻居的中心 RDKit 自身会加楔）
+    h_idx = [a.GetIdx() for a in m0.GetAtoms()
+             if a.GetChiralTag() != Chem.ChiralType.CHI_UNSPECIFIED
+             and a.GetSymbol() == "C"
+             and a.GetTotalNumHs() == 1
+             and all(n.GetSymbol() == "C" for n in a.GetNeighbors())]
+    if h_idx:
+        m0 = Chem.AddHs(m0, onlyOnAtoms=h_idx)
     rdDepictor.Compute2DCoords(m0)
     mb = Chem.MolToMolBlock(m0)
     with _lock:
