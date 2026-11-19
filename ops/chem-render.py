@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from rdkit import Chem, rdBase
 from rdkit.Chem import rdDepictor
 from rdkit.Chem.Draw import rdMolDraw2D
+import hashlib
 import math
 import re
 import threading
@@ -54,8 +55,9 @@ def _mol_from(req: RenderReq):
     canon = _canon(req.smiles)
     if not canon:
         return None
+    src = hashlib.md5((req.smiles or "").encode()).hexdigest()[:12]
     with _lock:
-        mb = _coord_cache.get(canon)
+        mb = _coord_cache.get(src)   # 坐标缓存按输入串：不同来源各自嵌入，互不串味
     if mb:
         return Chem.MolFromMolBlock(mb, sanitize=False, removeHs=False)
     m0 = Chem.MolFromSmiles(req.smiles)
@@ -64,7 +66,7 @@ def _mol_from(req: RenderReq):
     rdDepictor.Compute2DCoords(m0)
     mb = Chem.MolToMolBlock(m0)
     with _lock:
-        _coord_cache[canon] = mb
+        _coord_cache[src] = mb
     return m0
 
 
@@ -294,10 +296,11 @@ def render(req: RenderReq):
     if m is None:
         return {"ok": False, "error": "smiles parse failed"}
     canon = _canon(req.smiles) or req.smiles
-    # 缓存键必须区分"模板 molblock 渲染"与"SMILES 渲染"——同 canon 两种来源产物不同
-    # （曾发生无模板请求污染缓存，把甲烷的十字构象变成 CH₄ 缩写字母：v52 报告）
-    key = (canon, round(req.bondScale, 2), round(req.fontScale, 2), req.colorMode,
-           "mb" if req.molblock else "smi")
+    # 缓存键必须区分输入来源：同分异构体不同输入串的 2D 嵌入朝向不同
+    # （vd3 案例：wasm 规范串嵌入朝向差，C17 虚楔与环键重叠且 H 失标；v54 报告）
+    src = hashlib.md5((req.smiles or "").encode()).hexdigest()[:12]
+    kind = "mb" if req.molblock else "smi"
+    key = (canon, round(req.bondScale, 2), round(req.fontScale, 2), req.colorMode, kind, src)
     with _lock:
         cached = _svg_cache.get(key)
     if cached:
