@@ -5,6 +5,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { publishLocalMaterial, sanitizeSvg } = require('./material-publish');
 const { buildRembgMultipart } = require('./rembg-multipart');
+const { isValidThumb } = require('./thumb-safety');
+const imageOps = require('./image-ops');
 
 const PORT = process.env.PORT || 8080;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -413,11 +415,14 @@ app.get('/api/materials', (req, res) => {
   try {
     const includeFig = req.query.includeFig === '1' && canUseFig(req);
     // 下架素材只保留在后台留痕；Fig 只有授权账号可见，移出 Fig 后才公开。
-    const data = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), [])
+    const data = JSON.parse(fs.readFileSync(path.join(CONSOLE_DIR, 'materials.json'), 'utf8'))
       .map(s => ({ ...s, materials: (s.materials || []).filter(m => !m.removed) }))
       .filter(s => !s.deleted && s.materials.length > 0 && (s.folder !== 'Fig' || includeFig));
     res.json({ ok: true, series: data, total: data.reduce((s, x) => s + x.materials.length, 0) });
-  } catch { res.json({ ok: true, series: [], total: 0 }); }
+  } catch (e) {
+    logLine('error', 'materials-read-fail ' + (e && e.message));
+    res.status(503).json({ ok: false, error: '素材清单暂时不可用，请稍后恢复后再试' });
+  }
 });
 // ---- 结构式服务端渲染代理：转发到 chem-render sidecar（:8098，Python RDKit 完整版）
 // sidecar 不可用/超时返回 502，前端 chem 组件自动回退浏览器本地渲染（行为不变）----
@@ -425,6 +430,26 @@ app.post('/api/chem/render', (req, res) => {
   const body = JSON.stringify(req.body || {});
   const up = require('http').request({
     host: '127.0.0.1', port: 8098, path: '/render', method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    timeout: 8000,
+  }, (r2) => {
+    let data = '';
+    r2.on('data', c => data += c);
+    r2.on('end', () => {
+      if (r2.statusCode === 200) { res.set('Content-Type', 'application/json'); res.send(data); }
+      else res.status(502).json({ error: 'chem-render ' + r2.statusCode });
+    });
+  });
+  up.on('timeout', () => up.destroy(new Error('chem-render 超时')));
+  up.on('error', () => { if (!res.headersSent) res.status(502).json({ error: 'chem-render unavailable' }); });
+  up.write(body); up.end();
+});
+
+// 极简绘制：前端图（atoms/bonds）→ sidecar 建 mol → SMILES + 规范渲染
+app.post('/api/chem/sketch', (req, res) => {
+  const body = JSON.stringify(req.body || {});
+  const up = require('http').request({
+    host: '127.0.0.1', port: 8098, path: '/sketch', method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
     timeout: 8000,
   }, (r2) => {
@@ -481,6 +506,7 @@ app.get('/api/fig-assets/:file', (req, res) => {
   fs.createReadStream(fullPath).pipe(res);
 });
 
+const LEGAL_VERSION = '2026-11-19';
 app.post('/api/auth/register', authRateLimit, async (req, res) => {
   const email = String((req.body || {}).email || '').trim().toLowerCase();
   const password = String((req.body || {}).password || '');
@@ -495,12 +521,25 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
   }
   if (password.length < 6) return res.status(400).json({ ok: false, error: '密码至少 6 位' });
   if (!name) return res.status(400).json({ ok: false, error: '给自己起个昵称吧' });
+  if (req.body.termsAccepted !== true || req.body.privacyAccepted !== true) {
+    return res.status(400).json({ ok: false, error: '请先阅读并同意用户协议和隐私政策' });
+  }
+  if (req.body.termsVersion !== LEGAL_VERSION || req.body.privacyVersion !== LEGAL_VERSION) {
+    return res.status(409).json({ ok: false, error: '协议已更新，请刷新页面后重新阅读并同意' });
+  }
   const users = loadUsers();
   if (users.some(u => u.email === email)) return res.status(400).json({ ok: false, error: '这个邮箱已经注册过啦，直接登录吧' });
   const salt = crypto.randomBytes(16).toString('hex');
   const source = String((req.body || {}).source || '直接访问').trim().slice(0, 40) || '直接访问';
   const sourceHost = String((req.body || {}).sourceHost || '').trim().slice(0, 100);
-  const u = { id: crypto.randomUUID(), name, email, contact: email, salt, passHash: crypto.scryptSync(password, salt, 32).toString('hex'), level: 'none', joinedAt: new Date().toISOString(), memberSince: null, notes: '', verified: false, source, sourceHost };
+  const consentAt = new Date().toISOString();
+  const u = {
+    id: crypto.randomUUID(), name, email, contact: email, salt,
+    passHash: crypto.scryptSync(password, salt, 32).toString('hex'),
+    level: 'none', joinedAt: new Date().toISOString(), memberSince: null, notes: '', verified: false, source, sourceHost,
+    termsAcceptedAt: consentAt, privacyAcceptedAt: consentAt,
+    termsVersion: LEGAL_VERSION, privacyVersion: LEGAL_VERSION,
+  };
   users.push(u);
   saveUsers(users);
   // 注册邮箱验证（2026-10-25 审计 ISSUE-3 → 应所有者要求升级为硬闸门）：
@@ -709,7 +748,7 @@ app.post('/api/auth/delete-account', authUser, authRateLimit, (req, res) => {
 });
 
 app.get('/api/me', authUser, (req, res) => {
-  const orders = loadOrders().filter(o => o.userId === req.user.id).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  const orders = loadOrders().filter(o => o.userId === req.user.id && !o.hiddenAt).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   const downloads = loadJSON(DOWNLOADS_FILE, []).filter(l => l.userId === req.user.id);
   const materials = loadJSON(path.join(CONSOLE_DIR, 'materials.json'), []);
   const ordersWithPreview = orders.map(o => {
@@ -722,7 +761,7 @@ app.get('/api/me', authUser, (req, res) => {
       for (const s of materials) for (const m of s.materials || []) if (m.id === o.materialId) { hit = { s, m }; break; }
       if (!hit) return { ...o, preview: '' };
       const file = hit.m.file || (hit.m.title + '.png');
-      const preview = '/previews/' + encodeURIComponent(hit.m.series || hit.s.folder) + '/' + encodeURIComponent(file.replace(/\.[^.]+$/, '.webp'));
+      const preview = '/previews/' + encodeURIComponent(hit.m.series || hit.s.folder) + '/' + encodeURIComponent(file.replace(/\.[^.]+$/, file.toLowerCase().endsWith('.svg') ? '.svg' : '.webp'));
       return { ...o, preview };
     }
     return { ...o, preview: '' };
@@ -731,7 +770,7 @@ app.get('/api/me', authUser, (req, res) => {
   let creditOrders = [];
   try {
     creditOrders = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'ai', 'credit-orders.json'), 'utf8'))
-      .filter(o => o.userId === req.user.id).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+      .filter(o => o.userId === req.user.id && !o.hiddenAt).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   } catch {}
   res.json({
     ok: true,
@@ -871,7 +910,7 @@ app.post('/api/track-download', trackRateLimit, (req, res) => {
     const data = JSON.parse(fs.readFileSync(f, 'utf8'));
     let hit = false;
     for (const s of data) for (const m of s.materials) if (m.id === id && !m.removed) { m.downloads = (m.downloads || 0) + 1; hit = true; }
-    if (hit) fs.writeFileSync(f, JSON.stringify(data, null, 1));
+    if (hit) saveJSON(f, data);
     res.json({ ok: hit });
   } catch { res.json({ ok: false }); }
 });
@@ -897,16 +936,18 @@ app.get('/api/clean-preview/:series/:title', (req, res) => {
     const u = validateToken(tk);
     if (!u) return res.status(401).json({ ok: false, error: '请先登录' });
     const series = String(req.params.series || '');
-    // 客户端带 .webp 后缀调用，服务端统一剥掉再拼（11-19 实测：双后缀导致 404）
-    const title = String(req.params.title || '').replace(/\.webp$/i, '');
+    // 客户端带预览后缀调用，服务端统一剥掉；SVG 优先保留矢量，其他素材使用 WebP。
+    const title = String(req.params.title || '').replace(/\.(?:webp|svg)$/i, '');
     if (!series || !title || series.includes('..') || title.includes('..') || series.includes('/') || title.includes('/')) {
       return res.status(400).json({ ok: false, error: '参数无效' });
     }
     // 2026-10-19 定稿：任何登录用户都可在画板使用干净预览（元素不再带水印）；
     // 导出硬墙与 300dpi 原图付费墙不变——防的是结果物而非作图过程
-    const file = path.join(DATA_DIR, 'clean-previews', series, title + '.webp');
+    const svg = path.join(DATA_DIR, 'clean-previews', series, title + '.svg');
+    const webp = path.join(DATA_DIR, 'clean-previews', series, title + '.webp');
+    const file = fs.existsSync(svg) ? svg : webp;
     if (!fs.existsSync(file)) return res.status(404).json({ ok: false, error: '素材不存在' });
-    res.setHeader('Content-Type', 'image/webp');
+    res.setHeader('Content-Type', file === svg ? 'image/svg+xml; charset=utf-8' : 'image/webp');
     res.setHeader('Cache-Control', 'private, max-age=3600');
     fs.createReadStream(file).pipe(res);
   } catch (e) {
@@ -1119,13 +1160,13 @@ app.get('/api/download', authUser, (req, res) => {
         if (u.dlMonth !== month) { u.dlMonth = month; u.dlUsed = 0; }
         if ((u.dlUsed || 0) >= BASIC_MONTHLY_LIMIT) return res.status(403).json({ ok: false, error: 'quota' });
         u.dlMonth = month;
+        u.dlUsed = (u.dlUsed || 0) + 1;
       }
-      u.dlUsed = (u.dlUsed || 0) + 1;
       const users = loadUsers();
       const ui = users.findIndex(x => x.id === u.id);
       if (ui >= 0) { users[ui] = u; saveUsers(users); }
       hit.m.downloads = (hit.m.downloads || 0) + 1;
-      fs.writeFileSync(f, JSON.stringify(data, null, 1));
+      saveJSON(f, data);
     }
     // 授权码记录同时保存素材标题/系列快照：日后素材下架、改名或替换，验真仍能显示原始名称（2026-10-24）
     logs.push({ userId: u.id, materialId: id, code, time: new Date().toISOString(), free: already, materialTitle: hit.m.title, materialSeries: hit.m.series || hit.s.folder });
@@ -1284,7 +1325,7 @@ app.get('/api/verify', verifyRateLimit, optionalAuth, (req, res) => {
         try { image = loadBoardIndex(hit.userId).boards.find(b => b.id === hit.boardId)?.thumb || null; } catch {}
       }
     } else if (mat) {
-      image = '/previews/' + encodeURIComponent(mat.folder) + '/' + encodeURIComponent(mat.file.replace(/\.[^.]+$/, '.webp'));
+      image = '/previews/' + encodeURIComponent(mat.folder) + '/' + encodeURIComponent(mat.file.replace(/\.[^.]+$/, mat.file.toLowerCase().endsWith('.svg') ? '.svg' : '.webp'));
     }
     res.json({
       ok: true,
@@ -1568,6 +1609,24 @@ app.post('/console/api/materials/upload', consoleAuth, (req, res) => {
 });
 
 const httpServer = app.listen(PORT, () => console.log(`OneFig API listening on :${PORT}`));
+
+// 正常停止：停止新连接、等待在飞请求、清理 worker；15 秒后才强制退出。
+let gracefulShuttingDown = false;
+function gracefulShutdown(signal) {
+  if (gracefulShuttingDown) return;
+  gracefulShuttingDown = true;
+  console.log(`[shutdown] signal=${signal}`);
+  logLine('info', `shutdown signal=${signal}`);
+  const force = setTimeout(() => process.exit(1), 15_000);
+  httpServer.close(async () => {
+    try { await imageOps.shutdown(); }
+    catch (error) { logLine('error', `worker-shutdown-fail ${error && error.message}`); }
+    finally { clearTimeout(force); process.exit(0); }
+  });
+  if (typeof httpServer.closeIdleConnections === 'function') httpServer.closeIdleConnections();
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // ---- 位图转 SVG 矢量（服务器本地 vtracer；2026-10-21 规则：红果/金果免费不限次，
 //      普通/青果每天 5 次免费（北京时间 00:00 重置），超出 10 积分/次，失败退还）----
@@ -2001,9 +2060,12 @@ app.put('/api/boards/:id', authUser, (req, res) => {
   if (payload == null || typeof payload !== 'object') return res.status(400).json({ ok: false, error: '缺少画板内容' });
   const text = JSON.stringify(payload);
   if (Buffer.byteLength(text) > MAX_BOARD_BYTES) return res.status(413).json({ ok: false, code: 'BOARD_TOO_LARGE', error: '画板内容超过 10MB，建议减少图片或拆分画板' });
+  if (req.body.thumb != null && req.body.thumb !== '' && !isValidThumb(req.body.thumb, MAX_THUMB_CHARS)) {
+    return res.status(400).json({ ok: false, error: '缩略图格式无效' });
+  }
   saveJSON(path.join(boardDir(req.user.id), req.params.id + '.json'), payload);
   meta.savedAt = Date.now();
-  if (typeof req.body.thumb === 'string' && req.body.thumb.startsWith('data:image/') && req.body.thumb.length <= MAX_THUMB_CHARS) meta.thumb = req.body.thumb;
+  if (isValidThumb(req.body.thumb, MAX_THUMB_CHARS)) meta.thumb = req.body.thumb;
   if (typeof req.body.name === 'string' && req.body.name.trim()) meta.name = req.body.name.trim().slice(0, 60);
   saveBoardIndex(req.user.id, idx);
   res.json({ ok: true, savedAt: meta.savedAt });
@@ -2096,7 +2158,11 @@ app.post('/api/boards/import-local', authUser, (req, res) => {
       folderId: typeof b.folderId === 'string' && idx.folders.some(f => f.id === b.folderId) ? b.folderId : undefined,
       savedAt: typeof b.savedAt === 'number' ? b.savedAt : Date.now(),
     };
-    if (typeof b.thumb === 'string' && b.thumb.startsWith('data:image/') && b.thumb.length <= MAX_THUMB_CHARS) meta.thumb = b.thumb;
+    if (b.thumb != null && b.thumb !== '' && !isValidThumb(b.thumb, MAX_THUMB_CHARS)) {
+      skipped.push({ id: b.id, name: b.name, reason: '缩略图格式无效' });
+      continue;
+    }
+    if (isValidThumb(b.thumb, MAX_THUMB_CHARS)) meta.thumb = b.thumb;
     idx.boards.push(meta);
     if (b.payload && typeof b.payload === 'object') saveJSON(path.join(boardDir(req.user.id), b.id + '.json'), b.payload);
     imported.push(b.id);
@@ -2266,9 +2332,12 @@ app.put('/api/shared/:token', authUser, (req, res) => {
   if (payload == null || typeof payload !== 'object') return res.status(400).json({ ok: false, error: '缺少画板内容' });
   const text = JSON.stringify(payload);
   if (Buffer.byteLength(text) > MAX_BOARD_BYTES) return res.status(413).json({ ok: false, code: 'BOARD_TOO_LARGE', error: '画板内容超过 10MB' });
+  if (req.body.thumb != null && req.body.thumb !== '' && !isValidThumb(req.body.thumb, MAX_THUMB_CHARS)) {
+    return res.status(400).json({ ok: false, error: '缩略图格式无效' });
+  }
   saveJSON(path.join(boardDir(s.ref.uid), s.ref.boardId + '.json'), payload);
   s.meta.savedAt = Date.now();
-  if (typeof req.body.thumb === 'string' && req.body.thumb.startsWith('data:image/') && req.body.thumb.length <= MAX_THUMB_CHARS) s.meta.thumb = req.body.thumb;
+  if (isValidThumb(req.body.thumb, MAX_THUMB_CHARS)) s.meta.thumb = req.body.thumb;
   s.meta.lock.at = Date.now();   // 保存本身也算一次心跳
   saveBoardIndex(s.ref.uid, s.idx);
   res.json({ ok: true, savedAt: s.meta.savedAt });

@@ -294,6 +294,56 @@ def _inject_carbon(svg: str) -> str:
     return svg.replace("</svg>", text + "</svg>")
 
 
+class SketchReq(BaseModel):
+    atoms: list          # 元素符号列表，如 ["C","C","O"]
+    bonds: list          # [a, b, order] 三元组
+    bondScale: float = 1.0
+    fontScale: float = 1.0
+    colorMode: str = "element"
+
+
+@app.post("/sketch")
+def sketch(req: SketchReq):
+    """极简编辑器：前端图 → RDKit 建 mol → SMILES + 走同款渲染管线出图"""
+    if not req.atoms or len(req.atoms) > 200:
+        return {"ok": False, "error": "原子数非法"}
+    rw = Chem.RWMol()
+    try:
+        for el in req.atoms:
+            rw.AddAtom(Chem.Atom(str(el).capitalize()))
+        seen = set()
+        for b in req.bonds:
+            a, bb, o = int(b[0]), int(b[1]), int(b[2])
+            if a == bb or not (0 <= a < len(req.atoms)) or not (0 <= bb < len(req.atoms)):
+                continue
+            key = (min(a, bb), max(a, bb))
+            if key in seen:
+                continue
+            seen.add(key)
+            rw.AddBond(a, bb, Chem.BondType.SINGLE if int(o) <= 1 else Chem.BondType.DOUBLE)
+    except Exception as e:
+        return {"ok": False, "error": "图数据错误：" + str(e)[:100]}
+    m = rw.GetMol()
+    try:
+        m.UpdatePropertyCache(strict=False)
+        # catchErrors=True 时 sanitize 失败不抛异常而是返回失败标志位，必须检查，
+        # 否则氧超价这类结构会被静默放行（2026-11-19 修）
+        res = Chem.SanitizeMol(m, Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_KEKULIZE, catchErrors=True)
+        if res != Chem.SanitizeFlags.SANITIZE_NONE:
+            return {"ok": False, "error": "化学上不合法（价键不匹配），请检查连接方式"}
+    except Exception:
+        return {"ok": False, "error": "化学上不合法（价键不匹配），请检查连接方式"}
+    if m.GetNumBonds() == 0 and m.GetNumAtoms() > 1:
+        return {"ok": False, "error": "原子之间还没有连接"}
+    try:
+        smi = Chem.MolToSmiles(m)
+        raw = _draw(m, smi, req.fontScale)
+        svg = _post(raw, req.bondScale, req.colorMode, center_carbon=False)
+    except Exception as e:
+        return {"ok": False, "error": "渲染失败：" + str(e)[:100]}
+    return {"ok": True, "smiles": smi, "svg": svg, "server": True}
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "rdkit": rdBase.rdkitVersion}
