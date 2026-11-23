@@ -1,37 +1,67 @@
 #!/bin/bash
-# OneFig 备份策略（2026-09-21 配置，2026-09-21 追加 OSS 异地备份）
-#   每日：核心业务数据（JSON + AI 记录，约 15MB）+ 后端代码，本机保留 14 天
-#   每周日：全量数据（含 465MB 原图），本机保留 60 天
-#   所有备份同时上传 OSS oss://onefig/backups/（异地容灾）
+# OneFig 备份策略：每日核心数据 + 完整运行源码；周日全量数据；本机/OSS 双副本。
 set -e
-# cron 环境 PATH 不含 /usr/local/bin，ossutil64 在那里，必须显式声明
 export PATH=/usr/local/bin:/usr/bin:/bin
-DEST=/opt/backups/onefig
-mkdir -p "$DEST"
-TS=$(date +%Y%m%d-%H%M)
 
-# 每日：JSON 业务数据 + 代码（2026-10-16 补 shares.json/comments：画板分享关系与批注此前只在周日全量里，删除事件当天无快照可回滚）
-tar -czf "$DEST/onefig-json-$TS.tar.gz" -C /opt/onefig-api/data console submissions.json pricing-config.json ai boards shares.json comments
-tar -czf "$DEST/onefig-code-$TS.tar.gz" -C /opt/onefig-api server.js console.js ai.js pay.js seo.js package.json package-lock.json
+DEST=${BACKUP_ROOT:-/opt/backups/onefig}
+DATA_ROOT=${DATA_ROOT:-/opt/onefig-api/data}
+CODE_ROOT=${CODE_ROOT:-/opt/onefig-api}
+LOG=${BACKUP_LOG:-/var/log/onefig-backup.log}
+OSSUTIL=${OSSUTIL:-ossutil64}
+mkdir -p "$DEST" "$(dirname "$LOG")"
+TS=$(date +%Y%m%d-%H%M%S)
+JSON_TAR="$DEST/onefig-json-$TS.tar.gz"
+CODE_TAR="$DEST/onefig-code-$TS.tar.gz"
+FULL_TAR="$DEST/onefig-full-$TS.tar.gz"
 
-# 每周日：全量（含原图）
+trap 'rc=$?; echo "[$(date "+%F %T")] BACKUP-FAIL line=$LINENO cmd=$BASH_COMMAND rc=$rc" >> "$LOG"; rm -f "$JSON_TAR" "$CODE_TAR" "$FULL_TAR"; exit $rc' ERR
+
+[ -d "$DATA_ROOT" ] || { echo "[$(date '+%F %T')] BACKUP-FAIL missing-data-root=$DATA_ROOT" >> "$LOG"; exit 1; }
+[ -d "$CODE_ROOT" ] || { echo "[$(date '+%F %T')] BACKUP-FAIL missing-code-root=$CODE_ROOT" >> "$LOG"; exit 1; }
+for f in server.js package.json package-lock.json; do
+  [ -f "$CODE_ROOT/$f" ] || { echo "[$(date '+%F %T')] BACKUP-FAIL missing-code=$f" >> "$LOG"; exit 1; }
+done
+
+# 核心数据必须存在；首次使用才创建的可选数据允许缺失，但必须留下 SKIP 记录。
+DATA_CORE=(console)
+DATA_OPT=(ai boards submissions.json shares.json comments ai-prompts.json pricing-config.json)
+DATA_ARGS=()
+for f in "${DATA_CORE[@]}"; do
+  [ -e "$DATA_ROOT/$f" ] || { echo "[$(date '+%F %T')] BACKUP-FAIL missing-core=$f" >> "$LOG"; exit 1; }
+  DATA_ARGS+=("$f")
+done
+for f in "${DATA_OPT[@]}"; do
+  if [ -e "$DATA_ROOT/$f" ]; then DATA_ARGS+=("$f"); else echo "[$(date '+%F %T')] BACKUP-SKIP optional=$f" >> "$LOG"; fi
+done
+
+tar -czf "$JSON_TAR" -C "$DATA_ROOT" \
+  --exclude='console/mail.json' --exclude='console/tinify.json' --exclude='secrets' \
+  "${DATA_ARGS[@]}"
+
+# 不再手工追逐 require 文件清单：保留完整运行源码，排除数据、依赖、密钥和历史副本。
+tar -czf "$CODE_TAR" -C "$CODE_ROOT" \
+  --exclude='./data' --exclude='./node_modules' --exclude='./.git' \
+  --exclude='./secrets' --exclude='./.env' --exclude='./.env.*' \
+  --exclude='./pay-config*.json' --exclude='./*.pem' --exclude='./*.key' \
+  --exclude='./__pycache__' --exclude='./.DS_Store' --exclude='./*.bak*' .
+
 if [ "$(date +%u)" = "7" ]; then
-  tar -czf "$DEST/onefig-full-$TS.tar.gz" -C /opt/onefig-api data
+  tar -czf "$FULL_TAR" -C "$DATA_ROOT" \
+    --exclude='console/mail.json' --exclude='console/tinify.json' --exclude='secrets' .
 fi
 
-# 上传 OSS 异地备份（失败不阻断本机备份，但记日志供看门狗发现）
-for f in "$DEST"/*"$TS"*.tar.gz; do
-  [ -f "$f" ] && ossutil64 cp -f "$f" "oss://onefig/backups/$(basename "$f")" >/dev/null 2>&1 \
-    || echo "[$(date '+%F %T')] OSS-UPLOAD-FAIL: $f" >> /var/log/onefig-backup.log
+for f in "$JSON_TAR" "$CODE_TAR" "$FULL_TAR"; do
+  if [ -f "$f" ]; then
+    if ! "$OSSUTIL" cp -f "$f" "oss://onefig/backups/$(basename "$f")" >/dev/null 2>&1; then
+      echo "[$(date '+%F %T')] OSS-UPLOAD-FAIL: $f" >> "$LOG"
+    fi
+  fi
 done
 
 find "$DEST" -name 'onefig-json-*.tar.gz' -mtime +14 -delete
 find "$DEST" -name 'onefig-code-*.tar.gz' -mtime +14 -delete
 find "$DEST" -name 'onefig-full-*.tar.gz' -mtime +60 -delete
-# 清理 30 天前的访问/错误日志
-find /opt/onefig-api/data/logs -name '*.log' -mtime +30 -delete 2>/dev/null || true
-# 清理 1 天前的 AI 源图（2026-10-25 审计 ISSUE-5）：用户上传给 AI 处理的原始图片，
-# 百炼取图完成后即无用途，永久留存有隐私风险（URL 不可猜但公开）。只清 ai-src-* 源图，
-# AI 结果图（ai-out-*/ai-sty-*/ai-nobg-*/ai-vec-*）可能被画板引用，不动。
-find /opt/onefig-api/data/files -name 'ai-src-*' -mtime +1 -delete 2>/dev/null || true
-echo "[$(date '+%F %T')] backup done ($TS)"
+find "$DATA_ROOT/logs" -name '*.log' -mtime +30 -delete 2>/dev/null || true
+# AI 源图只清 ai-src-*；AI 结果图可能被画板引用，不动。
+find "$DATA_ROOT/files" -name 'ai-src-*' -mtime +1 -delete 2>/dev/null || true
+echo "[$(date '+%F %T')] BACKUP-OK ts=$TS" >> "$LOG"

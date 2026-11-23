@@ -131,7 +131,12 @@ function ok(name) { passed++; console.log('  ✅', name); }
   const backdate = (file, orderId, iso) => {
     const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
     const o = rows.find(x => x.id === orderId);
-    if (o) o.createdAt = iso;
+    if (o) {
+      const delta = Date.parse(iso) - Date.parse(o.createdAt);
+      o.createdAt = iso;
+      if (o.latestPaymentAttemptAt) o.latestPaymentAttemptAt = new Date(Date.parse(o.latestPaymentAttemptAt) + delta).toISOString();
+      if (o.expiresAt) o.expiresAt = new Date(Date.parse(o.expiresAt) + delta).toISOString();
+    }
     fs.writeFileSync(file, JSON.stringify(rows, null, 1));
   };
 
@@ -272,10 +277,10 @@ function ok(name) { passed++; console.log('  ✅', name); }
 
   const del = await fetch(base + '/api/orders/expired', { method: 'DELETE', headers: { Authorization: 'Bearer t' } }).then(r => r.json());
   assert.strictEqual(del.removed, 2);
-  assert.ok(!readOrders().some(o => o.id === c1.order.id));
-  assert.ok(readOrders().some(o => o.id === c1n.order.id));
-  assert.ok(!readCOs().some(o => o.id === c2.order.id));
-  ok('C3 一键清空失效订单（进行中保留）');
+  assert.ok(readOrders().find(o => o.id === c1.order.id)?.hiddenAt, '旧会员单保留但隐藏');
+  assert.ok(readOrders().some(o => o.id === c1n.order.id && !o.hiddenAt));
+  assert.ok(readCOs().find(o => o.id === c2.order.id)?.hiddenAt, '旧积分单保留但隐藏');
+  ok('C3 一键清空失效订单改为软隐藏（进行中保留）');
 
   // ========== D. 画板导出单次（exportBoard）============
   const d0 = await post('/api/pay/alipay/pagepay', { exportBoard: true });

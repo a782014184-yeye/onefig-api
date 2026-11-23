@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const registerInvoices = require('./invoices');
 
-const dataDir = path.join(__dirname, '.tmp-invoice-test');
+const dataDir = process.env.ONEFIG_TEST_DATA_DIR || path.join(__dirname, '.tmp-invoice-test');
 fs.rmSync(dataDir, { recursive: true, force: true });
 fs.mkdirSync(path.join(dataDir, 'console'), { recursive: true });
 fs.writeFileSync(path.join(dataDir, 'console', 'orders.json'), JSON.stringify([
@@ -17,6 +17,7 @@ const routes = new Map();
 const app = {
   get(route, ...handlers) { routes.set(`GET ${route}`, handlers); },
   post(route, ...handlers) { routes.set(`POST ${route}`, handlers); },
+  patch(route, ...handlers) { routes.set(`PATCH ${route}`, handlers); },
 };
 const authUser = (req, res, next) => {
   req.user = { id: req.headers['x-test-user'] || 'u1', name: '测试用户' };
@@ -26,10 +27,10 @@ let adminChecks = 0;
 const consoleAuth = (req, res, next) => { adminChecks++; next(); };
 registerInvoices(app, { authUser, consoleAuth, DATA_DIR: dataDir, submitRateLimit: (req, res, next) => next() });
 
-function request(method, route, body, userId = 'u1', query = {}) {
+function request(method, route, body, userId = 'u1', query = {}, params = {}) {
   const handlers = routes.get(`${method} ${route}`);
   assert.ok(handlers, `missing route ${method} ${route}`);
-  const req = { headers: { 'x-test-user': userId }, body: body || {}, query };
+  const req = { headers: { 'x-test-user': userId }, body: body || {}, query, params };
   const res = {
     statusCode: 200,
     headers: {},
@@ -98,6 +99,26 @@ assert.equal(adminList.payload.list[0].taxId, valid.taxId);
 const adminFiltered = request('GET', '/console/api/invoices', null, 'u1', { status: 'issued' });
 assert.equal(adminFiltered.payload.total, 0);
 
+const invoiceId = created.payload.application.id;
+const missingNumber = request('PATCH', '/console/api/invoices/:id', { status: 'issued' }, 'u1', {}, { id: invoiceId });
+assert.equal(missingNumber.statusCode, 400, '已开具必须有发票号码');
+const issued = request('PATCH', '/console/api/invoices/:id', { status: 'issued', invoiceNumber: 'INV-LOCAL-001', statusNote: '本地测试' }, 'u1', {}, { id: invoiceId });
+assert.equal(issued.statusCode, 200);
+assert.equal(issued.payload.application.status, 'issued');
+assert.ok(issued.payload.application.issuedAt);
+const userAfterIssued = request('GET', '/api/invoices');
+assert.equal(userAfterIssued.payload.applications[0].invoiceNumber, 'INV-LOCAL-001');
+const illegalIssued = request('PATCH', '/console/api/invoices/:id', { status: 'issued', invoiceNumber: 'INV-OTHER' }, 'u1', {}, { id: invoiceId });
+assert.equal(illegalIssued.statusCode, 400, '不得重复开具');
+const redFlushed = request('PATCH', '/console/api/invoices/:id', { status: 'red_flushed', statusNote: '已红冲' }, 'u1', {}, { id: invoiceId });
+assert.equal(redFlushed.statusCode, 200);
+assert.equal(redFlushed.payload.application.status, 'red_flushed');
+const illegalRed = request('PATCH', '/console/api/invoices/:id', { status: 'pending' }, 'u1', {}, { id: invoiceId });
+assert.equal(illegalRed.statusCode, 400, '终态不得回退');
+const rejected = request('PATCH', '/console/api/invoices/:id', { status: 'rejected', statusNote: '资料不完整' }, 'u1', {}, { id: second.payload.application.id });
+assert.equal(rejected.statusCode, 200);
+assert.equal(rejected.payload.application.status, 'rejected');
+
 const exported = request('GET', '/console/api/invoices/export', null, 'u1', {});
 assert.match(exported.headers['Content-Type'], /text\/csv/);
 assert.ok(exported.payload.startsWith('\ufeff'));
@@ -126,7 +147,7 @@ assert.equal(exportedOnly.payload.list[0].id, created.payload.application.id);
 const unexportedOnly = request('GET', '/console/api/invoices', null, 'u1', { exportStatus: 'unexported' });
 assert.equal(unexportedOnly.payload.total, 1);
 assert.equal(unexportedOnly.payload.list[0].id, second.payload.application.id);
-assert.equal(adminChecks, 10);
+assert.equal(adminChecks, 16);
 
 fs.rmSync(dataDir, { recursive: true, force: true });
-console.log('发票接口检查通过：订单过滤、字段校验、防重复、后台筛选、CSV 安全导出、选中导出标记与重复导出计数。');
+console.log('发票接口检查通过：订单过滤、字段校验、防重复、状态回写与合法迁移、后台筛选、CSV 安全导出、选中导出标记与重复导出计数。');

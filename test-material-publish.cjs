@@ -1,4 +1,4 @@
-// 同源素材发布隔离验收：8090 + 临时目录 + 虚构图片，不访问生产。
+// 同源素材发布隔离验收：18199 + 临时目录 + 虚构图片，不访问生产。
 const assert = require('assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -25,7 +25,7 @@ fs.writeFileSync(path.join(dataDir, 'console', 'users.json'), JSON.stringify([us
 fs.writeFileSync(path.join(dataDir, 'console', 'materials.json'), '[]');
 const child = spawn(process.execPath, ['server.js'], {
   cwd: __dirname,
-  env: { ...process.env, PORT: '8090', DATA_DIR: dataDir, ONEFIG_WEB_ROOT: webRoot, TOKEN_SECRET: secret, ONEFIG_ENV: 'test', ADMIN_USER: 'test-admin', ADMIN_PASS: 'test-password' },
+  env: { ...process.env, PORT: '18199', DATA_DIR: dataDir, ONEFIG_WEB_ROOT: webRoot, TOKEN_SECRET: secret, ONEFIG_ENV: 'test', ADMIN_USER: 'test-admin', ADMIN_PASS: 'test-password' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let logs = '';
@@ -41,7 +41,7 @@ const uploadImage = async token => {
   const form = new FormData();
   form.append('series', '测试系列'); form.append('title', '测试素材');
   form.append('image', new Blob([source], { type: 'image/png' }), '测试素材.png');
-  const res = await fetch('http://127.0.0.1:8090/console/api/materials/upload', {
+  const res = await fetch('http://127.0.0.1:18199/console/api/materials/upload', {
     method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form,
   });
   return { status: res.status, data: await res.json() };
@@ -51,11 +51,11 @@ const uploadImage = async token => {
   try {
     let healthy = false;
     for (let i = 0; i < 80; i++) {
-      try { if ((await fetch('http://127.0.0.1:8090/healthz')).ok) { healthy = true; break; } } catch {}
+      try { if ((await fetch('http://127.0.0.1:18199/healthz')).ok) { healthy = true; break; } } catch {}
       await new Promise(r => setTimeout(r, 100));
     }
     assert.ok(healthy, `隔离实例启动失败：${logs}`);
-    const loginRes = await fetch('http://127.0.0.1:8090/console/api/login', {
+    const loginRes = await fetch('http://127.0.0.1:18199/console/api/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'test-admin', password: 'test-password' }),
     });
     const login = await loginRes.json();
@@ -71,41 +71,61 @@ const uploadImage = async token => {
     const preview = path.join(webRoot, 'previews', '测试系列', '测试素材.webp');
     const thumb = path.join(webRoot, 'previews', 'thumb', '测试系列', '测试素材.webp');
     assert.ok(fs.readFileSync(original).equals(source), 'originals 必须保留上传原图字节');
-    assert.ok(fs.readFileSync(publicOriginal).equals(source), '公开原图必须与 originals 一致');
+    assert.ok(!fs.existsSync(publicOriginal), '公开 files 目录不得保存素材原图');
     for (const file of [clean, preview, thumb]) {
       const buf = fs.readFileSync(file);
       assert.equal(buf.toString('ascii', 0, 4), 'RIFF');
       assert.equal(buf.toString('ascii', 8, 12), 'WEBP');
     }
+    assert.ok(!fs.readFileSync(preview).equals(source), '公开预览必须是水印 WebP 衍生图');
     const manifest = JSON.parse(fs.readFileSync(path.join(dataDir, 'console', 'materials.json'), 'utf8'));
     assert.equal(manifest[0].materials[0].local, true);
     assert.equal(manifest[0].materials[0].size, source.length);
 
+    const encodedSeries = encodeURIComponent('测试系列');
+    const encodedOriginal = encodeURIComponent('测试素材.png');
+    const encodedPreview = encodeURIComponent('测试素材.webp');
+    assert.equal((await fetch(`http://127.0.0.1:18199/files/${encodedSeries}/${encodedOriginal}`)).status, 404, '匿名原图必须 404');
+    const publicPreview = await fetch(`http://127.0.0.1:18199/previews/${encodedSeries}/${encodedPreview}`);
+    assert.equal(publicPreview.status, 200, '水印预览必须可公开读取');
+    assert.match(publicPreview.headers.get('content-type') || '', /image\/webp/);
+
+    // /files 只保留根目录 AI 文件；Fig 工作区必须经鉴权接口读取。
+    fs.writeFileSync(path.join(dataDir, 'files', 'ai-out-test.png'), source);
+    assert.equal((await fetch('http://127.0.0.1:18199/files/ai-out-test.png')).status, 200, 'AI 结果文件仍需公开可用');
+    const figDir = path.join(dataDir, 'files', 'Fig');
+    fs.mkdirSync(figDir, { recursive: true });
+    fs.writeFileSync(path.join(figDir, 'fig-1700000000000-abcdef01.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>');
+    assert.equal((await fetch('http://127.0.0.1:18199/files/Fig/fig-1700000000000-abcdef01.svg')).status, 404, 'Fig 不得从公开 files 读取');
+    assert.equal((await fetch('http://127.0.0.1:18199/api/fig-assets/fig-1700000000000-abcdef01.svg')).status, 401, 'Fig 匿名读取必须拒绝');
+    const figResponse = await fetch('http://127.0.0.1:18199/api/fig-assets/fig-1700000000000-abcdef01.svg', { headers: { Authorization: `Bearer ${login.token}` } });
+    assert.equal(figResponse.status, 200, 'Fig 管理员读取应成功');
+    assert.match(figResponse.headers.get('content-type') || '', /image\/svg\+xml/);
+
     assert.equal((await uploadImage(login.token)).status, 400, '活跃同名素材必须拒绝，不能静默覆盖');
     assert.ok(fs.readFileSync(original).equals(source), '重复上传失败不得改变已发布原图');
 
-    const download = await fetch('http://127.0.0.1:8090/api/download?id=' + encodeURIComponent('测试系列/测试素材'), { headers: { Authorization: `Bearer ${userToken}` } });
+    const download = await fetch('http://127.0.0.1:18199/api/download?id=' + encodeURIComponent('测试系列/测试素材'), { headers: { Authorization: `Bearer ${userToken}` } });
     assert.equal(download.status, 200);
     const downloaded = PNG.sync.read(Buffer.from(await download.arrayBuffer()));
     assert.deepEqual([...downloaded.data.slice(0, 4)], [240, 80, 60, 255], '下载图片像素必须与上传原图一致');
-    const history = await (await fetch('http://127.0.0.1:8090/api/my/downloads', { headers: { Authorization: `Bearer ${userToken}` } })).json();
+    const history = await (await fetch('http://127.0.0.1:18199/api/my/downloads', { headers: { Authorization: `Bearer ${userToken}` } })).json();
     assert.equal(history.list[0].local, true, '下载历史必须保留 local 标记');
 
     const downloadsFile = path.join(dataDir, 'console', 'downloads.json');
     const countBefore = JSON.parse(fs.readFileSync(downloadsFile, 'utf8')).length;
     fs.renameSync(original, original + '.missing');
-    const missing = await fetch('http://127.0.0.1:8090/api/download?id=' + encodeURIComponent('测试系列/测试素材'), { headers: { Authorization: `Bearer ${userToken}` } });
+    const missing = await fetch('http://127.0.0.1:18199/api/download?id=' + encodeURIComponent('测试系列/测试素材'), { headers: { Authorization: `Bearer ${userToken}` } });
     assert.equal(missing.status, 404, '原图缺失必须拒绝下载，不能回退其他图片');
     const countAfter = JSON.parse(fs.readFileSync(downloadsFile, 'utf8')).length;
     assert.equal(countAfter, countBefore, '原图缺失不能新增下载记账');
 
-    // 直接模拟发布到公开预览时失败：已写入的 originals/files 必须回滚。
+    // 直接模拟发布到公开预览时失败：已写入的 originals 必须回滚。
     const rollbackDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onefig-publish-rollback-'));
     const rollbackWeb = path.join(rollbackDir, 'web');
-    for (const dir of [path.join(rollbackDir, 'originals', '测试系列'), path.join(rollbackDir, 'files', '测试系列')]) {
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, '测试素材.png'), 'OLD');
-    }
+    const rollbackOriginals = path.join(rollbackDir, 'originals', '测试系列');
+    fs.mkdirSync(rollbackOriginals, { recursive: true });
+    fs.writeFileSync(path.join(rollbackOriginals, '测试素材.png'), 'OLD');
     const originalCopy = fs.copyFileSync;
     fs.copyFileSync = (src, dest) => {
       if (String(dest) === path.join(rollbackWeb, 'previews', '测试系列', '测试素材.webp')) throw new Error('模拟公开预览写入失败');
@@ -114,16 +134,16 @@ const uploadImage = async token => {
     try {
       await assert.rejects(publishLocalMaterial({
         sourcePath, series: '测试系列', title: '测试素材', ext: '.png', dataDir: rollbackDir,
-        webRoot: rollbackWeb, filesDir: path.join(rollbackDir, 'files'), originalsDir: path.join(rollbackDir, 'originals'),
+        webRoot: rollbackWeb, originalsDir: path.join(rollbackDir, 'originals'),
       }), /模拟公开预览写入失败/);
     } finally { fs.copyFileSync = originalCopy; }
-    assert.equal(fs.readFileSync(path.join(rollbackDir, 'originals', '测试系列', '测试素材.png'), 'utf8'), 'OLD');
-    assert.equal(fs.readFileSync(path.join(rollbackDir, 'files', '测试系列', '测试素材.png'), 'utf8'), 'OLD');
+    assert.equal(fs.readFileSync(path.join(rollbackOriginals, '测试素材.png'), 'utf8'), 'OLD');
+    assert.ok(!fs.existsSync(path.join(rollbackDir, 'files', '测试系列', '测试素材.png')), '回滚流程也不得创建公开原图');
     fs.rmSync(rollbackDir, { recursive: true, force: true });
 
-    console.log('✓ 新上传由原图生成全部文件，原图字节、清单和预览一致');
-    console.log('✓ 重复上传拒绝覆盖；下载像素与上传原图一致，历史 local 正确');
-    console.log('✓ 原图缺失不下载、不记账；发布中途失败会回滚已写文件');
+    console.log('✓ 新上传保留原图与三种预览，不产生公开原图；匿名原图 404');
+    console.log('✓ AI 公开文件可用，Fig 仅鉴权读取；重复上传不覆盖');
+    console.log('✓ 下载像素、历史 local、缺失不记账与发布回滚均正确');
   } finally {
     await stop();
     fs.rmSync(dataDir, { recursive: true, force: true });

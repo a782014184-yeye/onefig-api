@@ -566,9 +566,10 @@ module.exports = function registerConsole(app, deps) {
     const original = {
       users: load('users.json', []), orders: load('orders.json', []), creditOrders: loadCreditOrders(), purchases: load('purchases.json', []),
       downloads: load('downloads.json', []), creditLog: loadLog(), levelLog: loadLevelLog(), refundLog: load('refund-log.json', []),
+      invoices: load('invoices.json', []),
     };
     const copy = value => JSON.parse(JSON.stringify(value));
-    const users = copy(original.users), orders = copy(original.orders), creditOrders = copy(original.creditOrders), purchases = copy(original.purchases), downloads = copy(original.downloads);
+    const users = copy(original.users), orders = copy(original.orders), creditOrders = copy(original.creditOrders), purchases = copy(original.purchases), downloads = copy(original.downloads), invoices = copy(original.invoices);
     const creditOrder = creditOrders.find(o => o.id === req.params.id);
     const order = orders.find(o => o.id === req.params.id) || creditOrder;
     const isCreditOrder = !!creditOrder;
@@ -577,6 +578,10 @@ module.exports = function registerConsole(app, deps) {
     if (order.status !== 'paid') return res.status(400).json({ ok: false, error: '只有已支付订单可以退款' });
     const user = users.find(u => u.id === order.userId);
     if (!user) return res.status(404).json({ ok: false, error: '用户不存在' });
+    const invoice = invoices.find(row => row.orderId === order.id && ['pending', 'issued'].includes(row.status));
+    if (invoice?.status === 'issued') {
+      return res.status(409).json({ ok: false, error: '该订单已开具发票，请先在发票管理红冲后再退款' });
+    }
     const impact = refundImpact(order, user, orders, downloads);
     const refundedAt = new Date().toISOString();
     // 撤销只回滚本次实际影响；积分曾扣到 0 时记录真实扣减量，避免撤销时多送积分。
@@ -620,6 +625,11 @@ module.exports = function registerConsole(app, deps) {
         });
         save('downloads.json', downloads);
       }
+      if (invoice?.status === 'pending') {
+        invoice.status = 'rejected';
+        invoice.statusNote = '订单已退款，开票申请自动驳回';
+        save('invoices.json', invoices);
+      }
       order.status = 'refunded';
       order.refundedAt = refundedAt;
       order.refundedBy = 'admin';
@@ -639,6 +649,7 @@ module.exports = function registerConsole(app, deps) {
       saveLog(original.creditLog);
       save('level-log.json', original.levelLog);
       save('refund-log.json', original.refundLog);
+      save('invoices.json', original.invoices);
       res.status(500).json({ ok: false, error: '退款权益处理失败，已恢复原数据' });
     }
   });
@@ -899,7 +910,7 @@ module.exports = function registerConsole(app, deps) {
   };
   // 移动时同名素材与同名文件统一递增命名，避免标题冲突或目标文件被覆盖。
   const reserveMoveTarget = (target, title, file, targetFolder, local, reservedTitles = new Set(), reservedFiles = new Set()) => {
-    const roots = local ? [FILES_DIR, ORIG_DIR] : [ORIG_DIR], ext = path.extname(file), stem = file.slice(0, file.length - ext.length);
+    const roots = [ORIG_DIR], ext = path.extname(file), stem = file.slice(0, file.length - ext.length);
     let n = 0, nextTitle = title, nextFile = file;
     const conflict = () => target.materials.some(m => m.title === nextTitle) || reservedTitles.has(nextTitle) || roots.some(root => {
       const p = path.join(root, targetFolder, nextFile);
@@ -925,10 +936,16 @@ module.exports = function registerConsole(app, deps) {
     if (index < 0) return res.status(404).json({ ok: false, error: '素材不存在' });
     const m = source.materials[index], sourceFile = m.file || title + '.png';
     const next = reserveMoveTarget(target, title, sourceFile, targetFolder, !!m.local);
-    fs.mkdirSync(path.join(FILES_DIR, targetFolder), { recursive: true });
+    const previewExt = sourceFile.toLowerCase().endsWith('.svg') ? '.svg' : '.webp';
+    const oldPreview = title + previewExt, newPreview = next.title + previewExt;
     fs.mkdirSync(path.join(ORIG_DIR, targetFolder), { recursive: true });
-    if (m.local) mvIfExists(path.join(FILES_DIR, series, sourceFile), path.join(FILES_DIR, targetFolder, next.file));
     mvIfExists(path.join(ORIG_DIR, series, sourceFile), path.join(ORIG_DIR, targetFolder, next.file));
+    if (m.local) {
+      fs.mkdirSync(path.join(PREVIEWS_DIR, targetFolder), { recursive: true });
+      fs.mkdirSync(path.join(PREVIEWS_DIR, 'thumb', targetFolder), { recursive: true });
+      mvIfExists(path.join(PREVIEWS_DIR, series, oldPreview), path.join(PREVIEWS_DIR, targetFolder, newPreview));
+      mvIfExists(path.join(PREVIEWS_DIR, 'thumb', series, oldPreview), path.join(PREVIEWS_DIR, 'thumb', targetFolder, newPreview));
+    }
     source.materials.splice(index, 1);
     if (source.cover) source.cover = source.cover.filter(t => t !== title);
     m.series = targetFolder;
@@ -938,10 +955,8 @@ module.exports = function registerConsole(app, deps) {
     m.updatedAt = new Date().toISOString();
     target.materials.push(m);
     save('materials.json', data);
-    const oldPreview = title.replace(/\.[^.]+$/, '') + '.webp', newPreview = next.title.replace(/\.[^.]+$/, '') + '.webp';
     await ossMv('oss://onefig/previews/' + series + '/' + oldPreview, 'oss://onefig/previews/' + targetFolder + '/' + newPreview, false);
     syncBoardRefs([
-      { from: `/files/${series}/${sourceFile}`, to: `/files/${targetFolder}/${next.file}` },
       { from: `/previews/${series}/${oldPreview}`, to: `/previews/${targetFolder}/${newPreview}` },
     ]);
     res.json({ ok: true, material: m });
@@ -972,13 +987,18 @@ module.exports = function registerConsole(app, deps) {
         const sourceFile = m.file || title + '.png', next = reserveMoveTarget(target, title, sourceFile, targetFolder, !!m.local, reservedTitles, reservedFiles);
         planned.push({ source, m, series, title: next.title, originalTitle: title, file: next.file, sourceFile });
       }
-      fs.mkdirSync(path.join(FILES_DIR, targetFolder), { recursive: true });
       fs.mkdirSync(path.join(ORIG_DIR, targetFolder), { recursive: true });
       const moveFile = (from, to) => { if (fs.existsSync(from)) { fs.renameSync(from, to); fileMoves.push([from, to]); } };
       const now = new Date().toISOString();
       for (const item of planned) {
-        if (item.m.local) moveFile(path.join(FILES_DIR, item.series, item.sourceFile), path.join(FILES_DIR, targetFolder, item.file));
         moveFile(path.join(ORIG_DIR, item.series, item.sourceFile), path.join(ORIG_DIR, targetFolder, item.file));
+        if (item.m.local) {
+          const previewExt = item.sourceFile.toLowerCase().endsWith('.svg') ? '.svg' : '.webp', oldPreview = item.originalTitle + previewExt, newPreview = item.title + previewExt;
+          fs.mkdirSync(path.join(PREVIEWS_DIR, targetFolder), { recursive: true });
+          fs.mkdirSync(path.join(PREVIEWS_DIR, 'thumb', targetFolder), { recursive: true });
+          moveFile(path.join(PREVIEWS_DIR, item.series, oldPreview), path.join(PREVIEWS_DIR, targetFolder, newPreview));
+          moveFile(path.join(PREVIEWS_DIR, 'thumb', item.series, oldPreview), path.join(PREVIEWS_DIR, 'thumb', targetFolder, newPreview));
+        }
         item.source.materials.splice(item.source.materials.indexOf(item.m), 1);
         if (item.source.cover) item.source.cover = item.source.cover.filter(t => t !== item.originalTitle);
         item.m.series = targetFolder;
@@ -995,13 +1015,12 @@ module.exports = function registerConsole(app, deps) {
       return res.status(500).json({ ok: false, error: '批量移动失败，已恢复原数据：' + (e.message || '未知错误') });
     }
     for (const item of planned) {
-      const oldPreview = item.originalTitle.replace(/\.[^.]+$/, '') + '.webp', newPreview = item.title.replace(/\.[^.]+$/, '') + '.webp';
+      const previewExt = item.sourceFile.toLowerCase().endsWith('.svg') ? '.svg' : '.webp', oldPreview = item.originalTitle + previewExt, newPreview = item.title + previewExt;
       await ossMv('oss://onefig/previews/' + item.series + '/' + oldPreview, 'oss://onefig/previews/' + targetFolder + '/' + newPreview, false);
     }
     syncBoardRefs(planned.flatMap(item => {
-      const oldPreview = item.originalTitle.replace(/\.[^.]+$/, '') + '.webp', newPreview = item.title.replace(/\.[^.]+$/, '') + '.webp';
+      const previewExt = item.sourceFile.toLowerCase().endsWith('.svg') ? '.svg' : '.webp', oldPreview = item.originalTitle + previewExt, newPreview = item.title + previewExt;
       return [
-        { from: `/files/${item.series}/${item.sourceFile}`, to: `/files/${targetFolder}/${item.file}` },
         { from: `/previews/${item.series}/${oldPreview}`, to: `/previews/${targetFolder}/${newPreview}` },
       ];
     }));
@@ -1070,10 +1089,34 @@ module.exports = function registerConsole(app, deps) {
 
   // ---- 重命名：文件夹 / 素材（同步改 materials.json + 服务器文件目录 + OSS 预览图）----
   const { execFile } = require('child_process');
-  const FILES_DIR = path.join(DATA_DIR, 'files');
+  const PREVIEWS_DIR = path.join(process.env.ONEFIG_WEB_ROOT || '/opt/onefig-web', 'previews');
   const ORIG_DIR = path.join(DATA_DIR, 'originals');
   const cleanName = s => String(s || '').trim().replace(/[\\/:*?"<>|]/g, '');
   const mvIfExists = (a, b) => { try { if (fs.existsSync(a) && !fs.existsSync(b)) fs.renameSync(a, b); } catch {} };
+
+  // 管理员下载未经水印或格式转换的原始素材，便于后续修改；不消耗用户下载额度。
+  app.get('/console/api/materials/:series/:title/source', consoleAuth, (req, res) => {
+    const series = cleanName(req.params.series), title = cleanName(req.params.title);
+    if (!series || !title) return res.status(400).json({ ok: false, error: '素材参数不完整' });
+    const data = load('materials.json', []);
+    const s = data.find(x => x.folder === series);
+    const m = s && (s.materials || []).find(x => x.title === title);
+    if (!m) return res.status(404).json({ ok: false, error: '素材不存在' });
+    const sourceFile = String(m.file || title + '.png');
+    if (!sourceFile || sourceFile !== path.basename(sourceFile) || sourceFile === '.' || sourceFile === '..') {
+      return res.status(400).json({ ok: false, error: '源文件路径无效' });
+    }
+    const seriesDir = path.resolve(ORIG_DIR, series);
+    const fullPath = path.resolve(seriesDir, sourceFile);
+    if (!fullPath.startsWith(seriesDir + path.sep)) return res.status(400).json({ ok: false, error: '源文件路径无效' });
+    if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+      return res.status(404).json({ ok: false, error: '未找到源文件，可能是早期素材仅有预览图' });
+    }
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.download(fullPath, sourceFile);
+  });
+
   // OSS 改名 = 复制新名 + 删旧名；OSS 上没有对应对象时静默跳过（如本地上传的素材没有 OSS 预览图）
   const ossMv = (src, dst, isDir) => new Promise(resolve => {
     execFile('ossutil64', isDir ? ['cp', '-r', '-f', src, dst] : ['cp', '-f', src, dst], { timeout: 120000 }, e => {
@@ -1113,11 +1156,11 @@ module.exports = function registerConsole(app, deps) {
       fs.renameSync(from, to);
     };
     moveFolder(ORIG_DIR);
-    moveFolder(FILES_DIR);
+    moveFolder(PREVIEWS_DIR);
+    moveFolder(path.join(PREVIEWS_DIR, 'thumb'));
     if (archived) await ossMv('oss://onefig/previews/' + newN + '/', 'oss://onefig/previews/' + newN + '.deleted-' + stamp + '/', true);
     await ossMv('oss://onefig/previews/' + oldN + '/', 'oss://onefig/previews/' + newN + '/', true);
     syncBoardRefs([
-      { from: `/files/${oldN}/`, to: `/files/${newN}/` },
       { from: `/previews/${oldN}/`, to: `/previews/${newN}/` },
     ]);
     res.json({ ok: true, mergedArchived: !!archived });
@@ -1138,15 +1181,18 @@ module.exports = function registerConsole(app, deps) {
     const oldFile = m.file || oldT + '.png';
     const ext = oldFile.includes('.') ? oldFile.slice(oldFile.lastIndexOf('.')) : '.png';
     const newFile = newT + ext;
-    if (m.local) mvIfExists(path.join(FILES_DIR, series, oldFile), path.join(FILES_DIR, series, newFile));
+    const previewExt = ext.toLowerCase() === '.svg' ? '.svg' : '.webp';
     mvIfExists(path.join(ORIG_DIR, series, oldFile), path.join(ORIG_DIR, series, newFile));
+    if (m.local) {
+      mvIfExists(path.join(PREVIEWS_DIR, series, oldT + previewExt), path.join(PREVIEWS_DIR, series, newT + previewExt));
+      mvIfExists(path.join(PREVIEWS_DIR, 'thumb', series, oldT + previewExt), path.join(PREVIEWS_DIR, 'thumb', series, newT + previewExt));
+    }
     m.title = newT; m.id = series + '/' + newT; m.file = newFile;
     if (s.cover) s.cover = s.cover.map(t => t === oldT ? newT : t);
     save('materials.json', data);
-    await ossMv('oss://onefig/previews/' + series + '/' + oldT + '.webp', 'oss://onefig/previews/' + series + '/' + newT + '.webp', false);
+    await ossMv('oss://onefig/previews/' + series + '/' + oldT + previewExt, 'oss://onefig/previews/' + series + '/' + newT + previewExt, false);
     syncBoardRefs([
-      { from: `/files/${series}/${oldFile}`, to: `/files/${series}/${newFile}` },
-      { from: `/previews/${series}/${oldT}.webp`, to: `/previews/${series}/${newT}.webp` },
+      { from: `/previews/${series}/${oldT + previewExt}`, to: `/previews/${series}/${newT + previewExt}` },
     ]);
     res.json({ ok: true });
   });
@@ -1243,7 +1289,22 @@ module.exports = function registerConsole(app, deps) {
   });
 
   // ---------- 页面（公开访问，内含登录界面；数据接口均有 consoleAuth 保护） ----------
-  app.get(deps.ADMIN_PATH_FULL, (req, res) => res.send(PAGE));
+  // 输出编码与图片白名单是主修复；CSP 仅作为第二层防线，不能依赖 unsafe-inline 页面拦下所有注入。
+  const CONSOLE_CSP = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: https://onefig.oss-cn-hangzhou.aliyuncs.com http://onefig.oss-cn-hangzhou.aliyuncs.com",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+  app.get(deps.ADMIN_PATH_FULL, (req, res) => {
+    res.setHeader('Content-Security-Policy', CONSOLE_CSP);
+    res.send(PAGE);
+  });
   // 本地 8090 同时承载前台预览时，server.js 末尾的静态站点路由负责首页；
   // 生产环境仍把 / 指向后台入口。
   const servesLocalPreview = process.env.ONEFIG_ENV === 'test' && !!process.env.ONEFIG_WEB_ROOT;
@@ -1406,6 +1467,12 @@ select:focus,input:focus{border-color:#a78bfa}
 .login-card .sub{margin-bottom:20px}
 .login-card input{width:100%;margin-bottom:12px;padding:10px 12px}
 .login-card .btn{width:100%;padding:11px;font-size:14px}
+.login-pass-wrap{position:relative;margin-bottom:12px}
+.login-card .login-pass-wrap input{margin-bottom:0;padding-right:46px}
+.login-eye{position:absolute;right:2px;top:50%;transform:translateY(-50%);width:38px;height:38px;display:flex;align-items:center;justify-content:center;border:0;border-radius:7px;background:transparent;color:#8b84a3;cursor:pointer}
+.login-eye:hover{background:#f3f0fa;color:#6d4fb0}
+.login-eye:focus-visible{outline:2px solid #a78bfa;outline-offset:-2px}
+.login-eye svg{width:18px;height:18px;pointer-events:none}
 .login-err{color:#d6336c;font-size:12px;min-height:18px;margin-bottom:6px}
 .acct{margin-top:auto;background:rgba(255,255,255,.14);border-radius:12px;padding:9px 12px;font-size:12px;color:rgba(255,255,255,.88);display:flex;align-items:center;gap:6px}
 .acct button{margin-left:auto;padding:4px 10px;font-size:11px;background:rgba(255,255,255,.22);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600}
@@ -1446,7 +1513,13 @@ select:focus,input:focus{border-color:#a78bfa}
   <div class="sub">请登录后使用</div>
   <div class="login-err" id="loginErr"></div>
   <input id="loginUser" placeholder="账号" autocomplete="username" onkeydown="if(event.key==='Enter')doLogin()">
-  <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+  <div class="login-pass-wrap">
+    <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button type="button" class="login-eye" id="loginEye" onclick="toggleLoginPassword()" aria-label="显示密码" title="显示密码" aria-pressed="false">
+      <svg id="loginEyeOpen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.1 12s3.5-6 9.9-6 9.9 6 9.9 6-3.5 6-9.9 6-9.9-6-9.9-6Z"/><circle cx="12" cy="12" r="2.7"/></svg>
+      <svg id="loginEyeOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><path d="m3 3 18 18M10.6 6.1A11.5 11.5 0 0 1 12 6c6.4 0 9.9 6 9.9 6a16.5 16.5 0 0 1-2.2 2.8M6.2 6.2C3.5 8.1 2.1 12 2.1 12s3.5 6 9.9 6a10.7 10.7 0 0 0 4-.8M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+    </button>
+  </div>
   <button class="btn btn-p" onclick="doLogin()">登 录</button>
 </div></div>
 <script>
@@ -1456,6 +1529,15 @@ const PLANS={basic:'青果会员',pro:'红果会员',team:'金果会员'};
 const TK_KEY='onefig_console_token',NM_KEY='onefig_console_name';
 function getTK(){return localStorage.getItem(TK_KEY)||''}
 function setTK(t,n){if(t){localStorage.setItem(TK_KEY,t);localStorage.setItem(NM_KEY,n||'')}else{localStorage.removeItem(TK_KEY);localStorage.removeItem(NM_KEY)}}
+window.toggleLoginPassword=()=>{
+  const input=document.getElementById('loginPass'),button=document.getElementById('loginEye'),show=input.type==='password';
+  input.type=show?'text':'password';
+  const label=show?'隐藏密码':'显示密码';
+  button.setAttribute('aria-label',label);button.setAttribute('title',label);button.setAttribute('aria-pressed',String(show));
+  document.getElementById('loginEyeOpen').style.display=show?'none':'block';
+  document.getElementById('loginEyeOff').style.display=show?'block':'none';
+  input.focus();
+};
 window.logout=()=>{setTK('');document.getElementById('loginMask').style.display='flex'};
 window.doLogin=async()=>{
   const u=document.getElementById('loginUser').value.trim(),p=document.getElementById('loginPass').value;
@@ -1478,11 +1560,21 @@ async function api(u,opt){
   const j=await r.json();if(!j.ok)throw new Error(j.error||'操作失败');return j;
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+// 所有进入后台 <img> 的地址先做白名单，再做属性转义；历史脏数据也只能落到占位图。
+function safeImgSrc(raw){
+  const s=String(raw||'');
+  if(/^data:image\\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(s))return s;
+  if(/^\\/console\\/api\\/export-records\\/img\\?id=[A-Za-z0-9-]+&t=[A-Za-z0-9._-]+$/.test(s))return s;
+  if(/^\\/api\\/fig-assets\\/[A-Za-z0-9._-]+\\?t=[A-Za-z0-9._-]+$/.test(s))return s;
+  if(/^\\/previews\\/[\\w%./?=&-]+$/.test(s))return s;
+  if(/^https?:\\/\\/onefig\\.oss-cn-hangzhou\\.aliyuncs\\.com\\/previews\\/[\\w%./?=&-]+$/.test(s))return s;
+  return '/brand/icon.png';
+}
 function yuan(n){return '¥'+Number(n).toLocaleString('zh-CN',{minimumFractionDigits:1,maximumFractionDigits:1})}
 function fmtSize(b){b=Number(b)||0;if(!b)return '—';return b>=1048576?(b/1048576).toFixed(1)+' MB':Math.max(1,Math.round(b/1024))+' KB'}
 function fmtT(t){if(!t)return '—';if(/^\d{4}-\d{2}-\d{2}$/.test(t))return t;const d=new Date(t);if(isNaN(d))return t;const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())}
 const OSS_P='${OSS}';
-function matImg(m){return m.local?'/files/'+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.file||(m.title+'.png')):OSS_P+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.title)+'.webp'}
+function matImg(m){const f=m.file||(m.title+'.png');if(m.series==='Fig')return '/api/fig-assets/'+encodeURIComponent(f)+'?t='+encodeURIComponent(getTK());const preview=f.replace(/\.[^.]+$/,f.toLowerCase().endsWith('.svg')?'.svg':'.webp');return m.local?'/previews/'+encodeURIComponent(m.series)+'/'+encodeURIComponent(preview):OSS_P+encodeURIComponent(m.series)+'/'+encodeURIComponent(preview)}
 function showModal(html){const m=document.getElementById('modal');m.style.width='';m.style.height='auto';m.style.maxHeight='86vh';m.style.overflowY='auto';delete m.dataset.nav;m.innerHTML=html;document.getElementById('mask').style.display='flex'}
 /* 大图浏览：支持左右箭头 + 键盘 ← →，Escape 关闭；条目可为 {src,t} 带标题 */
 let VIEW_LIST=[],VIEW_I=0,CUR_IMGS=[],REQ_IMGS=[],MODAL_BACK=null;
@@ -1495,10 +1587,10 @@ window.viewMatList=(list,i)=>{
 };
 window.viewNav=d=>{if(document.getElementById('modal').dataset.nav!=='1')return;const n=VIEW_LIST.length;if(!n)return;VIEW_I=(VIEW_I+d+n)%n;renderView()};
 function renderView(){
-  const it=VIEW_LIST[VIEW_I],src=it.src||it,t=it.t||'',multi=VIEW_LIST.length>1;
+  const it=VIEW_LIST[VIEW_I],src=safeImgSrc(it.src||it),t=it.t||'',multi=VIEW_LIST.length>1;
   showModal('<div class="viewer-shell">'
     +(t?'<div class="viewer-title">'+esc(t)+'</div>':'')
-    +'<div class="viewer-image-wrap"><img src="'+src+'" alt="'+esc(t)+'"></div>'
+    +'<div class="viewer-image-wrap"><img src="'+esc(src)+'" alt="'+esc(t)+'"></div>'
     +(multi?'<button class="vnav" style="left:20px" onclick="viewNav(-1)" aria-label="上一张">‹</button><button class="vnav" style="right:20px" onclick="viewNav(1)" aria-label="下一张">›</button>':'')
     +(multi?'<div class="viewer-count">'+(VIEW_I+1)+' / '+VIEW_LIST.length+'</div>':'')
     +'</div>');
@@ -1758,7 +1850,7 @@ H.materials=async()=>{
     const sd=s.series.find(x=>x.folder===matView.series) || {materials:[]};
     const ms=activeOf(sd);CUR_IMGS=ms.map(m=>({src:matImg(m),t:m.title}));
     return '<div class="toolbar"><button class="btn btn-g" onclick="closeSeries()">← 返回</button><h2>🎨 '+esc(matView.series)+'</h2>'+(sortMode?'<span class="sub" style="margin:0 0 0 6px;color:#7c5cbf;font-weight:600;font-size:12px">⇅ 排序模式：点击素材可多选，拖动已选素材可整组换位，也可整组放到最后。松手即保存，前台同步生效。</span>':'')+'<div class="sp"></div>'+sortBtn()+'<span data-batch-toolbar>'+batchMoveToolbar()+'</span><button class="btn btn-p" onclick="addMatModal()">＋ 添加素材</button></div>\
-    <div class="grid" data-material-grid>'+ms.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'" data-material-card onclick="cardToggleMaterial(\\''+m.series+'\\',\\''+m.title+'\\',event)"'+(sortMode?' draggable="true" ondragstart="mDrag(event,\\''+m.title+'\\')" ondragover="event.preventDefault()" ondrop="mDrop(event,\\''+m.title+'\\')"':'')+'><input type="checkbox" class="mat-check" data-material-select data-series="'+esc(m.series)+'" data-title="'+esc(m.title)+'" '+(moveSelection.has(m.series+'/'+m.title)?'checked':'')+' onclick="event.preventDefault();event.stopPropagation();cardToggleMaterial(\\''+m.series+'\\',\\''+m.title+'\\',event)"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+'><div class="t" title="双击改名" ondblclick="event.stopPropagation();renameMatInline(\\''+matView.series+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" onclick="event.stopPropagation();viewMatList(CUR_IMGS,'+i+')">预览</button> <button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="event.stopPropagation();toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-g btn-xs mat-del" data-move-material="'+esc(m.title)+'" onclick="event.stopPropagation();moveMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">移动</button> <button class="btn btn-d btn-xs mat-del" onclick="event.stopPropagation();delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>'+(sortMode?'<div class="folder-end-drop mat-end-drop" data-batch-sort-end ondragover="event.preventDefault()" ondrop="mDropEnd(event)">将所选素材放到最后</div>':'');
+    <div class="grid" data-material-grid>'+ms.map((m,i)=>'<div class="mat'+(sortMode?' sorting':'')+'" data-material-card onclick="cardToggleMaterial(\\''+m.series+'\\',\\''+m.title+'\\',event)"'+(sortMode?' draggable="true" ondragstart="mDrag(event,\\''+m.title+'\\')" ondragover="event.preventDefault()" ondrop="mDrop(event,\\''+m.title+'\\')"':'')+'><input type="checkbox" class="mat-check" data-material-select data-series="'+esc(m.series)+'" data-title="'+esc(m.title)+'" '+(moveSelection.has(m.series+'/'+m.title)?'checked':'')+' onclick="event.preventDefault();event.stopPropagation();cardToggleMaterial(\\''+m.series+'\\',\\''+m.title+'\\',event)"><img src="'+matImg(m)+'" onerror="this.style.opacity=.2"'+'><div class="t" title="双击改名" ondblclick="event.stopPropagation();renameMatInline(\\''+matView.series+'\\',\\''+m.title+'\\',this)">'+esc(m.title)+'</div><div class="dl">⬇ '+m.downloads+' · '+fmtSize(m.size)+'</div>'+(sortMode?'':'<button class="btn btn-g btn-xs mat-del" onclick="event.stopPropagation();viewMatList(CUR_IMGS,'+i+')">预览</button> <button class="btn btn-g btn-xs mat-del" style="'+(m.featured?'display:inline-block;color:#b45309;background:#fef3c7':'')+'" onclick="event.stopPropagation();toggleFeature(\\'material\\',\\''+m.series+'\\',\\''+m.title+'\\','+!m.featured+')">'+(m.featured?'⭐ 已精选':'☆ 精选')+'</button> <button class="btn btn-g btn-xs mat-del" data-download-source="'+esc(m.title)+'" onclick="event.stopPropagation();downloadMatSource(\\''+m.series+'\\',\\''+m.title+'\\',this)">源文件</button> <button class="btn btn-g btn-xs mat-del" data-move-material="'+esc(m.title)+'" onclick="event.stopPropagation();moveMatModal(\\''+m.series+'\\',\\''+m.title+'\\')">移动</button> <button class="btn btn-d btn-xs mat-del" onclick="event.stopPropagation();delMat(\\''+m.series+'\\',\\''+m.title+'\\')">删除</button>')+'</div>').join('')+'</div>'+(sortMode?'<div class="folder-end-drop mat-end-drop" data-batch-sort-end ondragover="event.preventDefault()" ondrop="mDropEnd(event)">将所选素材放到最后</div>':'');
   }
   const removed=await api('/console/api/materials/removed').catch(()=>({list:[]}));
   const removedHtml=removed.list.length
@@ -1787,6 +1879,20 @@ window.moveMatModal=(series,title)=>{
 window.doMoveMat=async(series,title)=>{
   const targetFolder=document.getElementById('m-move-target').value;
   try{await api('/console/api/materials/move',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series,title,targetFolder})});moveSelection.clear();closeModal();toast('已移动到 '+targetFolder+' ✅');route()}catch(e){toast(e.message)}
+};
+window.downloadMatSource=async(series,title,button)=>{
+  const oldText=button.textContent;button.disabled=true;button.textContent='下载中…';
+  try{
+    const r=await fetch('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title)+'/source',{headers:{Authorization:'Bearer '+getTK()}});
+    if(r.status===401){logout();throw new Error('登录已过期，请重新登录')}
+    if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||'源文件下载失败')}
+    const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');
+    const disposition=r.headers.get('Content-Disposition')||'',match=disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    let fileName='';if(match){try{fileName=decodeURIComponent(match[1])}catch{}}
+    if(!fileName){const s=(MAT_DATA?.series||[]).find(x=>x.folder===series),m=s&&(s.materials||[]).find(x=>x.title===title);fileName=(m&&m.file)||title+'.png'}
+    a.href=url;a.download=fileName;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    toast('源文件已下载 ✅');
+  }catch(e){toast(e.message)}finally{button.disabled=false;button.textContent=oldText}
 };
 window.delMat=async(series,title)=>{if(!confirm('确定下架「'+title+'」吗？\\n下架只隐藏前台展示，历史下载的授权码仍可验真。'))return;await api('/console/api/materials/'+encodeURIComponent(series)+'/'+encodeURIComponent(title),{method:'DELETE'});toast('已下架，授权码仍可验真');route()};
 window.toggleFeature=async(kind,folder,title,on)=>{try{await api('/console/api/materials/feature',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,folder,title,on})});toast(on?'⭐ 已加入首页精选':'已取消首页精选');route()}catch(e){toast(e.message)}};
@@ -2013,13 +2119,14 @@ window.userDetail=async(id)=>{
   window.DL_IMGS=[];
   const dlRows=(d.downloads&&d.downloads.length)
     ?d.downloads.map(m=>{
-      const src=(m.kind==='export'
+      const rawSrc=(m.kind==='export'
         ? (m.exportId?'/console/api/export-records/img?id='+encodeURIComponent(m.exportId)+'&t='+getTK():(m.thumb||''))
-        : (m.local?'/files/'+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.file):OSS_P+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.title)+'.webp'))||'/brand/icon.png';
+        : (m.local?'/previews/'+encodeURIComponent(m.series)+'/'+encodeURIComponent(String(m.file||m.title+'.png').replace(/\.[^.]+$/,String(m.file||m.title+'.png').toLowerCase().endsWith('.svg')?'.svg':'.webp')):OSS_P+encodeURIComponent(m.series)+'/'+encodeURIComponent(m.title)+'.webp'))||'/brand/icon.png';
+      const src=safeImgSrc(rawSrc);
       const sub=m.kind==='export'?'画板导出':m.folder;
       DL_IMGS.push({src:src,t:m.title});
       const i=DL_IMGS.length-1;
-      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 2px;border-bottom:1px solid #f1eef9"><img src="'+src+'" onerror="this.style.opacity=.2" onclick="viewMatList(DL_IMGS,'+i+')" style="width:56px;height:56px;object-fit:contain;background:#f4f2fa;border-radius:8px;cursor:zoom-in;flex:none"><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(m.title)+'">'+esc(m.title)+'</div><div class="sub" style="font-size:12px">'+esc(sub)+' · '+fmtT(m.time)+(m.licenseStatus==='退款回收'?' · <b style="color:#d6336c">退款回收</b>':'')+'</div></div>'+(m.code?'<button class="btn btn-g btn-xs" title="点击复制授权码" onclick="cpTxt(\\''+m.code+'\\')">🔑 '+esc(m.code)+'</button>':'<span style="color:#b0aac4;font-size:12px">无授权码</span>')+'</div>'}).join('')
+      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 2px;border-bottom:1px solid #f1eef9"><img src="'+esc(src)+'" onerror="this.style.opacity=.2" onclick="viewMatList(DL_IMGS,'+i+')" style="width:56px;height:56px;object-fit:contain;background:#f4f2fa;border-radius:8px;cursor:zoom-in;flex:none"><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(m.title)+'">'+esc(m.title)+'</div><div class="sub" style="font-size:12px">'+esc(sub)+' · '+fmtT(m.time)+(m.licenseStatus==='退款回收'?' · <b style="color:#d6336c">退款回收</b>':'')+'</div></div>'+(m.code?'<button class="btn btn-g btn-xs" title="点击复制授权码" onclick="cpTxt(\\''+m.code+'\\')">🔑 '+esc(m.code)+'</button>':'<span style="color:#b0aac4;font-size:12px">无授权码</span>')+'</div>'}).join('')
     :'<div style="text-align:center;color:#b0aac4;padding:20px">还没有下载记录</div>';
   const coListRows=(d.creditOrders&&d.creditOrders.length)
     ?d.creditOrders.map(o=>{
@@ -2036,11 +2143,11 @@ window.userDetail=async(id)=>{
       const channel=/wechat|微信/i.test(rawChannel)?'微信支付':/alipay|支付宝/i.test(rawChannel)?'支付宝':(rawChannel||'未知');
       const merchantNo=String(o.outTradeNo||String(o.id||'').replace(/-/g,''));
       const providerNo=String(o.transactionId||'');
-      const merchantCell='<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(merchantNo)+'</div><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+merchantNo+'\\')">复制商户单号</button>';
-      const providerCell=providerNo?'<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(providerNo)+'</div><button class="btn btn-g btn-xs" onclick="cpTxt(\\''+providerNo+'\\')">复制交易号</button>':'<span style="color:#b0aac4">未记录</span>';
+      const merchantCell='<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(merchantNo)+'</div><button class="btn btn-g btn-xs" data-copy="'+esc(merchantNo)+'" onclick="cpTxt(this.dataset.copy)">复制商户单号</button>';
+      const providerCell=providerNo?'<div style="font-family:monospace;font-size:11px;word-break:break-all">'+esc(providerNo)+'</div><button class="btn btn-g btn-xs" data-copy="'+esc(providerNo)+'" onclick="cpTxt(this.dataset.copy)">复制交易号</button>':'<span style="color:#b0aac4">未记录</span>';
       const licenseCode=String(o.licenseCode||o.exportCode||(o.refundedLicenseCodes&&o.refundedLicenseCodes[0])||'');
-      const licenseCell=(o.kind==='export'||o.kind==='single')?'<div class="sub" style="margin-top:4px">授权码：'+(licenseCode?'<span style="font-family:monospace">'+esc(licenseCode)+'</span> <button class="btn btn-g btn-xs" title="复制授权码" onclick="cpTxt(\\''+licenseCode+'\\')">复制</button>':'<span style="color:#b0aac4">未生成/未绑定</span>')+'</div>':'';
-      const orderImg=o.preview?o.preview+(o.preview.indexOf('/console/api/')===0?'&t='+getTK():''):(o.kind==='single'&&o.previewFile?(o.previewLocal?'/files/'+encodeURIComponent(o.previewSeries)+'/'+encodeURIComponent(o.previewFile):OSS_P+encodeURIComponent(o.previewSeries)+'/'+encodeURIComponent(o.previewFile.replace(/\.png$/,'.webp'))):'');
+      const licenseCell=(o.kind==='export'||o.kind==='single')?'<div class="sub" style="margin-top:4px">授权码：'+(licenseCode?'<span style="font-family:monospace">'+esc(licenseCode)+'</span> <button class="btn btn-g btn-xs" title="复制授权码" data-copy="'+esc(licenseCode)+'" onclick="cpTxt(this.dataset.copy)">复制</button>':'<span style="color:#b0aac4">未生成/未绑定</span>')+'</div>':'';
+      const orderImg=o.preview?o.preview+(o.preview.indexOf('/console/api/')===0?'&t='+getTK():''):(o.kind==='single'&&o.previewFile?(o.previewLocal?'/previews/'+encodeURIComponent(o.previewSeries)+'/'+encodeURIComponent(o.previewFile.replace(/\.[^.]+$/,o.previewFile.toLowerCase().endsWith('.svg')?'.svg':'.webp')):OSS_P+encodeURIComponent(o.previewSeries)+'/'+encodeURIComponent(o.previewFile.replace(/\.png$/,'.webp'))):'');
       const previewImg=orderImg?'<img src="'+esc(orderImg)+'" alt="'+esc(o.materialTitle||type)+'" onclick="viewMat(this.src)" style="width:58px;height:58px;object-fit:contain;background:#f4f2fa;border-radius:8px;cursor:zoom-in;flex:none" onerror="this.style.visibility=\\'hidden\\'">':'';
       const action=o.status==='paid'?'<button class="btn btn-g btn-xs" onclick="refundOrder(\\''+o.id+'\\')">退款回收</button>':o.status==='refunded'?'<button class="btn btn-g btn-xs" onclick="undoRefundOrder(\\''+o.id+'\\')">撤销退款</button>':'<span style="color:#b0aac4">—</span>';
       return '<tr><td><div style="display:flex;align-items:center;gap:10px">'+previewImg+'<div style="min-width:0">'+esc(type)+(o.materialTitle?'<div class="sub">'+esc(o.materialTitle)+'</div>':'')+licenseCell+'</div></div></td><td>'+merchantCell+'</td><td>'+providerCell+'</td><td style="color:'+color+';font-weight:600">'+esc(status)+'</td><td>'+esc(channel)+'</td><td>'+yuan(o.amount)+'</td><td>'+fmtT(o.paidAt||o.createdAt)+'</td><td>'+action+'</td></tr>'}).join('')
@@ -2271,19 +2378,24 @@ function invSelectedText(){return '下载已选（'+INV_SELECTED.size+'）'}
 H.invoices=async()=>{
   const d=await api('/console/api/invoices?'+invQuery('filter'));
   INV_ROWS=d.list;
+  const statusName={pending:'待处理',issued:'已开具',rejected:'已驳回',red_flushed:'已红冲'};
   const rows=INV_ROWS.length?INV_ROWS.map(r=>{
     const checked=INV_SELECTED.has(r.id)?' checked':'';
     const business=r.businessType==='MATERIAL_LICENSE'?'素材使用授权':'画板导出服务';
     const buyer=r.buyerType==='company'?'单位':'个人';
     const exported=r.exportStatus==='exported';
+    const actions=r.status==='pending'
+      ?'<div style="margin-top:6px;white-space:nowrap"><button class="btn btn-p btn-xs" onclick="invProcess(\\''+r.id+'\\',\\'issued\\')">标记已开具</button> <button class="btn btn-g btn-xs" onclick="invProcess(\\''+r.id+'\\',\\'rejected\\')">驳回</button></div>'
+      :(r.status==='issued'?'<div style="margin-top:6px"><button class="btn btn-g btn-xs" onclick="invProcess(\\''+r.id+'\\',\\'red_flushed\\')">红冲</button></div>':'');
     return '<tr><td><input type="checkbox" data-inv-check="'+esc(r.id)+'"'+checked+' onchange="invToggle(\\''+r.id+'\\',this.checked)"></td>'
       +'<td><b>'+esc(r.title)+'</b><div class="sub" style="margin:4px 0 0">'+esc(r.taxId||'个人抬头')+'</div><div style="font-size:12px;color:#8b84a3;margin-top:3px">'+esc(r.email)+'</div></td>'
       +'<td><b>'+esc(r.orderTitle)+'</b><div style="font-size:12px;color:#8b84a3;margin-top:4px">'+business+' · '+esc(r.orderId)+'</div></td>'
       +'<td>'+buyer+'<div style="font-size:12px;color:#8b84a3;margin-top:4px">'+(r.invoiceType==='special'?'专用发票':'普通发票')+'</div></td>'
       +'<td><b>'+yuan(r.amount)+'</b></td>'
+      +'<td><span class="tag">'+esc(statusName[r.status]||r.status)+'</span>'+actions+(r.invoiceNumber?'<div class="sub" style="margin-top:4px">'+esc(r.invoiceNumber)+'</div>':'')+'</td>'
       +'<td><span class="'+(exported?'tag done2':'tag')+'">'+(exported?'已导出':'未导出')+'</span><div style="font-size:11px;color:#8b84a3;margin-top:4px">'+(exported?fmtT(r.lastExportedAt)+' · 第 '+(r.exportCount||1)+' 次':'—')+'</div></td>'
       +'<td style="white-space:nowrap">'+fmtT(r.createdAt)+'<div style="font-size:11px;color:#8b84a3;margin-top:4px">'+esc(r.id)+'</div></td></tr>';
-  }).join(''):'<tr><td colspan="7" style="text-align:center;color:#b0aac4;padding:28px">当前筛选条件下没有开票申请</td></tr>';
+  }).join(''):'<tr><td colspan="8" style="text-align:center;color:#b0aac4;padding:28px">当前筛选条件下没有开票申请</td></tr>';
   return '<div class="toolbar"><h2>🧾 发票管理</h2><div class="sp"></div><button class="btn btn-g" onclick="route()">🔄 刷新</button></div>'
     +'<div class="panel"><div class="toolbar">'
     +'<select id="inv-status"><option value="all"'+(INV_FILTER.status==='all'?' selected':'')+'>全部状态</option><option value="pending"'+(INV_FILTER.status==='pending'?' selected':'')+'>待处理</option><option value="issued"'+(INV_FILTER.status==='issued'?' selected':'')+'>已开具</option><option value="rejected"'+(INV_FILTER.status==='rejected'?' selected':'')+'>已驳回</option><option value="red_flushed"'+(INV_FILTER.status==='red_flushed'?' selected':'')+'>已红冲</option></select>'
@@ -2293,7 +2405,23 @@ H.invoices=async()=>{
     +'<button class="btn btn-p" onclick="invSearch()">查询</button><button class="btn btn-g" onclick="invReset()">重置</button></div>'
     +'<div class="toolbar" style="margin-bottom:0"><span class="sub" style="margin:0">共 '+d.total+' 条申请；选中导出后自动标记为已导出</span><div class="sp"></div>'
     +'<button class="btn btn-g" onclick="invSelectUnexported()">全选未导出</button><button class="btn btn-g" onclick="invExport(\\'filter\\')">下载筛选结果</button><button class="btn btn-p" id="inv-selected-btn" onclick="invExport(\\'selected\\')">'+invSelectedText()+'</button></div></div>'
-    +'<div class="panel" style="overflow:auto"><table><tr><th><input type="checkbox" onchange="invToggleAll(this.checked)" title="全选当前列表"></th><th>购买方 / 接收邮箱</th><th>订单 / 业务类型</th><th>抬头 / 发票类型</th><th>金额</th><th>导出状态</th><th>申请时间 / 编号</th></tr>'+rows+'</table></div>';
+    +'<div class="panel" style="overflow:auto"><table><tr><th><input type="checkbox" onchange="invToggleAll(this.checked)" title="全选当前列表"></th><th>购买方 / 接收邮箱</th><th>订单 / 业务类型</th><th>抬头 / 发票类型</th><th>金额</th><th>处理状态 / 操作</th><th>导出状态</th><th>申请时间 / 编号</th></tr>'+rows+'</table></div>';
+};
+window.invProcess=async(id,status)=>{
+  let invoiceNumber='',statusNote='';
+  if(status==='issued'){
+    invoiceNumber=String(prompt('请输入实际发票号码')||'').trim();
+    if(!invoiceNumber)return toast('必须填写发票号码才能标记已开具');
+  }
+  if(status==='rejected')statusNote=String(prompt('请输入驳回原因（选填）')||'').trim();
+  if(status==='red_flushed'){
+    if(!confirm('确认该发票已完成红冲？此操作会保留审计记录'))return;
+    statusNote=String(prompt('红冲备注（选填）')||'').trim();
+  }
+  try{
+    await api('/console/api/invoices/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status,invoiceNumber,statusNote})});
+    toast('发票状态已更新');await route();
+  }catch(e){toast(e.message)}
 };
 window.invSearch=()=>{
   INV_FILTER.status=document.getElementById('inv-status').value;

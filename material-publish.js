@@ -4,8 +4,9 @@ const path = require('path');
 const crypto = require('crypto');
 const sharp = require('sharp');
 
-const WATERMARK_FILE = path.join(__dirname, 'assets', 'wm-unit.png');
-const WATERMARK_OPACITY = 0.20;
+// 与前端 WatermarkOverlay 完全一致：同一图片、4% 透明度、按图片高度居中铺放。
+const WATERMARK_FILE = path.join(__dirname, 'assets', 'watermark.png');
+const WATERMARK_OPACITY = 0.04;
 const MAX_SVG_BYTES = 10 * 1024 * 1024;
 
 // 管理端上传的 SVG 只做必要的安全清理，保留 Illustrator 的图层、渐变与可编辑结构。
@@ -15,7 +16,7 @@ function sanitizeSvg(input) {
     .replace(/<\?xml[^>]*\?>/gi, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<\s*(script|foreignObject|iframe|object|embed|audio|video)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
-    .replace(/<\s*(script|foreignObject|iframe|object|embed|audio|video)\b[^>]*\/\s*>/gi, '')
+    .replace(/<\s*(script|foreignObject|iframe|object|embed|audio|video)\b[^>]*\/>/gi, '')
     .replace(/\s+on[a-z-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/\s+(?:href|xlink:href|src)\s*=\s*(["'])\s*(?:javascript:|https?:|\/\/)[\s\S]*?\1/gi, '')
     .replace(/url\(\s*(?:javascript:|https?:|\/\/)[^)]*\)/gi, '')
@@ -35,54 +36,50 @@ async function watermarkUnit(width, height) {
 async function makeWatermarked(cleanPath, outputPath) {
   const source = sharp(cleanPath);
   const { width: w, height: h } = await source.metadata();
-  const scale = Math.min(220 / w, 330 / h);
-  const tw = Math.max(60, Math.round(120 / Math.max(scale, 0.05)));
-  const unit = await sharp(WATERMARK_FILE).metadata();
-  const th = Math.round(tw * unit.height / unit.width);
-  const sx = Math.round(tw * 1.5), sy = Math.round(th * 2.2);
-  const tile = await watermarkUnit(tw, th);
-  const cx = w / 2, cy = h / 2;
-  const ax = (cx - tw / 2) % sx, ay = (cy - th / 2) % sy;
-  const rows = [];
-  for (let y = ay - sy; y < h; y += sy) rows.push(y);
-  const center = rows.reduce((best, y, i) => Math.abs(y + th / 2 - cy) < Math.abs(rows[best] + th / 2 - cy) ? i : best, 0);
-  const composite = [];
-  for (let i = 0; i < rows.length; i++) {
-    const xOffset = (i - center) % 2 ? sx / 2 : 0;
-    for (let x = ax - sx + xOffset; x < w; x += sx) {
-      const rx = Math.round(x), ry = Math.round(rows[i]);
-      const left = Math.max(0, rx), top = Math.max(0, ry);
-      const cropLeft = Math.max(0, -rx), cropTop = Math.max(0, -ry);
-      const right = Math.min(w, rx + tw), bottom = Math.min(h, ry + th);
-      const width = right - left, height = bottom - top;
-      if (width <= 0 || height <= 0) continue;
-      // 小图或边缘单元需要裁切，sharp 不允许直接把更大的单元叠到画布外。
-      const input = cropLeft || cropTop || width !== tw || height !== th
-        ? await sharp(tile).extract({ left: cropLeft, top: cropTop, width, height }).toBuffer()
-        : tile;
-      composite.push({ input, left, top });
-    }
-  }
-  await source.composite(composite).webp({ quality: 85, alphaQuality: 90, effort: 5 }).toFile(outputPath);
+  if (!w || !h) throw new Error('无法读取图片尺寸');
+  // 对应 CSS：background-size: auto 100%; background-position: center; opacity: 0.04。
+  const tile = await watermarkUnit(h, h);
+  const rx = Math.round((w - h) / 2);
+  const left = Math.max(0, rx), cropLeft = Math.max(0, -rx);
+  const right = Math.min(w, rx + h);
+  const width = right - left;
+  if (width <= 0) throw new Error('图片尺寸不支持水印铺放');
+  const input = cropLeft || width !== h
+    ? await sharp(tile).extract({ left: cropLeft, top: 0, width, height: h }).toBuffer()
+    : tile;
+  await source.composite([{ input, left, top: 0 }]).webp({ quality: 85, alphaQuality: 90, effort: 5 }).toFile(outputPath);
 }
 
-async function publishLocalMaterial({ sourcePath, series, title, ext, dataDir, webRoot, filesDir, originalsDir, commit }) {
+// SVG 保留原始矢量节点，只在末尾追加同样的 4% 水印，不经过位图栅格化。
+async function makeSvgWatermarked(sourcePath, outputPath) {
+  const clean = sanitizeSvg(fs.readFileSync(sourcePath, 'utf8'));
+  const { width: w, height: h } = await sharp(sourcePath, { limitInputPixels: 60_000_000 }).metadata();
+  if (!w || !h) throw new Error('SVG 缺少可识别的尺寸或 viewBox');
+  const encoded = fs.readFileSync(WATERMARK_FILE).toString('base64');
+  const x = (w - h) / 2;
+  const overlay = `<image href="data:image/png;base64,${encoded}" x="${x}" y="0" width="${h}" height="${h}" opacity="${WATERMARK_OPACITY}" preserveAspectRatio="xMidYMid meet" pointer-events="none" />`;
+  const output = clean.replace(/<\/svg>\s*$/, `${overlay}</svg>`);
+  fs.writeFileSync(outputPath, output);
+}
+
+async function publishLocalMaterial({ sourcePath, series, title, ext, dataDir, webRoot, originalsDir, commit }) {
   if (!series || !title || series.includes('..') || title.includes('..') || /[\\/]/.test(series + title)) throw new Error('素材路径无效');
+  const isSvg = String(ext).toLowerCase() === '.svg';
+  const previewExt = isSvg ? '.svg' : '.webp';
   const cleanDir = path.join(dataDir, 'clean-previews');
   const previewDir = path.join(webRoot, 'previews');
   const stage = path.join(dataDir, 'staging', crypto.randomUUID());
   const backup = path.join(dataDir, 'backups', 'material-upload', `${Date.now()}-${crypto.randomUUID()}`);
   const originalName = title + ext;
-  const previewName = title + '.webp';
+  const previewName = title + previewExt;
   const staged = {
     original: path.join(stage, originalName),
-    clean: path.join(stage, 'clean.webp'),
-    public: path.join(stage, 'public.webp'),
-    thumb: path.join(stage, 'thumb.webp'),
+    clean: path.join(stage, 'clean' + previewExt),
+    public: path.join(stage, 'public' + previewExt),
+    thumb: path.join(stage, 'thumb' + previewExt),
   };
   const targets = {
     original: path.join(originalsDir, series, originalName),
-    files: path.join(filesDir, series, originalName),
     clean: path.join(cleanDir, series, previewName),
     public: path.join(previewDir, series, previewName),
     thumb: path.join(previewDir, 'thumb', series, previewName),
@@ -95,9 +92,15 @@ async function publishLocalMaterial({ sourcePath, series, title, ext, dataDir, w
     // 完整解码校验，顺便限制异常像素图；原图字节不重编码、不压缩。
     const meta = await sharp(staged.original, { limitInputPixels: 60_000_000 }).metadata();
     if (!meta.width || !meta.height || meta.width * meta.height > 60_000_000) throw new Error('图片像素超出限制');
-    await sharp(staged.original).webp({ quality: 90, alphaQuality: 90, effort: 6 }).toFile(staged.clean);
-    await makeWatermarked(staged.clean, staged.public);
-    await sharp(staged.public).resize(480).webp({ quality: 70, alphaQuality: 60, effort: 6 }).toFile(staged.thumb);
+    if (isSvg) {
+      fs.writeFileSync(staged.clean, sanitizeSvg(fs.readFileSync(staged.original, 'utf8')));
+      await makeSvgWatermarked(staged.clean, staged.public);
+      fs.copyFileSync(staged.public, staged.thumb);
+    } else {
+      await sharp(staged.original).webp({ quality: 90, alphaQuality: 90, effort: 6 }).toFile(staged.clean);
+      await makeWatermarked(staged.clean, staged.public);
+      await sharp(staged.public).resize(480).webp({ quality: 70, alphaQuality: 60, effort: 6 }).toFile(staged.thumb);
+    }
 
     fs.mkdirSync(backup, { recursive: true });
     for (const [key, target] of Object.entries(targets)) {
@@ -108,7 +111,7 @@ async function publishLocalMaterial({ sourcePath, series, title, ext, dataDir, w
         previous.set(key, old);
       }
     }
-    const stagedFor = { original: staged.original, files: staged.original, clean: staged.clean, public: staged.public, thumb: staged.thumb };
+    const stagedFor = { original: staged.original, clean: staged.clean, public: staged.public, thumb: staged.thumb };
     for (const [key, target] of Object.entries(targets)) {
       fs.copyFileSync(stagedFor[key], target);
       published.push(key);
@@ -131,4 +134,4 @@ async function publishLocalMaterial({ sourcePath, series, title, ext, dataDir, w
   }
 }
 
-module.exports = { publishLocalMaterial, sanitizeSvg };
+module.exports = { publishLocalMaterial, sanitizeSvg, makeWatermarked, makeSvgWatermarked };

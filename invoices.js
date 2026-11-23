@@ -159,6 +159,38 @@ module.exports = function registerInvoices(app, deps) {
       return '"' + text.replace(/"/g, '""') + '"';
     };
 
+    const TRANSITIONS = {
+      pending: ['issued', 'rejected'],
+      issued: ['red_flushed'],
+      rejected: [],
+      red_flushed: [],
+    };
+    app.patch('/console/api/invoices/:id', consoleAuth, (req, res) => {
+      const all = loadInvoices();
+      const row = all.find(item => item.id === req.params.id);
+      if (!row) return res.status(404).json({ ok: false, error: '申请不存在' });
+      const previousStatus = row.status;
+      const next = clean((req.body || {}).status, 30);
+      if (!TRANSITIONS[row.status] || !TRANSITIONS[row.status].includes(next)) {
+        return res.status(400).json({ ok: false, error: `不能从 ${row.status} 改为 ${next}` });
+      }
+      const statusNote = clean((req.body || {}).statusNote, 300);
+      const invoiceNumber = clean((req.body || {}).invoiceNumber, 80);
+      if (next === 'issued' && !invoiceNumber) {
+        return res.status(400).json({ ok: false, error: '请填写发票号码' });
+      }
+      row.status = next;
+      row.statusNote = statusNote;
+      if (next === 'issued') {
+        row.invoiceNumber = invoiceNumber;
+        row.issuedAt = new Date().toISOString();
+      }
+      if (next === 'red_flushed') row.redFlushedAt = new Date().toISOString();
+      saveJSON(INVOICES_FILE, all);
+      if (logLine) logLine('invoice', `application-status id=${row.id} from=${previousStatus} to=${next}`);
+      res.json({ ok: true, application: consoleApplication(row) });
+    });
+
     app.get('/console/api/invoices', consoleAuth, (req, res) => {
       const rows = filteredApplications(req.query || {});
       res.json({ ok: true, list: rows.slice(0, 1000).map(consoleApplication), total: rows.length });

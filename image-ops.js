@@ -132,6 +132,7 @@ const POOL_SIZE = Math.max(1, Number(process.env.ONEFIG_IMAGE_WORKERS ?? process
 let pool = null;
 let seq = 0;
 const pending = new Map(); // id -> { worker, resolve, reject }
+let closing = false;
 
 function getPool() {
   if (pool) return pool;
@@ -166,9 +167,21 @@ function getPool() {
   return pool;
 }
 
+// 服务退出时停止新任务，拒绝悬挂请求并终止 worker；纯计算同步路径不受影响。
+async function shutdown() {
+  closing = true;
+  const current = pool || [];
+  pool = null;
+  const error = new Error('服务正在关闭，图像任务已停止');
+  for (const p of pending.values()) { p.worker.busy = false; p.reject(error); }
+  pending.clear();
+  await Promise.all(current.map(item => item.worker.terminate()));
+}
+
 // run('cleanEdge', bufA, bufB) → Promise<Buffer>：在 worker 内执行同名同步函数。
 // 参数经 structured clone 传递（1728² PNG 约 3-6MB，拷贝开销毫秒级，可忽略）。
 function run(fn, ...args) {
+  if (closing) return Promise.reject(new Error('服务正在关闭，不接受新图像任务'));
   if (!registry[fn]) return Promise.reject(new Error('未知图像算子: ' + fn));
   const workers = getPool();
   const idle = workers.find(w => !w.busy) || workers[0];
@@ -180,4 +193,4 @@ function run(fn, ...args) {
   });
 }
 
-module.exports = { ...registry, run, POOL_SIZE };
+module.exports = { ...registry, run, shutdown, POOL_SIZE };

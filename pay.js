@@ -362,11 +362,19 @@ module.exports = function registerPay(app, deps) {
     return null;
   };
 
-  // 待支付订单有效期：超期显示「已失效」，不可再支付，可一键清空（2026-10-17）
-  // 2026-10-18 收紧：与渠道侧硬对齐 —— 支付宝下单带 timeout_express=24h（超时支付宝自动关单），
-  // 订单标记失效时主动关闭微信旧预支付单，杜绝「页面显示已失效但旧二维码仍能付款」的窗口
+  // createdAt 永远保留订单最初创建时间；latestPaymentAttemptAt/expiresAt 表示当前支付尝试。
   const PENDING_TTL = 24 * 60 * 60 * 1000;
-  const isStalePending = o => o.status === 'pending' && Date.now() - Date.parse(o.createdAt) > PENDING_TTL;
+  const isStalePending = o => {
+    if (o.status !== 'pending') return false;
+    const explicitExpiry = Date.parse(o.expiresAt || '');
+    if (Number.isFinite(explicitExpiry)) return Date.now() > explicitExpiry;
+    return Date.now() - Date.parse(o.latestPaymentAttemptAt || o.createdAt) > PENDING_TTL;
+  };
+  const markPaymentAttempt = order => {
+    const now = new Date();
+    order.latestPaymentAttemptAt = now.toISOString();
+    order.expiresAt = new Date(now.getTime() + PENDING_TTL).toISOString();
+  };
   // 返回本次新标记为 expired 的订单
   const markStaleExpired = (list, req) => {
     const marked = [];
@@ -379,14 +387,34 @@ module.exports = function registerPay(app, deps) {
     });
     return marked;
   };
-  // 尽力关闭微信旧预支付单（无微信支付配置时为空操作；关单失败无害——可能已关闭或已支付）
-  function closeWxPrepay(order) {
+  function rotateWxTradeNo(order) {
+    const previousNo = order.outTradeNo;
+    order.previousOutTradeNos = [...new Set([...(order.previousOutTradeNos || []), previousNo].filter(Boolean))].slice(-10);
+    order.outTradeNo = crypto.randomUUID().replace(/-/g, '');
+    for (const key of ['codeUrl', 'codeUrlAt', 'prepayId', 'prepayAt', 'mwebUrl', 'mwebAt']) delete order[key];
+  }
+  // 关旧单必须可 await；微信已关闭可视为完成，其它错误/状态不明必须交由调用方停止下一步。
+  async function closeWxPrepay(order) {
     cfg = loadConfig();
     const w = cfg.wechat;
     if (!w || !order.outTradeNo || order.payChannel !== '微信支付') return;
-    wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${order.outTradeNo}/close`, { mchid: w.mchid })
-      .then(() => log(`失效订单已关闭微信预支付单 order=${order.id}`))
-      .catch(e => log(`失效关单失败（可忽略）order=${order.id} err=${e.message}`));
+    const r = await wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${order.outTradeNo}/close`, { mchid: w.mchid });
+    const detail = `${r.json?.code || ''} ${r.json?.message || r.text || ''}`;
+    if (r.status >= 400 && !/ORDER_CLOSED|订单已关闭/.test(detail)) throw new Error(`微信关单失败 http=${r.status} ${detail.slice(0, 160)}`);
+    log(`失效订单已关闭微信预支付单 order=${order.id}`);
+  }
+  async function closeChannelOrder(order) {
+    if (!order.outTradeNo) return;
+    if (order.payChannel === '微信支付') return closeWxPrepay(order);
+    if (order.payChannel === '支付宝' || order.payChannel === 'alipay') {
+      const a = loadConfig().alipay;
+      if (!a) return;
+      const r = await alipayApiCall(a, 'alipay.trade.close', { out_trade_no: order.outTradeNo });
+      const response = r.json && r.json.alipay_trade_close_response;
+      if (r.status >= 400 || (response && response.code && response.code !== '10000')) {
+        throw new Error(`支付宝关单失败 ${response?.code || r.status}`);
+      }
+    }
   }
 
   let cfg = loadConfig();
@@ -411,22 +439,48 @@ module.exports = function registerPay(app, deps) {
   // 同一笔待支付订单只能复用于同一种支付方式：Native/JSAPI/H5/支付宝的 out_trade_no 不能混用
   const sameTradeType = (o, tradeType) => o.tradeType ? o.tradeType === tradeType : (tradeType === 'native' && !!o.codeUrl);
 
-  function findOrCreateOrder(req, plan, channel, amount, tradeType, body) {
+  // 金额不一致的旧 pending 单不能直接改价复用：先关渠道旧单，再失效并保留审计记录。
+  async function retireMismatchedPending(rows, saveRows, req, sameProduct, expectedAmount, tradeType) {
+    const stale = rows.filter(o => sameProduct(o) && o.status === 'pending' && sameTradeType(o, tradeType) && Number(o.amount) !== expectedAmount);
+    for (const order of stale) await closeChannelOrder(order);
+    if (!stale.length) return false;
+    const now = new Date().toISOString();
+    for (const order of stale) {
+      order.status = 'expired';
+      order.expiredAt = now;
+      order.closeReason = 'amount-changed';
+    }
+    saveRows(rows);
+    return true;
+  }
+
+  async function findOrCreateOrder(req, plan, channel, amount, tradeType, body) {
     // E11/O05（2026-10-18）：会员订单与单张订单同样必须勾选"不支持无理由退款"并留痕
     if (!body || body.refundConsent !== true) {
       return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
     }
-    const orders = loadJSON(ORDERS_FILE, []);
-    markStaleExpired(orders, req).forEach(closeWxPrepay);
-    let order = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'pending' && sameTradeType(o, tradeType));
+    const expectedAmount = Math.round((amount != null ? amount : PLANS[plan].price) * 100) / 100;
+    let orders = loadJSON(ORDERS_FILE, []);
+    markStaleExpired(orders, req).forEach(o => closeWxPrepay(o).catch(e => log(`失效关单失败 order=${o.id} err=${e.message}`)));
+    const sameProduct = o => o.userId === req.user.id && o.plan === plan;
+    try {
+      if (await retireMismatchedPending(orders, rows => saveJSON(ORDERS_FILE, rows), req, sameProduct, expectedAmount, tradeType)) {
+        // await 期间可能已有另一个请求建好当前金额订单，重新读取后再决定是否新建。
+        orders = loadJSON(ORDERS_FILE, []);
+      }
+    } catch (e) {
+      log(`金额变化旧单关闭失败 plan=${plan} err=${e.message}`);
+      return { error: '旧订单关闭失败，请稍后重试或联系客服' };
+    }
+    let order = orders.find(o => sameProduct(o) && o.status === 'pending' && sameTradeType(o, tradeType) && Number(o.amount) === expectedAmount);
     const reused = !!order;
     if (!order) {
-      const notified = orders.find(o => o.userId === req.user.id && o.plan === plan && o.status === 'notified');
+      const notified = orders.find(o => sameProduct(o) && o.status === 'notified');
       if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
-      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: Math.round((amount != null ? amount : PLANS[plan].price) * 100) / 100, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null, refundConsent: true, refundConsentAt: new Date().toISOString() };
+      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: expectedAmount, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null, refundConsent: true, refundConsentAt: new Date().toISOString() };
       orders.push(order);
     }
-    order.outTradeNo = order.id.replace(/-/g, ''); // 微信要求 ≤32 位：UUID 去横线正好 32 位；支付宝同样兼容
+    if (!order.outTradeNo) order.outTradeNo = order.id.replace(/-/g, ''); // 微信要求 ≤32 位：UUID 去横线正好 32 位；支付宝同样兼容
     order.payChannel = channel;
     order.tradeType = tradeType;
     saveJSON(ORDERS_FILE, orders);
@@ -434,16 +488,20 @@ module.exports = function registerPay(app, deps) {
   }
 
   // 画板导出单次订单（¥6.9/次，2026-10-19 定价改版）：同一用户可复用待支付单，paid 后 +1 导出权益
-  function findOrCreateExportOrder(req, channel, body, tradeType) {
+  async function findOrCreateExportOrder(req, channel, body, tradeType) {
     if (!body || body.refundConsent !== true) {
       return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
     }
-    const orders = loadJSON(ORDERS_FILE, []);
-    markStaleExpired(orders, req).forEach(closeWxPrepay);
-    let order = orders.find(o => o.userId === req.user.id && o.kind === 'export' && o.status === 'pending' && sameTradeType(o, tradeType));
+    let orders = loadJSON(ORDERS_FILE, []);
+    markStaleExpired(orders, req).forEach(o => closeWxPrepay(o).catch(e => log(`失效关单失败 order=${o.id} err=${e.message}`)));
+    const sameProduct = o => o.userId === req.user.id && o.kind === 'export';
+    try {
+      if (await retireMismatchedPending(orders, rows => saveJSON(ORDERS_FILE, rows), req, sameProduct, SINGLE_PRICE, tradeType)) orders = loadJSON(ORDERS_FILE, []);
+    } catch (e) { return { error: '旧订单关闭失败，请稍后重试或联系客服' }; }
+    let order = orders.find(o => sameProduct(o) && o.status === 'pending' && sameTradeType(o, tradeType) && Number(o.amount) === SINGLE_PRICE);
     const reused = !!order;
     if (!order) {
-      const notified = orders.find(o => o.userId === req.user.id && o.kind === 'export' && o.status === 'notified');
+      const notified = orders.find(o => sameProduct(o) && o.status === 'notified');
       if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
       order = {
         id: crypto.randomUUID(),
@@ -461,7 +519,7 @@ module.exports = function registerPay(app, deps) {
       };
       orders.push(order);
     }
-    order.outTradeNo = order.id.replace(/-/g, '');
+    if (!order.outTradeNo) order.outTradeNo = order.id.replace(/-/g, '');
     order.payChannel = channel;
     order.tradeType = tradeType;
     // 新版单次权益订单才允许绑定未来导出码；旧订单缺少使用轨迹，绝不自动关联新作品。
@@ -471,16 +529,20 @@ module.exports = function registerPay(app, deps) {
   }
 
   // 单张素材订单：复用同一用户+素材的待支付订单；必须勾选“虚拟商品不支持无理由退款”
-  function findOrCreateSingleOrder(req, target, channel, body, tradeType) {
+  async function findOrCreateSingleOrder(req, target, channel, body, tradeType) {
     if (!body || body.refundConsent !== true) {
       return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
     }
-    const orders = loadJSON(ORDERS_FILE, []);
-    markStaleExpired(orders, req).forEach(closeWxPrepay);
-    let order = orders.find(o => o.userId === req.user.id && o.materialId === target.materialId && o.status === 'pending' && sameTradeType(o, tradeType));
+    let orders = loadJSON(ORDERS_FILE, []);
+    markStaleExpired(orders, req).forEach(o => closeWxPrepay(o).catch(e => log(`失效关单失败 order=${o.id} err=${e.message}`)));
+    const sameProduct = o => o.userId === req.user.id && o.materialId === target.materialId;
+    try {
+      if (await retireMismatchedPending(orders, rows => saveJSON(ORDERS_FILE, rows), req, sameProduct, SINGLE_PRICE, tradeType)) orders = loadJSON(ORDERS_FILE, []);
+    } catch (e) { return { error: '旧订单关闭失败，请稍后重试或联系客服' }; }
+    let order = orders.find(o => sameProduct(o) && o.status === 'pending' && sameTradeType(o, tradeType) && Number(o.amount) === SINGLE_PRICE);
     const reused = !!order;
     if (!order) {
-      const notified = orders.find(o => o.userId === req.user.id && o.materialId === target.materialId && o.status === 'notified');
+      const notified = orders.find(o => sameProduct(o) && o.status === 'notified');
       if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
       order = {
         id: crypto.randomUUID(),
@@ -499,7 +561,7 @@ module.exports = function registerPay(app, deps) {
       };
       orders.push(order);
     }
-    order.outTradeNo = order.id.replace(/-/g, '');
+    if (!order.outTradeNo) order.outTradeNo = order.id.replace(/-/g, '');
     order.payChannel = channel;
     order.tradeType = tradeType;
     saveJSON(ORDERS_FILE, orders);
@@ -528,22 +590,27 @@ module.exports = function registerPay(app, deps) {
 
   // 积分订单下单辅助：复用同套餐待支付订单；有人工确认中的订单则拒绝重复下单
   // E11/O05 合规（2026-10-23）：与会员/单张/导出统一，必须勾选退款协议并随单留痕
-  function findOrCreateCreditOrder(req, pkgId, channel, tradeType, body) {
+  async function findOrCreateCreditOrder(req, pkgId, channel, tradeType, body) {
     if (!body || body.refundConsent !== true) {
       return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
     }
-    const cos = loadCO();
-    markStaleExpired(cos, req).forEach(closeWxPrepay);
-    let order = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'pending' && sameTradeType(o, tradeType));
+    const pkg = CREDIT_PACKAGES.find(p => p.id === pkgId);
+    const expectedAmount = Math.round(pkg.price * 100) / 100;
+    let cos = loadCO();
+    markStaleExpired(cos, req).forEach(o => closeWxPrepay(o).catch(e => log(`失效关单失败 order=${o.id} err=${e.message}`)));
+    const sameProduct = o => o.userId === req.user.id && o.pkg === pkgId;
+    try {
+      if (await retireMismatchedPending(cos, rows => saveCO(rows), req, sameProduct, expectedAmount, tradeType)) cos = loadCO();
+    } catch (e) { return { error: '旧订单关闭失败，请稍后重试或联系客服' }; }
+    let order = cos.find(o => sameProduct(o) && o.status === 'pending' && sameTradeType(o, tradeType) && Number(o.amount) === expectedAmount);
     const reused = !!order;
     if (!order) {
-      const notified = cos.find(o => o.userId === req.user.id && o.pkg === pkgId && o.status === 'notified');
+      const notified = cos.find(o => sameProduct(o) && o.status === 'notified');
       if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
-      const pkg = CREDIT_PACKAGES.find(p => p.id === pkgId);
-      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, pkg: pkg.id, credits: pkg.credits, amount: pkg.price, status: 'pending', createdAt: new Date().toISOString(), paidAt: null };
+      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, pkg: pkg.id, credits: pkg.credits, amount: expectedAmount, status: 'pending', createdAt: new Date().toISOString(), paidAt: null };
       cos.push(order);
     }
-    order.outTradeNo = order.id.replace(/-/g, '');
+    if (!order.outTradeNo) order.outTradeNo = order.id.replace(/-/g, '');
     order.payChannel = channel;
     order.tradeType = tradeType;
     saveCO(cos);
@@ -606,7 +673,7 @@ module.exports = function registerPay(app, deps) {
     return { plan };
   }
 
-  function findOrCreateByTarget(req, target, channel, amount, body, tradeType) {
+  async function findOrCreateByTarget(req, target, channel, amount, body, tradeType) {
     if (target.materialId) return findOrCreateSingleOrder(req, target, channel, body, tradeType);
     if (target.exportBoard) return findOrCreateExportOrder(req, channel, body, tradeType);
     if (target.creditPkg) return findOrCreateCreditOrder(req, target.creditPkg, channel, tradeType, body);
@@ -650,7 +717,7 @@ module.exports = function registerPay(app, deps) {
       payAmount = g.amount;
     }
 
-    const { order, error, reused } = findOrCreateByTarget(req, target, '微信支付', payAmount, req.body, 'native');
+    const { order, error, reused } = await findOrCreateByTarget(req, target, '微信支付', payAmount, req.body, 'native');
     if (error) return res.status(409).json({ ok: false, error });
 
     // 复用待支付订单：二维码仍在有效期（约 2 小时）直接返回旧码；已过期先关旧预支付单再换新码
@@ -659,15 +726,10 @@ module.exports = function registerPay(app, deps) {
       if (age < 110 * 60 * 1000) {
         return res.json({ ok: true, order, codeUrl: order.codeUrl, reused: true });
       }
-      const previousNo = order.outTradeNo;
-      try { await wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${previousNo}/close`, { mchid: w.mchid }); log(`关闭过期预支付单 order=${order.id}`); }
-      catch (e) { log(`关旧单失败（可能已关闭）order=${order.id} err=${e.message}`); }
-      // 微信不允许已使用过的商户单号再次 Native 下单（201 商户订单号重复）。
-      // 内部订单 id 保持不变，仅轮换支付单号，并保留旧号供后台反查。
-      order.previousOutTradeNos = [...new Set([...(order.previousOutTradeNos || []), previousNo].filter(Boolean))];
-      order.outTradeNo = crypto.randomUUID().replace(/-/g, '');
-      delete order.codeUrl;
-      delete order.codeUrlAt;
+      try { await closeWxPrepay(order); }
+      catch (e) { log(`关旧单失败，停止续付 order=${order.id} err=${e.message}`); return res.status(409).json({ ok: false, error: '旧支付单状态待确认，请稍后重试或联系客服' }); }
+      // 内部订单 id 保持不变；旧号仅供反查，后续复用绝不再重置单号。
+      rotateWxTradeNo(order);
       persistOrder(target, order);
       log(`过期续付更换支付单号 order=${order.id}`);
     }
@@ -689,6 +751,7 @@ module.exports = function registerPay(app, deps) {
       log(`native下单成功 order=${order.id} ${targetLabel(target)} amount=${order.amount}`);
       order.codeUrl = r.json.code_url; // 存下来：有效期内重新发起直接复用，不重复调微信
       order.codeUrlAt = new Date().toISOString();
+      markPaymentAttempt(order);
       persistOrder(target, order);
       res.json({ ok: true, order, codeUrl: r.json.code_url });
     } catch (e) {
@@ -718,14 +781,17 @@ module.exports = function registerPay(app, deps) {
       return res.status(400).json({ ok: false, error: '微信授权失败，请返回重试（' + e.message + '）' });
     }
 
-    const { order, error, reused } = findOrCreateByTarget(req, target, '微信支付', payAmount, req.body, 'jsapi');
+    const { order, error, reused } = await findOrCreateByTarget(req, target, '微信支付', payAmount, req.body, 'jsapi');
     if (error) return res.status(409).json({ ok: false, error });
     if (reused && order.prepayId) {
       const age = Date.now() - Date.parse(order.prepayAt || order.createdAt);
       if (age < 110 * 60 * 1000) {
         return res.json({ ok: true, order, payParams: jsapiPayParams(w, order.prepayId), reused: true });
       }
-      try { await wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${order.outTradeNo}/close`, { mchid: w.mchid }); } catch {}
+      try { await closeWxPrepay(order); }
+      catch (e) { log(`续付关旧单失败，停止下单 order=${order.id} err=${e.message}`); return res.status(409).json({ ok: false, error: '旧支付单状态待确认，请稍后重试或联系客服' }); }
+      rotateWxTradeNo(order);
+      persistOrder(target, order);
     }
 
     try {
@@ -746,6 +812,7 @@ module.exports = function registerPay(app, deps) {
       order.prepayId = r.json.prepay_id;
       order.prepayAt = new Date().toISOString();
       order.openid = openid;
+      markPaymentAttempt(order);
       persistOrder(target, order);
       log(`JSAPI下单成功 order=${order.id} ${targetLabel(target)} amount=${order.amount}`);
       res.json({ ok: true, order, payParams: jsapiPayParams(w, order.prepayId) });
@@ -770,12 +837,15 @@ module.exports = function registerPay(app, deps) {
       payAmount = g.amount;
     }
 
-    const { order, error, reused } = findOrCreateByTarget(req, target, '微信支付', payAmount, req.body, 'h5');
+    const { order, error, reused } = await findOrCreateByTarget(req, target, '微信支付', payAmount, req.body, 'h5');
     if (error) return res.status(409).json({ ok: false, error });
     if (reused && order.mwebUrl) {
       const age = Date.now() - Date.parse(order.mwebAt || order.createdAt);
       if (age < 5 * 60 * 1000) return res.json({ ok: true, order, h5Url: order.mwebUrl, reused: true });
-      try { await wxRequest(w, 'POST', `/v3/pay/transactions/out-trade-no/${order.outTradeNo}/close`, { mchid: w.mchid }); } catch {}
+      try { await closeWxPrepay(order); }
+      catch (e) { log(`续付关旧单失败，停止下单 order=${order.id} err=${e.message}`); return res.status(409).json({ ok: false, error: '旧支付单状态待确认，请稍后重试或联系客服' }); }
+      rotateWxTradeNo(order);
+      persistOrder(target, order);
     }
 
     try {
@@ -800,6 +870,7 @@ module.exports = function registerPay(app, deps) {
       }
       order.mwebUrl = r.json.h5_url;
       order.mwebAt = new Date().toISOString();
+      markPaymentAttempt(order);
       persistOrder(target, order);
       log(`H5下单成功 order=${order.id} ${targetLabel(target)} amount=${order.amount}`);
       res.json({ ok: true, order, h5Url: order.mwebUrl });
@@ -847,7 +918,7 @@ module.exports = function registerPay(app, deps) {
       } catch (e) { log('回调解密失败：' + e.message); return fail(400, '解密失败'); }
 
       const orderId = String(data.attach || '');
-      const hit = findOrderAnywhere(o => o.id === orderId || (o.outTradeNo && o.outTradeNo === data.out_trade_no));
+      const hit = findOrderAnywhere(o => o.id === orderId || o.outTradeNo === data.out_trade_no || (o.previousOutTradeNos || []).includes(data.out_trade_no));
       if (!hit) { log(`回调找不到订单 out_trade_no=${data.out_trade_no}`); return fail(404, '订单不存在'); }
       const order = hit.order;
 
@@ -884,7 +955,7 @@ module.exports = function registerPay(app, deps) {
       payAmount = g.amount;
     }
 
-    const { order, error } = findOrCreateByTarget(req, target, '支付宝', payAmount, req.body, 'alipay');
+    const { order, error } = await findOrCreateByTarget(req, target, '支付宝', payAmount, req.body, 'alipay');
     if (error) return res.status(409).json({ ok: false, error });
 
     const payUrl = alipayPageUrl(a, 'alipay.trade.page.pay', {
@@ -894,6 +965,8 @@ module.exports = function registerPay(app, deps) {
       product_code: 'FAST_INSTANT_TRADE_PAY',
       timeout_express: '24h', // 与 PENDING_TTL 对齐：超时支付宝自动关单，旧收银台页面无法再付款
     }, { notify_url: a.notifyUrl, return_url: a.returnUrl });
+    markPaymentAttempt(order);
+    persistOrder(target, order);
     log(`支付宝下单 order=${order.id} ${target.creditPkg ? 'pkg=' + target.creditPkg : 'plan=' + target.plan} amount=${order.amount}`);
     res.json({ ok: true, order, payUrl });
   });
@@ -914,7 +987,7 @@ module.exports = function registerPay(app, deps) {
       if (params.trade_status !== 'TRADE_SUCCESS' && params.trade_status !== 'TRADE_FINISHED') {
         return res.send('success'); // 等待付款等非终态直接确认
       }
-      const hit = findOrderAnywhere(o => o.outTradeNo === params.out_trade_no);
+      const hit = findOrderAnywhere(o => o.outTradeNo === params.out_trade_no || (o.previousOutTradeNos || []).includes(params.out_trade_no));
       if (!hit) { log(`支付宝回调找不到订单 out_trade_no=${params.out_trade_no}`); return res.status(404).send('failure'); }
       const order = hit.order;
       if (Number(params.total_amount) !== Math.round(order.amount * 100) / 100) {
@@ -975,18 +1048,41 @@ module.exports = function registerPay(app, deps) {
     res.json({ ok: true, status: o.status, plan: o.plan || null, credits: o.credits || null, materialId: o.materialId || null, kind: o.kind === 'export' ? 'export' : (o.materialId ? 'single' : (o.creditPkg ? 'credit' : 'plan')), paidAt: o.paidAt || null });
   });
 
-  // 一键清空当前用户的已失效待支付订单（会员订单 + 积分订单，2026-10-17）
-  app.delete('/api/orders/expired', authUser, (req, res) => {
-    let removed = 0;
+  // 一键清空改为软隐藏：关单、保留回调/退款/客服审计记录，不再物理删除账本。
+  app.delete('/api/orders/expired', authUser, async (req, res) => {
     const planOrders = loadJSON(ORDERS_FILE, []);
-    const keepPlans = planOrders.filter(o => !(o.userId === req.user.id && (o.status === 'expired' || isStalePending(o))));
-    removed += planOrders.length - keepPlans.length;
-    if (removed) saveJSON(ORDERS_FILE, keepPlans);
-    const cos = loadCO();
-    const keepCO = cos.filter(o => !(o.userId === req.user.id && (o.status === 'expired' || isStalePending(o))));
-    removed += cos.length - keepCO.length;
-    if (cos.length !== keepCO.length) saveCO(keepCO);
-    log(`清空失效订单 user=${req.user.name} removed=${removed}`);
+    const creditOrders = loadCO();
+    const targets = [...planOrders, ...creditOrders].filter(o => o.userId === req.user.id && !o.hiddenAt && (o.status === 'expired' || isStalePending(o)));
+    for (const order of targets) {
+      // expired 已在过期路径处理过渠道；只有 stale pending 需要在这里主动关单。
+      if (order.status !== 'pending') continue;
+      try { await closeChannelOrder(order); }
+      catch (e) {
+        log(`清空前关单失败 order=${order.id} err=${e.message}`);
+        return res.status(409).json({ ok: false, error: '旧支付单状态待确认，请稍后重试或联系客服' });
+      }
+    }
+    // await 期间可能收到支付回调：重新读取并跳过已支付/已退款记录，避免覆盖资金状态。
+    const latestPlans = loadJSON(ORDERS_FILE, []);
+    const latestCredits = loadCO();
+    const now = new Date().toISOString();
+    let removed = 0;
+    const hide = rows => {
+      let changed = false;
+      for (const target of targets) {
+        const row = rows.find(o => o.id === target.id && o.userId === req.user.id);
+        if (!row || row.hiddenAt || ['paid', 'refunded'].includes(row.status)) continue;
+        row.status = 'expired';
+        row.expiredAt = row.expiredAt || now;
+        row.hiddenAt = now;
+        removed++;
+        changed = true;
+      }
+      return changed;
+    };
+    if (hide(latestPlans)) saveJSON(ORDERS_FILE, latestPlans);
+    if (hide(latestCredits)) saveCO(latestCredits);
+    log(`隐藏失效订单 user=${req.user.name} removed=${removed}`);
     res.json({ ok: true, removed });
   });
 };
