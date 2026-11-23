@@ -2257,7 +2257,7 @@ H.health=async()=>{
 
 /* ---------- AI 提示词（2026-10-22）：全部 AI 生成提示词集中在此，保存即生效 ---------- */
 H.aiprompts=async()=>{
-  const {prompts:P}=await api('/console/api/ai-prompts');
+  const [{prompts:P},generation]=await Promise.all([api('/console/api/ai-prompts'),api('/api/admin/generation-prompt')]);
   const ta=(id,label,val,rows,hint)=>'<div class="row"><label>'+label+(hint?' <span style="color:#b0aac4;font-weight:400">'+hint+'</span>':'')+'</label><textarea id="'+id+'" rows="'+(rows||3)+'" style="width:100%;resize:vertical;line-height:1.6">'+esc(val||'')+'</textarea></div>';
   const bigRow=(key,name)=>'<div class="panel"><h3 style="font-size:15px;margin-bottom:10px">'+name+'</h3>'
     +ta('p-big-'+key+'-prompt','提示词模板（{topic} = 用户描述）',P.big&&P.big[key]&&P.big[key].prompt,4)
@@ -2278,6 +2278,9 @@ H.aiprompts=async()=>{
     +'</div>'
     +'<h3 style="font-size:15px;margin:4px 0 12px">🖌️ 生成大图（三种类型）</h3>'
     +bigRow('cover','期刊封面（竖版）')+bigRow('abstract','文内摘要图（横版）')+bigRow('mechanism','文内机制图（横版）')
+    +'<div class="panel"><h3 style="font-size:15px;margin-bottom:10px">🧬 画板 AI 矢量重绘固定提示词</h3>'
+    +ta('p-canvas-generation','生成原图时，固定提示词 + 用户文字 + 可选参考图一起发送；{{lang}} 会自动替换',generation.prompt,9)
+    +'</div>'
     +'<div class="panel"><h3 style="font-size:15px;margin-bottom:10px">🖼️ 风格转换指令 stylize（qwen-image 图生图）</h3>'
     +ta('p-sty-flat','矢量插画风格 flat',P.stylize&&P.stylize.flat,2)
     +ta('p-sty-matte','OneFig 风格 matte',P.stylize&&P.stylize.matte,2)
@@ -2298,7 +2301,7 @@ window.savePrompts=async()=>{
     },
     stylize:{flat:v('p-sty-flat').trim(),matte:v('p-sty-matte').trim(),threed:v('p-sty-threed').trim()},
   };
-  try{await api('/console/api/ai-prompts',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompts})});toast('已保存，立即生效 ✅');document.getElementById('p-hint').textContent='已保存 ✓ 下次生成即用新提示词'}
+  try{await api('/console/api/ai-prompts',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompts})});await api('/api/admin/generation-prompt',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:v('p-canvas-generation').trim()})});toast('已保存，立即生效 ✅');document.getElementById('p-hint').textContent='已保存 ✓ 下次生成即用新提示词'}
   catch(e){toast(e.message)}
 };
 

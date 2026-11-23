@@ -127,6 +127,7 @@ app.use('/api/shared', express.json({ limit: '12mb' }));   // 可编辑分享的
 app.use('/api/designs', express.json({ limit: '14mb' })); // SVG 模板作品与画板分离存储
 app.use('/api/chem', express.json({ limit: '256kb' }));   // 结构式渲染请求（SMILES + 可选 molblock）
 app.use('/api/fig-assets', express.json({ limit: '12mb' })); // Fig 编组保存为独立 SVG 素材
+app.use('/api/ai/vector-scene', express.json({ limit: '6mb' })); // 画板 AI 原位矢量场景
 // 微信支付回调需要原始报文验签（2026-10-08）：必须在全局 json 解析器之前挂载 raw
 app.use('/api/pay/wechat/notify', express.raw({ type: '*/*' }));
 // 支付宝回调是表单格式（application/x-www-form-urlencoded）
@@ -1428,6 +1429,19 @@ const AI_BIG = aiModule.BIG;        // 生成大图定价（ai.js 定义，env O
 aiModule(app, { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine, aiFreeLeft, aiCost: () => AI_EDIT_COST, aiBigCost: () => AI_BIG.COST, aiSplitCost: () => aiModule.SPLIT.COST, aiLocalLeft, aiLocalCost: () => ({ nobg: AI_NOBG_COST, vec: AI_VEC_COST }), prompts: promptStore, upload });
 // 生成记录入账：AI 工坊四个非生成类页签的成功结果统一写入 jobs（2026-10-21）
 const recordAIResult = aiModule.recordAIResult;
+
+// 主画板 AI 面板：复用主站登录、积分、素材目录与画板存储，不暴露独立原型的匿名接口。
+import('./canvas-ai/index.mjs')
+  .then(({ registerCanvasAi }) => registerCanvasAi(app, {
+    DATA_DIR, ONEFIG_WEB_ROOT: process.env.ONEFIG_WEB_ROOT || '/opt/onefig-web',
+    authUser, consoleAuth, loadUsers, saveUsers, logLine,
+  }))
+  .catch(error => {
+    console.error('❌ 画板 AI 模块启动失败：', error);
+    logLine('error', `canvas-ai module-load-fail ${error?.stack || error}`);
+    process.exit(1);
+  });
+
 // 免费试用剩余次数（gen/edit/stylize 独立计数，读 users.aiFreeUsed）——
 // 注意：AI_EDIT_FREE / GEN_FREE 在本文件更下方才定义，本函数只在请求期被调用，届时已完成初始化（2026-10-21）
 // 注：移除背景/位图转矢量 2026-10-21 起改用每日免费额度模型（chargeAILocal / aiLocalLeft），不在此列
