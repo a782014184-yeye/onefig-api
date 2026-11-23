@@ -41,6 +41,61 @@ def _canon(smiles: str) -> str | None:
     return Chem.MolToSmiles(m) if m else None
 
 
+def _layout_conflicts(m) -> int:
+    """SVG 层键-键几何冲突数（issue 2026-11-23 VD3：C13 甲基楔压 C20 甲基键）。
+    只统计不共原子的两条键：线段严格相交，或线段端点距其他键 < 3.5px（笔画内）。
+    布局候选选择用，数值越小越好。"""
+    d = rdMolDraw2D.MolDraw2DSVG(420, 320)
+    o = d.drawOptions()
+    o.clearBackground = False
+    o.singleColourBonds = True
+    # PrepareMolForDrawing + DrawMolecule：楔键由 RDKit 在此一次性分配，
+    # 键索引与 pm 严格对齐（PrepareAndDrawMolecule 内部补 H 会导致索引错位）
+    pm = rdMolDraw2D.PrepareMolForDrawing(m)
+    bonds = [(b.GetBeginAtomIdx(), b.GetEndAtomIdx()) for b in pm.GetBonds()]
+    d.DrawMolecule(pm)
+    d.FinishDrawing()
+    svg = d.GetDrawingText()
+    segs = {}
+    for mm in re.finditer(r"<path class='bond-(\d+)[^']*' d='([^']+)'", svg):
+        bi = int(mm.group(1))
+        pts = [(float(x), float(y)) for x, y in re.findall(r"([\d.-]+),([\d.-]+)", mm.group(2))]
+        segs.setdefault(bi, []).extend(zip(pts, pts[1:]))
+
+    def pt_seg(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        l2 = dx * dx + dy * dy
+        if l2 == 0:
+            return math.dist(p, a)
+        t = max(0, min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2))
+        return math.dist(p, (a[0] + t * dx, a[1] + t * dy))
+
+    def seg_int(p1, p2, p3, p4):
+        def cr(o2, a, b):
+            return (a[0] - o2[0]) * (b[1] - o2[1]) - (a[1] - o2[1]) * (b[0] - o2[0])
+        d1, d2, d3, d4 = cr(p3, p4, p1), cr(p3, p4, p2), cr(p1, p2, p3), cr(p1, p2, p4)
+        return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+
+    n = 0
+    ids = sorted(segs)
+    for i, bi in enumerate(ids):
+        for bj in ids[i + 1:]:
+            if set(bonds[bi]) & set(bonds[bj]):
+                continue
+            for (a, b) in segs[bi]:
+                if math.dist(a, b) < 0.01:
+                    continue
+                for (c, dd) in segs[bj]:
+                    if math.dist(c, dd) < 0.01:
+                        continue
+                    if seg_int(a, b, c, dd):
+                        n += 1
+                    for p in (a, b):
+                        if pt_seg(p, c, dd) < 3.5:
+                            n += 1
+    return n
+
+
 def _mol_from(req: RenderReq):
     """模板分子（小分子/盐）用客户端来的 molblock（含显式氢与规范坐标）；
     其余分子按 canon 缓存坐标，保证布局确定性。"""
@@ -72,7 +127,22 @@ def _mol_from(req: RenderReq):
              and all(n.GetSymbol() == "C" for n in a.GetNeighbors())]
     if h_idx:
         m0 = Chem.AddHs(m0, onlyOnAtoms=h_idx)
-    rdDepictor.Compute2DCoords(m0)
+    # 布局择优：默认 Compute2DCoords → 有键-键冲突则换 coordGen（全局开关需持锁）。
+    # VD3 案例：默认布局 C13 甲基楔尖压 C20 甲基键；coordGen 无冲突（2026-11-23 issue）
+    with _lock:
+        rdDepictor.Compute2DCoords(m0)
+        n_default = _layout_conflicts(m0)
+        if n_default:
+            m1 = Chem.Mol(m0)
+            try:
+                rdDepictor.SetPreferCoordGen(True)
+                rdDepictor.Compute2DCoords(m1)
+            except Exception:
+                m1 = None
+            finally:
+                rdDepictor.SetPreferCoordGen(False)
+            if m1 is not None and _layout_conflicts(m1) < n_default:
+                m0 = m1
     mb = Chem.MolToMolBlock(m0)
     with _lock:
         _coord_cache[src] = mb
@@ -87,7 +157,8 @@ def _base_font_size(m, canon) -> float:
         return f
     d = rdMolDraw2D.MolDraw2DSVG(420, 320)
     d.drawOptions().clearBackground = False
-    rdMolDraw2D.PrepareAndDrawMolecule(d, m)
+    pm = rdMolDraw2D.PrepareMolForDrawing(m)
+    d.DrawMolecule(pm)
     d.FinishDrawing()
     h_max = 0.0
     for mm in re.finditer(r"<path class='atom-[^']*' d='([^']+)'", d.GetDrawingText()):
@@ -111,7 +182,9 @@ def _draw(m, canon, fontScale: float) -> str:
         base = _base_font_size(m, canon)
         if base > 0:
             opts.fixedFontSize = int(max(4.0, round(base * fontScale)))
-    rdMolDraw2D.PrepareAndDrawMolecule(d, m)
+    # 与 _layout_conflicts 同一画法：楔键覆盖最全（VD3 五手性中心全画），键索引对齐
+    pm = rdMolDraw2D.PrepareMolForDrawing(m)
+    d.DrawMolecule(pm)
     d.FinishDrawing()
     return d.GetDrawingText()
 
