@@ -127,12 +127,26 @@ def _mol_from(req: RenderReq):
              and all(n.GetSymbol() == "C" for n in a.GetNeighbors())]
     if h_idx:
         m0 = Chem.AddHs(m0, onlyOnAtoms=h_idx)
-    # 布局择优：默认 Compute2DCoords → 有键-键冲突则换 coordGen（全局开关需持锁）。
-    # VD3 案例：默认布局 C13 甲基楔尖压 C20 甲基键；coordGen 无冲突（2026-11-23 issue）
+    # 布局择优 + 立体回读校验（2026-11-23 起全分子通用）：
+    # 候选按「回读通过 > 冲突少」排序。回读 = 画好的楔写 molblock 再读，
+    # 去 H 后异构 SMILES 必须与原分子一致——楔方向画反就是差向异构体，绝不出错图。
+    ref = _canon(req.smiles)
+    has_stereo = bool(ref) and ("@" in ref or "/" in ref or "\\" in ref)
+
+    def roundtrip_ok(m):
+        if not has_stereo:
+            return True
+        try:
+            pm = rdMolDraw2D.PrepareMolForDrawing(m)
+            m2 = Chem.MolFromMolBlock(Chem.MolToMolBlock(pm), removeHs=False)
+            return Chem.MolToSmiles(Chem.RemoveHs(m2)) == ref
+        except Exception:
+            return False
+
     with _lock:
         rdDepictor.Compute2DCoords(m0)
-        n_default = _layout_conflicts(m0)
-        if n_default:
+        best = (0 if roundtrip_ok(m0) else 1, _layout_conflicts(m0), m0)
+        if best[0] or best[1]:
             m1 = Chem.Mol(m0)
             try:
                 rdDepictor.SetPreferCoordGen(True)
@@ -141,8 +155,14 @@ def _mol_from(req: RenderReq):
                 m1 = None
             finally:
                 rdDepictor.SetPreferCoordGen(False)
-            if m1 is not None and _layout_conflicts(m1) < n_default:
-                m0 = m1
+            if m1 is not None:
+                cand = (0 if roundtrip_ok(m1) else 1, _layout_conflicts(m1), m1)
+                if cand[:2] < best[:2]:
+                    best = cand
+        m0 = best[2]
+        if best[0]:
+            # 两种布局回读都失败：拒绝出图，绝不允许画成差向异构体
+            raise ValueError("立体构型绘制校验未通过，请用 SMILES 重试或反馈该分子")
     mb = Chem.MolToMolBlock(m0)
     with _lock:
         _coord_cache[src] = mb
