@@ -26,6 +26,8 @@
 - 环境：/opt/chem-venv（Python 3.11 + rdkit + fastapi + uvicorn）。
 - Node 侧：server.js POST /api/chem/render 代理转发，8s 超时，502 透传。
 - 前端 chem 组件服务端优先；sidecar 挂掉自动回退浏览器本地 wasm 渲染，功能零依赖。排查时先 curl 127.0.0.1:8098/health。
+- **部署唯一入口：`bash backend/ops/deploy-chem-render.sh`**（2026-11-23 起）。测试门禁：name-to-svg-demo 的 test_layout_conflicts.py（布局冲突 + VD3 立体回读）与 test_regression.py 全过才部署；随后备份 → scp → md5 校验 → restart → VD3 生产冒烟，任何一步失败即中止。禁止绕过脚本直接 scp 上线。
+- server.js 的 /api/chem/render、/api/chem/sketch 代理改动仍走通用 server.js 部署流程（备份 → md5 → restart onefig-api），注意本地 server.js 可能含其他会话未部署的改动，只准挑自己的路由块合入生产版本。
 
 ## AI 透明底质检
 
