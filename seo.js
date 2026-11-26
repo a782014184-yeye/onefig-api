@@ -7,7 +7,7 @@ const path = require('path');
 const SITE = 'https://onefig.cn';
 const SITE_NAME = 'OneFig 无花有果';
 const SITE_DESC = '高清科研绘图素材库：细胞、器官、实验仪器、信号通路等专业插画，会员可下载，也支持单张购买，适用于论文配图、课题汇报与科普设计。';
-const ICP = '浙ICP备2026079784号';
+const ICP = '浙ICP备2026103908号';
 
 module.exports = function registerSeo(app, deps) {
   const { esc, DATA_DIR } = deps;
