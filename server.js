@@ -130,6 +130,8 @@ app.use('/api/fig-assets', express.json({ limit: '12mb' })); // Fig 编组保存
 app.use('/api/ai/vector-scene', express.json({ limit: '6mb' })); // 画板 AI 原位矢量场景
 // 微信支付回调需要原始报文验签（2026-10-08）：必须在全局 json 解析器之前挂载 raw
 app.use('/api/pay/wechat/notify', express.raw({ type: '*/*' }));
+// 服务号事件回调同样需要原始报文验签（2026-11-27 微信扫码登录）
+app.use('/api/wx/callback', express.raw({ type: '*/*' }));
 // 支付宝回调是表单格式（application/x-www-form-urlencoded）
 app.use('/api/pay/alipay/notify', express.urlencoded({ extended: false, limit: '64kb' }));
 app.use(express.json({ limit: '256kb' }));
@@ -1470,6 +1472,11 @@ function aiFreeLeft(u) {
 
 // 在线支付：微信 Native 扫码 + 支付宝电脑网站支付（2026-10-08；2026-10-17 起同时支持积分充值）
 require('./pay')(app, { authUser, DATA_DIR, PLANS, CREDIT_PACKAGES, loadUsers, saveUsers, logLine });
+// 微信扫码登录（2026-11-27，认证服务号「OneFig无花果」）：二维码 / 事件回调 / 邮箱绑定 / 账号中心管理
+require('./wx')(app, {
+  authUser, DATA_DIR, loadJSON, saveJSON, loadUsers, saveUsers, logLine,
+  makeToken, publicUser, sign, isVerified, sendRegisterCode, LEGAL_VERSION, makeRateLimiter,
+});
 // 发票申请：仅收集真实订单与购买方资料，开票项目/税率由财务人员在线下核定。
 require('./invoices')(app, {
   authUser,

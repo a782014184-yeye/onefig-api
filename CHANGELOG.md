@@ -5,6 +5,11 @@
 ## [Unreleased]
 
 ### Added
+- 微信扫码登录（2026-11-27，默认关闭，需配置 `ONEFIG_WX_APPID/SECRET/TOKEN`）：新增 `wx.js` 模块——带参数临时二维码（5 分钟有效、一次性）/ 服务号事件回调（sha1 验签，关注与已关注扫码两路 EventKey 兼容，昵称异步补齐）/ 状态轮询（pending→followed→bound 状态机）/ 邮箱密码绑定（复用登录校验与未验证邮箱硬闸门）/ 一键注册（占位邮箱 `wx_xxx@wx.onefig.cn`，无密码，补绑邮箱前禁止解绑微信防账号丢失）/ 账号中心 wx-status、wx-unbind（密码确认）、wx-set-email 验证码补绑；bindCode 为 HMAC 签名短令牌（10 分钟、jti 一次性防重放）；一个微信只绑一个账号、一个账号只绑一个微信；服务号凭据未配置时全部接口明确报错且功能关闭
+- 服务器配置回调 `GET/POST /api/wx/callback`（raw 报文验签，与微信支付回调同一挂载模式）
+- 新增 `test-wx-login.cjs` 本地集成测试（拦截 https 假扮微信 API，21 项：开关/二维码/验签/事件/绑定/注册/占用拦截/解绑/补绑邮箱/防重放全链路）
+
+### Added
 - 反倒卖合规（2026-11-27）：会员/单张素材/画板导出三类订单下单接口（微信 Native/JSAPI/H5、支付宝 pagepay 共用 findOrCreate 链路）强制校验 `licenseConsent === true`，与 `refundConsent` 同口径「前端禁用 + 后端硬校验」双保险，未勾选返回明确错误文案；订单与购买流水（purchases.json）留痕 `licenseConsent`/`licenseConsentAt`；积分充值订单不涉及内容授权不强制；console.js 人工确认补单同样留痕
 - 支付回归新增负向用例：B0b/D1b/E1b 验证「已勾选退款、未勾选导出条款」被拦截，B1/D2/E2 验证留痕字段随单落库（`test-pay-credit.cjs` 38 项全过，`test-pay-retry.cjs` 通过）
 - 《素材授权协议》第八节（导出内容使用特别约定）正文进入前端 /license 页面，与支付勾选框联动
