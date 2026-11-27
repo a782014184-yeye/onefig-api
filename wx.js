@@ -26,12 +26,15 @@ module.exports = function registerWx(app, deps) {
   const BIND_CODE_TTL = 600e3;    // 关注后绑定窗口 10 分钟
 
   // ---- 配置 ----
+  // env 优先；其次本地 ONEFIG_WX_CONFIG json；最后回退复用 pay-config 里 JSAPI 已在用的服务号凭据
+  // （同一对 AppID/AppSecret，微信支付 JSAPI 与扫码登录共用，见 pay.js 的 wechat.appSecret 注释）
   function loadConfig() {
     const c = {
       appid: process.env.ONEFIG_WX_APPID || '',
       secret: process.env.ONEFIG_WX_SECRET || '',
       token: process.env.ONEFIG_WX_TOKEN || '',
     };
+    if (c.appid && c.secret && c.token) return c;
     if ((!c.appid || !c.secret || !c.token) && process.env.ONEFIG_WX_CONFIG) {
       try {
         const f = JSON.parse(fs.readFileSync(process.env.ONEFIG_WX_CONFIG, 'utf8'));
@@ -39,6 +42,15 @@ module.exports = function registerWx(app, deps) {
         c.secret = c.secret || String(f.secret || '');
         c.token = c.token || String(f.token || '');
       } catch { /* 本地配置缺失按未配置处理 */ }
+    }
+    if ((!c.appid || !c.secret) && !process.env.ONEFIG_WX_CONFIG) {
+      try {
+        const payFile = process.env.ONEFIG_PAY_CONFIG || path.join(__dirname, 'pay-config.local.json');
+        const p = JSON.parse(fs.readFileSync(payFile, 'utf8'));
+        const w = p.wechat || {};
+        c.appid = c.appid || String(p.wechatJsapiAppid || w.appid || '');
+        c.secret = c.secret || String(w.appSecret || '');
+      } catch { /* pay-config 缺失时按未配置处理 */ }
     }
     return c;
   }

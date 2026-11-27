@@ -65,6 +65,8 @@ function ok(name) { passed++; console.log('  ✅', name); }
   const wxCfgFile = path.join(dir, 'wx-config.json');
   fs.writeFileSync(wxCfgFile, JSON.stringify({ appid: 'wx-test-appid', secret: 'test-secret', token: 'tk123456' }));
   process.env.ONEFIG_WX_CONFIG = wxCfgFile;
+  // 防止「复用 pay-config 服务号凭据」的兜底误读开发机真实配置：指向不存在的文件
+  process.env.ONEFIG_PAY_CONFIG = path.join(dir, 'no-such-pay-config.json');
 
   const TOKEN_SECRET = 'test-token-secret';
   const sign = p => crypto.createHmac('sha256', TOKEN_SECRET).update(p).digest('base64url');
@@ -157,6 +159,22 @@ function ok(name) { passed++; console.log('  ✅', name); }
     assert.strictEqual(r.code, 'wx_disabled');
     process.env.ONEFIG_WX_CONFIG = wxCfgFile;
     ok('A2 未配置时功能关闭且接口明确报错');
+    // A3：复用 pay-config 里 JSAPI 的服务号凭据兜底（AppID/AppSecret 与微信支付共用一对）
+    {
+      delete process.env.ONEFIG_WX_CONFIG;
+      const payFile = path.join(dir, 'pay-fallback.json');
+      fs.writeFileSync(payFile, JSON.stringify({ wechat: { appid: 'wx-pay-same-appid', appSecret: 'same-secret' } }));
+      process.env.ONEFIG_PAY_CONFIG = payFile;
+      const en3 = await get('/api/auth/wxqr/enabled');
+      assert.strictEqual(en3.enabled, false, 'pay-config 兜底只有 appid/secret，缺 token 仍应关闭');
+      process.env.ONEFIG_WX_TOKEN = 'tk-from-env';
+      const en4 = await get('/api/auth/wxqr/enabled');
+      assert.strictEqual(en4.enabled, true, 'appid/secret 走 pay-config 兜底 + token 走 env → 开启');
+      delete process.env.ONEFIG_WX_TOKEN;
+      process.env.ONEFIG_PAY_CONFIG = path.join(dir, 'no-such-pay-config.json');
+      process.env.ONEFIG_WX_CONFIG = wxCfgFile;
+      ok('A3 AppID/Secret 复用 pay-config 兜底生效（token 仍需显式配置）');
+    }
   }
 
   // ====== B. 二维码创建 ======
