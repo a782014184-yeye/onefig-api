@@ -311,6 +311,8 @@ function markOrderPaid(DATA_DIR, orderId, extra) {
         paidAt: o.paidAt,
         refundConsent: !!o.refundConsent,
         refundConsentAt: o.refundConsentAt || null,
+        licenseConsent: !!o.licenseConsent,
+        licenseConsentAt: o.licenseConsentAt || null,
       });
       saveJSON(PURCHASES_FILE, purchases);
     }
@@ -459,6 +461,10 @@ module.exports = function registerPay(app, deps) {
     if (!body || body.refundConsent !== true) {
       return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
     }
+    // 2026-11-27 反倒卖合规：会员/单张/画板导出三类内容授权订单必须勾选《导出与使用条款》并留痕（积分订单不强制）
+    if (!body || body.licenseConsent !== true) {
+      return { error: '请先阅读并同意《导出与使用条款》（导出内容仅限本人及课题组使用，禁止转售、代画牟利）' };
+    }
     const expectedAmount = Math.round((amount != null ? amount : PLANS[plan].price) * 100) / 100;
     let orders = loadJSON(ORDERS_FILE, []);
     markStaleExpired(orders, req).forEach(o => closeWxPrepay(o).catch(e => log(`失效关单失败 order=${o.id} err=${e.message}`)));
@@ -477,7 +483,7 @@ module.exports = function registerPay(app, deps) {
     if (!order) {
       const notified = orders.find(o => sameProduct(o) && o.status === 'notified');
       if (notified) return { error: '这笔订单正在人工确认中，请稍等或联系客服' };
-      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: expectedAmount, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null, refundConsent: true, refundConsentAt: new Date().toISOString() };
+      order = { id: crypto.randomUUID(), userId: req.user.id, userName: req.user.name, plan, amount: expectedAmount, status: 'pending', channel, createdAt: new Date().toISOString(), paidAt: null, refundConsent: true, refundConsentAt: new Date().toISOString(), licenseConsent: true, licenseConsentAt: new Date().toISOString() };
       orders.push(order);
     }
     if (!order.outTradeNo) order.outTradeNo = order.id.replace(/-/g, ''); // 微信要求 ≤32 位：UUID 去横线正好 32 位；支付宝同样兼容
@@ -491,6 +497,9 @@ module.exports = function registerPay(app, deps) {
   async function findOrCreateExportOrder(req, channel, body, tradeType) {
     if (!body || body.refundConsent !== true) {
       return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
+    }
+    if (!body || body.licenseConsent !== true) {
+      return { error: '请先阅读并同意《导出与使用条款》（导出内容仅限本人及课题组使用，禁止转售、代画牟利）' };
     }
     let orders = loadJSON(ORDERS_FILE, []);
     markStaleExpired(orders, req).forEach(o => closeWxPrepay(o).catch(e => log(`失效关单失败 order=${o.id} err=${e.message}`)));
@@ -516,6 +525,8 @@ module.exports = function registerPay(app, deps) {
         paidAt: null,
         refundConsent: true,
         refundConsentAt: new Date().toISOString(),
+        licenseConsent: true,
+        licenseConsentAt: new Date().toISOString(),
       };
       orders.push(order);
     }
@@ -532,6 +543,9 @@ module.exports = function registerPay(app, deps) {
   async function findOrCreateSingleOrder(req, target, channel, body, tradeType) {
     if (!body || body.refundConsent !== true) {
       return { error: '请先阅读并勾选：虚拟商品不支持无理由退款' };
+    }
+    if (!body || body.licenseConsent !== true) {
+      return { error: '请先阅读并同意《导出与使用条款》（导出内容仅限本人及课题组使用，禁止转售、代画牟利）' };
     }
     let orders = loadJSON(ORDERS_FILE, []);
     markStaleExpired(orders, req).forEach(o => closeWxPrepay(o).catch(e => log(`失效关单失败 order=${o.id} err=${e.message}`)));
@@ -558,6 +572,8 @@ module.exports = function registerPay(app, deps) {
         paidAt: null,
         refundConsent: true,
         refundConsentAt: new Date().toISOString(),
+        licenseConsent: true,
+        licenseConsentAt: new Date().toISOString(),
       };
       orders.push(order);
     }
@@ -690,11 +706,11 @@ module.exports = function registerPay(app, deps) {
   function orderSubject(target, order) {
     if (target.materialId) {
       const title = target.materialTitle || order.materialTitle || '';
-      return ('无花有果-单张素材-' + title).slice(0, 30);
+      return ('无花果-单张素材-' + title).slice(0, 30);
     }
-    if (target.exportBoard) return '无花有果-画板导出单次';
-    if (target.creditPkg) return `无花有果-${order.credits}积分`;
-    return '无花有果-' + PLANS[target.plan].name;
+    if (target.exportBoard) return '无花果-画板导出单次';
+    if (target.creditPkg) return `无花果-${order.credits}积分`;
+    return '无花果-' + PLANS[target.plan].name;
   }
   function targetLabel(target) {
     if (target.materialId) return 'material=' + target.materialId;
@@ -942,6 +958,19 @@ module.exports = function registerPay(app, deps) {
   });
 
   // 支付宝电脑网站支付下单：返回收银台 URL，前端新窗口打开（支付宝页内自带扫码/登录支付）
+  // 2026-11-26：支付宝收银台同步回跳地址支持按订单传入（付完回来源页），
+  // 仅允许本站相对路径（防开放跳转），非法/缺失时回退到配置的默认地址。
+  const orderReturnUrl = (body) => {
+    const c = loadConfig();
+    const alipayCfg = c && c.alipay;
+    const fallback = (alipayCfg && alipayCfg.returnUrl) || 'https://onefig.cn/pricing';
+    let origin = 'https://onefig.cn';
+    try { origin = new URL((alipayCfg && alipayCfg.notifyUrl) || origin).origin; } catch { /* 用默认 origin */ }
+    const u = body && typeof body.returnUrl === 'string' ? body.returnUrl : '';
+    if (!u.startsWith('/') || u.startsWith('//')) return fallback;
+    return origin + u;
+  };
+
   app.post('/api/pay/alipay/pagepay', authUser, async (req, res) => {
     cfg = loadConfig();
     const a = cfg.alipay;
@@ -964,7 +993,7 @@ module.exports = function registerPay(app, deps) {
       subject: orderSubject(target, order),
       product_code: 'FAST_INSTANT_TRADE_PAY',
       timeout_express: '24h', // 与 PENDING_TTL 对齐：超时支付宝自动关单，旧收银台页面无法再付款
-    }, { notify_url: a.notifyUrl, return_url: a.returnUrl });
+    }, { notify_url: a.notifyUrl, return_url: orderReturnUrl(req.body) });
     markPaymentAttempt(order);
     persistOrder(target, order);
     log(`支付宝下单 order=${order.id} ${target.creditPkg ? 'pkg=' + target.creditPkg : 'plan=' + target.plan} amount=${order.amount}`);

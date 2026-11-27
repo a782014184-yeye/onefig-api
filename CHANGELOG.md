@@ -5,6 +5,11 @@
 ## [Unreleased]
 
 ### Added
+- 反倒卖合规（2026-11-27）：会员/单张素材/画板导出三类订单下单接口（微信 Native/JSAPI/H5、支付宝 pagepay 共用 findOrCreate 链路）强制校验 `licenseConsent === true`，与 `refundConsent` 同口径「前端禁用 + 后端硬校验」双保险，未勾选返回明确错误文案；订单与购买流水（purchases.json）留痕 `licenseConsent`/`licenseConsentAt`；积分充值订单不涉及内容授权不强制；console.js 人工确认补单同样留痕
+- 支付回归新增负向用例：B0b/D1b/E1b 验证「已勾选退款、未勾选导出条款」被拦截，B1/D2/E2 验证留痕字段随单落库（`test-pay-credit.cjs` 38 项全过，`test-pay-retry.cjs` 通过）
+- 《素材授权协议》第八节（导出内容使用特别约定）正文进入前端 /license 页面，与支付勾选框联动
+
+### Added
 - AI 工坊并发架构升级（2026-11-13，issue：ai工坊并发架构升级-issue-20261113）：生图全局队列 `ONEFIG_AI_GEN_WORKERS` 与本地抠图队列 `ONEFIG_LOCAL_BG_WORKERS` 升配后并行化（默认 2/3，环境变量可调）；像素级图像算法迁入 `image-ops.js`，生产路径经 worker_threads 线程池执行（`ONEFIG_IMAGE_WORKERS` 可调），主进程事件循环零阻塞；rembg 服务新增 `/matte-full` 端点，整条透明底流水线（推理+洪泛+选择性并集+白边清理+质检）在服务端以 numpy 一次完成（1536²，算法耗时 0.1-0.4s），ai.js `matteImage` 远程优先、端点不可用时自动回退本地 worker 流水线；rembg 服务启动预热双模型、会话懒加载加锁、`MATTE_INTRA_THREADS` 可调
 - 新增 `test-image-ops-pool.cjs`：验证 worker 与同步实现逐字节一致、事件循环零阻塞、异常传递
 

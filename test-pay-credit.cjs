@@ -215,10 +215,18 @@ function ok(name) { passed++; console.log('  ✅', name); }
   assert.match(b0.error, /退款/);
   ok('B0 会员订单未勾选退款协议被拒绝');
 
-  const b1 = await post('/api/pay/alipay/pagepay', { plan: 'basic', refundConsent: true });
+  // 2026-11-27 反倒卖合规：退款与《导出与使用条款》两项同意分别校验、分别留痕
+  const b0b = await post('/api/pay/alipay/pagepay', { plan: 'basic', refundConsent: true });
+  assert.strictEqual(b0b.ok, false);
+  assert.match(b0b.error, /导出与使用条款/);
+  ok('B0b 会员订单已勾选退款、未勾选导出条款被拒绝');
+
+  const b1 = await post('/api/pay/alipay/pagepay', { plan: 'basic', refundConsent: true, licenseConsent: true });
   assert.strictEqual(b1.ok, true);
   assert.strictEqual(b1.order.amount, 29.9);
-  const b1r = await post('/api/pay/alipay/pagepay', { plan: 'basic', refundConsent: true });
+  assert.strictEqual(b1.order.licenseConsent, true);
+  assert.ok(b1.order.licenseConsentAt, '条款同意时间随单留痕');
+  const b1r = await post('/api/pay/alipay/pagepay', { plan: 'basic', refundConsent: true, licenseConsent: true });
   assert.strictEqual(b1r.order.id, b1.order.id);
   ok('B1 待支付订单可再次发起付款（复用原订单）');
 
@@ -227,12 +235,12 @@ function ok(name) { passed++; console.log('  ✅', name); }
   assert.strictEqual(readUser().credits, 255, '105 + 150');
   ok('B2 全价开通青果，赠送 150 积分');
 
-  const b2 = await post('/api/pay/alipay/pagepay', { plan: 'basic', refundConsent: true });
+  const b2 = await post('/api/pay/alipay/pagepay', { plan: 'basic', refundConsent: true, licenseConsent: true });
   assert.strictEqual(b2.ok, false);
   assert.match(b2.error, /无需重复购买/);
   ok('B3 已是青果 → 重复购买被拦截');
 
-  const p1 = await post('/api/pay/alipay/pagepay', { plan: 'pro', refundConsent: true });
+  const p1 = await post('/api/pay/alipay/pagepay', { plan: 'pro', refundConsent: true, licenseConsent: true });
   assert.strictEqual(p1.order.amount, 70, '升级差价 99.9 − 29.9');
   assert.strictEqual(await notify(p1.order), 'success');
   assert.strictEqual(readUser().level, 'pro');
@@ -240,18 +248,18 @@ function ok(name) { passed++; console.log('  ✅', name); }
   assert.match(JSON.parse(fs.readFileSync(path.join(aiDir, 'credit-log.json'), 'utf8')).slice(-1)[0].reason, /升级红果会员赠送/);
   ok('B4 青果升级红果：差价 70 元 + 补差 750 积分');
 
-  const b3 = await post('/api/pay/alipay/pagepay', { plan: 'basic', refundConsent: true });
+  const b3 = await post('/api/pay/alipay/pagepay', { plan: 'basic', refundConsent: true, licenseConsent: true });
   assert.strictEqual(b3.ok, false);
   ok('B5 已是红果 → 不能买更低档');
 
-  const t1 = await post('/api/pay/alipay/pagepay', { plan: 'team', refundConsent: true });
+  const t1 = await post('/api/pay/alipay/pagepay', { plan: 'team', refundConsent: true, licenseConsent: true });
   assert.strictEqual(t1.order.amount, 200);
   assert.strictEqual(await notify(t1.order), 'success');
   assert.strictEqual(readUser().level, 'team');
   assert.strictEqual(readUser().credits, 3105);
   ok('B6 红果升级金果：差价 200 元 + 补差 2100 积分');
 
-  const t2 = await post('/api/pay/alipay/pagepay', { plan: 'team', refundConsent: true });
+  const t2 = await post('/api/pay/alipay/pagepay', { plan: 'team', refundConsent: true, licenseConsent: true });
   assert.strictEqual(t2.ok, false);
   assert.strictEqual(await notify(t1.order), 'success');
   assert.strictEqual(readUser().credits, 3105);
@@ -260,12 +268,12 @@ function ok(name) { passed++; console.log('  ✅', name); }
   // ========== C. 24h 失效 + 一键清空 ==========
   { const us = loadUsers(); us[0].level = 'none'; saveUsers(us); }
   const H25 = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
-  const c1 = await post('/api/pay/alipay/pagepay', { plan: 'pro', refundConsent: true });
+  const c1 = await post('/api/pay/alipay/pagepay', { plan: 'pro', refundConsent: true, licenseConsent: true });
   const c2 = await post('/api/pay/alipay/pagepay', { creditPkg: 'p2000', refundConsent: true });
   backdate(path.join(consoleDir, 'orders.json'), c1.order.id, H25);
   backdate(path.join(aiDir, 'credit-orders.json'), c2.order.id, H25);
 
-  const c1n = await post('/api/pay/alipay/pagepay', { plan: 'pro', refundConsent: true });
+  const c1n = await post('/api/pay/alipay/pagepay', { plan: 'pro', refundConsent: true, licenseConsent: true });
   assert.notStrictEqual(c1n.order.id, c1.order.id);
   assert.strictEqual(readOrders().find(o => o.id === c1.order.id).status, 'expired');
   ok('C1 超期待支付订单重启 → 旧单标记失效、开新单');
@@ -288,11 +296,17 @@ function ok(name) { passed++; console.log('  ✅', name); }
   assert.match(d0.error, /退款/);
   ok('D1 导出订单未勾选退款协议被拒绝');
 
-  const d1 = await post('/api/pay/alipay/pagepay', { exportBoard: true, refundConsent: true });
+  const d0b = await post('/api/pay/alipay/pagepay', { exportBoard: true, refundConsent: true });
+  assert.strictEqual(d0b.ok, false);
+  assert.match(d0b.error, /导出与使用条款/);
+  ok('D1b 导出订单已勾选退款、未勾选导出条款被拒绝');
+
+  const d1 = await post('/api/pay/alipay/pagepay', { exportBoard: true, refundConsent: true, licenseConsent: true });
   assert.strictEqual(d1.ok, true);
   assert.strictEqual(d1.order.kind, 'export');
   assert.strictEqual(d1.order.amount, 6.9);
   assert.strictEqual(d1.order.creditSchema, 1);
+  assert.strictEqual(d1.order.licenseConsent, true);
   ok('D2 exportBoard 下单成功（kind=export，¥6.9，可绑定授权码）');
 
   assert.strictEqual(await notify(d1.order), 'success');
@@ -313,17 +327,20 @@ function ok(name) { passed++; console.log('  ✅', name); }
   assert.match(e0.error, /素材不存在/);
   ok('E1 无效素材 ID 被拒绝');
 
-  const e1 = await post('/api/pay/alipay/pagepay', { materialId: 'm-test-1', refundConsent: true });
+  const e1 = await post('/api/pay/alipay/pagepay', { materialId: 'm-test-1', refundConsent: true, licenseConsent: true });
   assert.strictEqual(e1.ok, true);
   assert.strictEqual(e1.order.kind, 'single');
   assert.strictEqual(e1.order.amount, 6.9);
   assert.strictEqual(e1.order.materialTitle, '测试素材图');
+  assert.strictEqual(e1.order.licenseConsent, true);
   ok('E2 materialId 下单成功（kind=single）');
 
   assert.strictEqual(await notify(e1.order), 'success');
   const purchases = JSON.parse(fs.readFileSync(path.join(consoleDir, 'purchases.json'), 'utf8'));
   assert.strictEqual(purchases.length, 1);
   assert.strictEqual(purchases[0].materialId, 'm-test-1');
+  assert.strictEqual(purchases[0].licenseConsent, true, '购买流水留痕条款同意');
+  assert.ok(purchases[0].licenseConsentAt, '购买流水留痕条款同意时间');
   assert.strictEqual(readUser().level, 'none', '单张购买不影响会员等级');
   ok('E3 回调 → 素材永久下载权益入账');
 
@@ -332,13 +349,13 @@ function ok(name) { passed++; console.log('  ✅', name); }
   ok('E4 重复回调不重复记购买');
 
   // ========== F. 微信 Native（假微信支付服务器）============
-  const f1 = await post('/api/pay/wechat/native', { plan: 'basic', refundConsent: true });
+  const f1 = await post('/api/pay/wechat/native', { plan: 'basic', refundConsent: true, licenseConsent: true });
   assert.strictEqual(f1.ok, true);
   assert.ok(String(f1.codeUrl).startsWith('weixin://'));
   assert.ok(readOrders().find(o => o.id === f1.order.id).codeUrl, 'codeUrl 已持久化');
   ok('F1 微信 Native 下单成功，二维码落库');
 
-  const f2 = await post('/api/pay/wechat/native', { plan: 'basic', refundConsent: true });
+  const f2 = await post('/api/pay/wechat/native', { plan: 'basic', refundConsent: true, licenseConsent: true });
   const nativeCallsAfterF1 = wxLog.filter(x => x === 'native').length;
   assert.strictEqual(f2.reused, true);
   assert.strictEqual(f2.codeUrl, f1.codeUrl, '有效期内复用同一二维码');
@@ -352,7 +369,7 @@ function ok(name) { passed++; console.log('  ✅', name); }
     o.codeUrlAt = new Date(Date.now() - 3 * 3600 * 1000).toISOString();
     fs.writeFileSync(path.join(consoleDir, 'orders.json'), JSON.stringify(rows, null, 1));
   }
-  const f3 = await post('/api/pay/wechat/native', { plan: 'basic', refundConsent: true });
+  const f3 = await post('/api/pay/wechat/native', { plan: 'basic', refundConsent: true, licenseConsent: true });
   await new Promise(r => setTimeout(r, 50));
   assert.notStrictEqual(f3.codeUrl, f1.codeUrl, '过期后换新码');
   assert.notStrictEqual(f3.order.outTradeNo, f1.order.outTradeNo, '过期续付必须更换商户支付单号');

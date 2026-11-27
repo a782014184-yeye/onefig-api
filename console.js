@@ -123,9 +123,48 @@ module.exports = function registerConsole(app, deps) {
     } catch { res.status(500).json({ ok: false, error: '读取失败' }); }
   });
 
+  // 高频导出预警（2026-11-27）：近 24h 导出次数 ≥ 阈值（默认 5 次，env ONEFIG_EXPORT_ALERT_DAILY 可调）的账号，
+  // 供管理员人工判断是否标记为高风险账号（标记后验真页红色警示）
+  const EXPORT_ALERT_DAILY = Math.max(1, Number(process.env.ONEFIG_EXPORT_ALERT_DAILY || 5));
+  app.get('/console/api/export-alerts', consoleAuth, (req, res) => {
+    try {
+      const dls = load('downloads.json', []);
+      const users = load('users.json', []);
+      const now = Date.now();
+      const dayMs = 86400e3;
+      const counts = new Map();
+      for (const l of dls) {
+        if (l.kind !== 'export' || !l.userId || !l.time) continue;
+        const t = Date.parse(l.time);
+        if (!Number.isFinite(t)) continue;
+        const age = now - t;
+        if (age > 7 * dayMs) continue;
+        const c = counts.get(l.userId) || { c24: 0, c7: 0 };
+        c.c7++;
+        if (age <= dayMs) c.c24++;
+        counts.set(l.userId, c);
+      }
+      const LEVELS = { none: '免费', basic: '青果', pro: '红果', team: '金果' };
+      const rows = [];
+      for (const [userId, c] of counts) {
+        if (c.c24 < EXPORT_ALERT_DAILY) continue;
+        const u = users.find(x => x.id === userId);
+        rows.push({
+          userId,
+          name: u ? (u.name || '') : '（账号已注销）',
+          email: u ? (u.email || '') : '',
+          level: u ? (LEVELS[u.level || 'none'] || u.level) : '—',
+          highRisk: !!(u && u.highRisk),
+          count24h: c.c24, count7d: c.c7,
+        });
+      }
+      rows.sort((a, b) => b.count24h - a.count24h || b.count7d - a.count7d);
+      res.json({ ok: true, list: rows.slice(0, 30), total: rows.length, threshold: EXPORT_ALERT_DAILY });
+    } catch { res.status(500).json({ ok: false, error: '读取失败' }); }
+  });
+
   // 积分统计：总收入 + 各套餐收入 + 每日购买积分数（近 N 天柱状图）
-  app.get('/console/api/credit-stats', consoleAuth, (req, res) => {
-    const days = Math.min(366, Math.max(7, parseInt(req.query.range, 10) || 30));
+  app.get('/console/api/credit-stats', consoleAuth, (req, res) => {    const days = Math.min(366, Math.max(7, parseInt(req.query.range, 10) || 30));
     const testIds = testUserIds();
     const all = load(path.join('..', 'ai', 'credit-orders.json'), []);
     const paid = all.filter(o => o.status === 'paid' && !o.test && !testIds.has(o.userId));
@@ -716,6 +755,7 @@ module.exports = function registerConsole(app, deps) {
             userId: order.userId, materialId: order.materialId, materialTitle: order.materialTitle || '', orderId: order.id,
             amount: order.amount, channel: order.channel || '', paidAt: order.paidAt || null,
             refundConsent: !!order.refundConsent, refundConsentAt: order.refundConsentAt || null,
+            licenseConsent: !!order.licenseConsent, licenseConsentAt: order.licenseConsentAt || null,
           });
         }
         save('purchases.json', purchases);
@@ -1313,7 +1353,7 @@ module.exports = function registerConsole(app, deps) {
 
 const OSS = 'http://onefig.oss-cn-hangzhou.aliyuncs.com/previews/';
 
-const PAGE = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>无花有果 · 管理后台</title>
+const PAGE = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>无花果 · 管理后台</title>
 <link rel="icon" type="image/png" href="/brand/icon.png">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1492,7 +1532,7 @@ select:focus,input:focus{border-color:#a78bfa}
 @media(max-width:760px){.side{width:60px;padding:14px 6px}.side .brand{font-size:0}.side a{font-size:0;justify-content:center}.side a .ic{font-size:18px}.main{padding:16px}}
 </style></head><body>
 <div class="side">
-  <div class="brand" style="display:flex;align-items:center;justify-content:center;gap:8px"><img src="/brand/icon.png" style="width:30px;height:30px;object-fit:contain;border-radius:8px;background:#fff;padding:2px">无花有果 后台</div>
+  <div class="brand" style="display:flex;align-items:center;justify-content:center;gap:8px"><img src="/brand/icon.png" style="width:30px;height:30px;object-fit:contain;border-radius:8px;background:#fff;padding:2px">无花果 后台</div>
   <a href="#/dashboard" data-r="dashboard"><span class="ic">📊</span>数据看板</a>
   <a href="#/materials" data-r="materials"><span class="ic">🎨</span>素材管理</a>
   <a href="#/users" data-r="users"><span class="ic">👥</span>账号管理</a>
@@ -1509,7 +1549,7 @@ select:focus,input:focus{border-color:#a78bfa}
 <div class="toast" id="toast"></div>
 <div class="login-mask" id="loginMask"><div class="login-card">
   <img src="/brand/icon.png" style="width:48px;height:48px;border-radius:12px;background:#f6f4fb;padding:4px;object-fit:contain">
-  <h1>无花有果 · 管理后台</h1>
+  <h1>无花果 · 管理后台</h1>
   <div class="sub">请登录后使用</div>
   <div class="login-err" id="loginErr"></div>
   <input id="loginUser" placeholder="账号" autocomplete="username" onkeydown="if(event.key==='Enter')doLogin()">
@@ -1643,6 +1683,16 @@ H.dashboard=async()=>{
   const cs=await api('/console/api/credit-stats?range='+(window._crange||30)).catch(()=>null);
   const ai=await api('/console/api/ai-stats').catch(()=>null);
   const leak=await api('/console/api/leak-watch').catch(()=>null);
+  // 高频导出预警（2026-11-27）：近 24h 导出 ≥ 阈值的账号，可一键标记/取消高风险
+  const exAlert=await api('/console/api/export-alerts').catch(()=>null);
+  const exPanel=exAlert?('<div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🚨 高频导出预警</h3><div class="sp"></div><span class="sub" style="font-size:12px">近 24h 导出 ≥ '+exAlert.threshold+' 次的账号（阈值可用 ONEFIG_EXPORT_ALERT_DAILY 调整）</span></div>'
+    +(exAlert.list.length
+      ? '<div style="max-height:260px;overflow:auto"><table><tr><th>账号</th><th>会员</th><th>近 24h</th><th>近 7 天</th><th>状态 / 操作</th></tr>'
+        +exAlert.list.map(r=>'<tr><td style="font-size:12px"><b>'+esc(r.name)+'</b><br><span style="color:#b0aac4">'+esc(r.email)+'</span></td><td style="font-size:12px">'+esc(r.level)+'</td><td style="font-size:12px;font-weight:700;color:'+(r.count24h>=exAlert.threshold*2?'#d6336c':'#b8860b')+'">'+r.count24h+' 次</td><td style="font-size:12px">'+r.count7d+' 次</td><td style="font-size:12px;white-space:nowrap">'
+          +(r.highRisk?'<span style="color:#d6336c;font-weight:700">⚠️ 已标记高风险</span> ':'')
+          +'<button class="btn btn-xs '+(r.highRisk?'btn-g':'btn-p')+'" onclick="toggleRisk(\''+r.userId+'\','+(r.highRisk?'false':'true')+')">'+(r.highRisk?'取消标记':'标记高风险')+'</button></td></tr>').join('')
+        +'</table></div>'
+      : '<div class="sub" style="padding:14px;text-align:center">✅ 暂无高频导出账号</div>')+'</div>'):'';
   // 验真异常：非作者查询明显多于作者的授权码，疑似泄露/转卖
   const leakPanel=leak?('<div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🔍 验真异常监控</h3><div class="sp"></div><span class="sub" style="font-size:12px">非作者查询 ≥3 且多于作者本人的授权码</span></div>'
     +(leak.list.length
@@ -1675,10 +1725,19 @@ H.dashboard=async()=>{
     <div class="kpi"><div class="lbl">总支付金额</div><div class="num">'+yuan(s.totalRevenue)+'</div><div class="chips"><span class="chip">不含测试账号</span></div></div>\
   </div>'+aiPanel+'\
   <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">💰 每日收入走势</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'revenue','linear-gradient(180deg,#a78bfa,#7c5cbf)',v=>yuan(v))+'</div>\
-  <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🌱 每日新增用户</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'users','linear-gradient(180deg,#6ee7b7,#34d399)',v=>v+'人')+'</div>'+leakPanel+creditPanel;
+  <div class="panel"><div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:15px">🌱 每日新增用户</h3><div class="sp"></div>'+tabBtns+'</div>'+chart(trend.days,'users','linear-gradient(180deg,#6ee7b7,#34d399)',v=>v+'人')+'</div>'+exPanel+leakPanel+creditPanel;
 };
 window.setRange=r=>{window._range=r;route()};
 window.setCRange=r=>{window._crange=r;route()};
+// 高风险账号标记/取消（2026-11-27）：标记后该账号授权码的验真页红色警示
+window.toggleRisk=async(id,flag)=>{
+  if(flag && !confirm('确认把该账号标记为高风险？\n标记后，该账号授权码的验真页将显示「账号异常高风险」红色警示。')) return;
+  try{
+    await api('/console/api/users/'+id+'/risk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({highRisk:flag})});
+    toast(flag?'已标记为高风险 ✅':'已取消高风险标记 ✅');
+    route();
+  }catch(e){toast(e.message)}
+};
 
 /* ---------- 2. 素材管理 ---------- */
 let matView={series:null,hot:false,featured:false,q:''},sortMode=false,MAT_DATA=null,dragFolder='',dragMaterial='';

@@ -125,22 +125,22 @@ const { CREDIT_PACKAGES } = require('./ai');
 
   try {
     // 金额变化：99.9 元旧单不能在青果升级时复用为全价；关单失败不开新单，成功后开 70 元新单。
-    const oldOrder = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true });
+    const oldOrder = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true, licenseConsent: true });
     assert.equal(oldOrder.data.order.amount, 99.9);
     const users = loadUsers(); users[0].level = 'basic'; saveUsers(users);
     failNextClose = true;
-    const blocked = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true });
+    const blocked = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true, licenseConsent: true });
     assert.equal(blocked.status, 409);
     assert.equal(read(ordersFile).filter(x => x.plan === 'pro').length, 1, '关单失败不得新增订单');
     failNextClose = false;
-    const upgraded = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true });
+    const upgraded = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true, licenseConsent: true });
     assert.equal(upgraded.status, 200);
     assert.equal(upgraded.data.order.amount, 70);
     assert.notEqual(upgraded.data.order.id, oldOrder.data.order.id);
     const afterUpgrade = read(ordersFile);
     assert.equal(afterUpgrade.find(x => x.id === oldOrder.data.order.id).status, 'expired');
     assert.equal(afterUpgrade.find(x => x.id === oldOrder.data.order.id).closeReason, 'amount-changed');
-    const sameUpgrade = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true });
+    const sameUpgrade = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true, licenseConsent: true });
     assert.equal(sameUpgrade.data.order.id, upgraded.data.order.id);
     assert.equal(sameUpgrade.data.order.amount, 70);
 
@@ -148,10 +148,10 @@ const { CREDIT_PACKAGES } = require('./ai');
     const n1 = upgraded;
     const nativeId = n1.data.order.id;
     mutate(ordersFile, nativeId, { codeUrlAt: new Date(Date.now() - 3 * 3600e3).toISOString() });
-    const n2 = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true });
+    const n2 = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true, licenseConsent: true });
     assert.notEqual(n2.data.order.outTradeNo, n1.data.order.outTradeNo);
     assert.ok(n2.data.order.previousOutTradeNos.includes(n1.data.order.outTradeNo));
-    const n3 = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true });
+    const n3 = await post('/api/pay/wechat/native', { plan: 'pro', refundConsent: true, licenseConsent: true });
     assert.equal(n3.data.order.outTradeNo, n2.data.order.outTradeNo, 'Native 复用不得重置回旧号');
 
     // JSAPI：23 小时旧订单 + 3 小时旧预支付，换号但保留原始 createdAt，并刷新支付时效。
