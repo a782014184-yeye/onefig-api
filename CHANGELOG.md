@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- 大图转可编辑本地兜底（2026-11-27）：模型重绘两次失败自动切本地 ImageTracer 描摹（traceSvg 从 workshop.mjs 导出复用），响应带 `fallback: true`，主站结果区显示描摹风格提示；描摹也失败才退积分
 - 大图转可编辑可靠性（2026-11-27）：模型未返回完整 SVG 时自动重试一次；流式读取捕获 finish_reason/usage，失败日志带截断诊断；两次失败自动退积分，并按截断原因给出「换更简单的图」建议；workshop 其余 AI 处理失败同样补退积分
 - 生成记录文件显示名可读化（2026-11-27）：画板「生成记录」中来自主站的记录不再显示 `c0/c1…` 内部编号——拆分图层显示「底图/图层 N」，多候选显示「候选 N」，单结果直接显示功能名（生成素材/AI 改图/…）；名称在读取时生成，历史记录同步生效
 - 一键绑定引导（2026-11-27）：`POST /api/auth/wx-prompt-dismiss` 持久化「暂时不用」（`wxPromptDismissedAt` 入用户表）；`wx-status` 新增 `promptDismissed`

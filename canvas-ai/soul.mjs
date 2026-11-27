@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { traceSvg } from './workshop.mjs';
 
 const PROMPT = `Precisely recreate the layout as an editable SVG: use <text> elements for text, and separate vector elements for 图中的所有实体元素，boxes, lines, icons, and charts. 
 
@@ -102,6 +103,19 @@ export function registerSoulRoute(app, { root, upload, readGptsKey, charge }) {
       }
       return readModelAnswer(response);
     };
+    // 保存原图引用 + SVG 产物并响应（模型重绘与本地描摹兜底共用）
+    const deliver = (svg, modelName, extra) => {
+      const referenceId = crypto.randomUUID();
+      const ext = req.file.mimetype === 'image/jpeg' ? 'jpg' : req.file.mimetype === 'image/webp' ? 'webp' : 'png';
+      const referenceFile = `${referenceId}.${ext}`;
+      fs.writeFileSync(path.join(referenceDir, referenceFile), req.file.buffer);
+      const references = readJson(referenceIndex, {});
+      references[referenceId] = { file: referenceFile, mime: req.file.mimetype, generated: false, provider: modelName, userId: req.user.id };
+      saveJson(referenceIndex, references);
+      const id = crypto.randomUUID();
+      fs.writeFileSync(path.join(dir, `${id}.svg`), svg);
+      return res.json({ ok: true, model: modelName, svg, url: `/soul-svg/${id}.svg`, referenceId, referenceUrl: `/references/${referenceFile}`, usage: answer?.usage, ...(extra || {}) });
+    };
     try {
       let answer, content = '', lastDiag = '';
       for (let attempt = 1; attempt <= 2; attempt++) {
@@ -113,28 +127,25 @@ export function registerSoulRoute(app, { root, upload, readGptsKey, charge }) {
           const svg = content.slice(start, end + 6).replace(/<\?xml[^>]*>/g, '').trim();
           if (/<script|foreignObject|<image\b|javascript:|on[a-z]+\s*=/i.test(svg)) throw new Error('返回的 SVG 包含不支持的内容');
           if (!/<(?:path|rect|circle|ellipse|polygon|polyline|line|text)\b/i.test(svg)) throw new Error('返回的 SVG 没有可编辑图形');
-
-          const referenceId = crypto.randomUUID();
-          const ext = req.file.mimetype === 'image/jpeg' ? 'jpg' : req.file.mimetype === 'image/webp' ? 'webp' : 'png';
-          const referenceFile = `${referenceId}.${ext}`;
-          fs.writeFileSync(path.join(referenceDir, referenceFile), req.file.buffer);
-          const references = readJson(referenceIndex, {});
-          references[referenceId] = { file: referenceFile, mime: req.file.mimetype, generated: false, provider: model, userId: req.user.id };
-          saveJson(referenceIndex, references);
-
-          const id = crypto.randomUUID();
-          fs.writeFileSync(path.join(dir, `${id}.svg`), svg);
-          return res.json({ ok: true, model, svg, url: `/soul-svg/${id}.svg`, referenceId, referenceUrl: `/references/${referenceFile}`, usage: answer.usage });
+          return deliver(svg, model);
         }
         lastDiag = `attempt=${attempt} finish=${answer.finishReason || '?'} usage=${JSON.stringify(answer.usage || null)} len=${content.length} head=${JSON.stringify(content.slice(0, 100))} tail=${JSON.stringify(content.slice(-100))}`;
         console.error('[soul-redraw] 模型未返回完整 SVG', lastDiag);
       }
-      // 两次都失败：退积分 + 按截断与否给可操作建议
+      // 2026-11-27：模型两次都未给出完整 SVG → 本地 ImageTracer 描摹兜底（旧"位图转矢量"同款能力），保证用户拿到可编辑 SVG
+      try {
+        const traced = await traceSvg(req.file.buffer);
+        if (/<(?:path|rect|circle|ellipse|polygon|polyline|line|text)\b/i.test(traced)) {
+          console.error('[soul-redraw] 模型重绘失败，已用本地描摹兜底', lastDiag);
+          return deliver(traced, 'local-trace', { fallback: true });
+        }
+      } catch (fallbackError) { console.error('[soul-redraw] 本地描摹兜底也失败', fallbackError); }
+      // 兜底也失败：退积分 + 按截断与否给可操作建议
       res.locals.canvasAiRefund?.();
       const truncated = answer?.finishReason === 'length';
       throw Object.assign(new Error(truncated
-        ? '这张图细节较多，模型输出超出长度被截断。建议换一张元素更简单的图，或稍后重试（积分已退回）'
-        : '模型没有返回完整的 SVG，已自动重试一次仍失败，请稍后重试（积分已退回）'), { status: 502 });
+        ? '这张图细节较多，模型输出超出长度被截断，且本地矢量化也未成功。建议换一张元素更简单的图（积分已退回）'
+        : '模型没有返回完整的 SVG，已自动重试并尝试本地矢量化，均未成功，请稍后重试（积分已退回）'), { status: 502 });
     } catch (error) {
       console.error('[soul-redraw]', error);
       res.status(error?.status || 502).json({ ok: false, error: String(error?.message || '大图转可编辑失败，请重试').slice(0, 300) });

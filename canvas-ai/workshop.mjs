@@ -83,7 +83,7 @@ async function removeBackground(buffer, mime) {
   throw new Error('本地抠图服务未就绪，暂时无法移除背景，请稍后重试');
 }
 
-async function traceSvg(buffer) {
+export async function traceSvg(buffer) {
   const { data, info } = await sharp(buffer).resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
     .flatten({ background: '#ffffff' }).raw().toBuffer({ resolveWithObject: true });
   const svg = ImageTracer.imagedataToSVG(
