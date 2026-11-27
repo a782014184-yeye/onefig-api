@@ -222,7 +222,8 @@ module.exports = function registerWx(app, deps) {
   // 前端据此决定是否展示「微信扫码登录」入口
   app.get('/api/auth/wxqr/enabled', (req, res) => res.json({ ok: true, enabled: enabled() }));
 
-  const qrCreateLimit = makeRateLimiter(10, 10 * 60e3, '二维码刷新太频繁啦，请 10 分钟后再试');
+  // 生成二维码限流：30 次/10 分钟/IP（2026-11-27 实测 10 次太紧，反复打开弹窗验收即触顶；微信 qrcode/create 配额十万级/天，30 次不构成压力）
+  const qrCreateLimit = makeRateLimiter(30, 10 * 60e3, '二维码刷新太频繁啦，请 10 分钟后再试');
   // 生成登录/绑定二维码。mode=bind 需登录（扫码后直接绑到当前账号）
   app.post('/api/auth/wxqr', (req, res, next) => {
     if (req.body && req.body.mode === 'bind') return authUser(req, res, next);
