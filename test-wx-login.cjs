@@ -203,13 +203,25 @@ function ok(name) { passed++; console.log('  ✅', name); }
   let loginBindCode = '';
   {
     const r = await postXml(cbQuery(), subscribeXml(q1.scene, OX1));
-    assert.strictEqual(r.text, 'success');
+    assert.match(r.text, /<MsgType><!\[CDATA\[text\]\]><\/MsgType>/, '订阅事件应回复欢迎语文本消息');
+    assert.match(r.text, /OneFig无花果|欢迎/, '欢迎语包含品牌与欢迎字样');
+    assert.match(r.text, new RegExp('<ToUserName><!\\[CDATA\\[' + OX1), '回复接收方为关注者 openid');
     const st = await waitFollowed(q1.scene);
     assert.strictEqual(st.status, 'followed');
     assert.ok(st.bindCode);
     assert.strictEqual(st.wxName, '科研小果');
     loginBindCode = st.bindCode;
-    ok('C3 关注事件 → followed + bindCode + 昵称');
+    ok('C3 关注事件 → 欢迎语回复 + followed + bindCode + 昵称');
+  }
+  // 已关注用户扫码（SCAN 事件）→ 回操作提示，同样置 scene followed
+  {
+    const qScan = await post('/api/auth/wxqr', {});
+    const scanXml = `<xml><ToUserName><![CDATA[gh_test]]></ToUserName><FromUserName><![CDATA[${OX1}]]></FromUserName><CreateTime>1700000001</CreateTime><MsgType><![CDATA[event]]></MsgType><Event><![CDATA[SCAN]]></Event><EventKey><![CDATA[${qScan.scene}]]></EventKey></xml>`;
+    const r = await postXml(cbQuery(), scanXml);
+    assert.match(r.text, /已收到你的扫码/, 'SCAN 事件应回复扫码提示');
+    const st = await waitFollowed(qScan.scene);
+    assert.strictEqual(st.status, 'followed');
+    ok('C3b 已关注扫码（SCAN）→ 操作提示 + followed');
   }
 
   // ====== D/E. 邮箱绑定 ======

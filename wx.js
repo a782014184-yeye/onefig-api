@@ -124,6 +124,25 @@ module.exports = function registerWx(app, deps) {
     return expect === String(signature);
   }
 
+  // ---- 关注欢迎语（2026-11-27）：开启消息推送后平台自带"被关注回复"失效，由我方服务器在订阅事件中回复 ----
+  const WELCOME_FILE = path.join(WX_DIR, 'welcome.json');
+  function welcomeText() {
+    try {
+      const t = String(JSON.parse(fs.readFileSync(WELCOME_FILE, 'utf8')).text || '').replace(/\]\]>/g, '').trim();
+      if (t) return t.slice(0, 600);
+    } catch { /* 未配置用默认 */ }
+    return '欢迎关注 OneFig无花果 🌱\n微信扫一扫即可登录 onefig.cn，科研素材下载、AI 绘图不迷路～\n回复任意消息还能解锁更多互动哦';
+  }
+  function textXml(toOpenid, fromGh, content) {
+    return '<xml>'
+      + '<ToUserName><![CDATA[' + toOpenid + ']]></ToUserName>'
+      + '<FromUserName><![CDATA[' + fromGh + ']]></FromUserName>'
+      + '<CreateTime>' + Math.floor(Date.now() / 1000) + '</CreateTime>'
+      + '<MsgType><![CDATA[text]]></MsgType>'
+      + '<Content><![CDATA[' + content + ']]></Content>'
+      + '</xml>';
+  }
+
   // ---- 事件 XML 极简解析（仅取需要的字段，CDATA 兼容）----
   function parseEventXml(xml) {
     const pick = tag => {
@@ -393,11 +412,16 @@ module.exports = function registerWx(app, deps) {
     if (!checkSignature(req.query)) { logLine('wx-callback 验签失败'); return res.status(403).end(); }
     const xml = (Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body || '')).slice(0, 64 * 1024);
     const ev = parseEventXml(xml);
-    res.send('success'); // 先应答，昵称拉取异步补齐
-    if (ev.msgType !== 'event') return;
+    if (ev.msgType !== 'event') return res.send('success');
     // 关注：EventKey=qrscene_<scene>；已关注扫码：EventKey=<scene>
     let scene = ev.eventKey || '';
     if (ev.event === 'subscribe') scene = scene.replace(/^qrscene_/, '');
+
+    // 组装被动回复（5 秒内必须应答）：关注回欢迎语；已关注用户扫码回操作提示
+    let reply = '';
+    if (ev.event === 'subscribe') reply = welcomeText();
+    else if (ev.event === 'SCAN' && scene) reply = '已收到你的扫码 ✅ 请回到浏览器页面继续操作～';
+
     if ((ev.event === 'subscribe' || ev.event === 'SCAN') && scene) {
       const s = findScene(scene);
       if (s && s.status === 'pending') {
@@ -406,5 +430,6 @@ module.exports = function registerWx(app, deps) {
         fetchWxName(ev.from).then(n => { if (n) updateScene(scene, { wxName: n }); }).catch(() => {});
       }
     }
+    res.send(reply ? textXml(ev.from, ev.to, reply) : 'success');
   });
 };
