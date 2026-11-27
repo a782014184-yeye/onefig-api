@@ -703,6 +703,10 @@ app.post('/api/auth/delete-account', authUser, authRateLimit, (req, res) => {
   try {
     const password = String((req.body || {}).password || '');
     const u = loadUsers().find(x => x.id === req.user.id);
+    // 2026-11-27 微信创建的无密码账号无法输密码注销：引导先补绑邮箱并设置密码（与 wx-unbind 口径一致）
+    if (u && !u.passHash) {
+      return res.status(400).json({ ok: false, error: '该账号还没有密码（微信扫码创建）。为防止误注销，请先在账号中心补绑邮箱并设置密码，再回来注销。' });
+    }
     if (!u || crypto.scryptSync(password, u.salt, 32).toString('hex') !== u.passHash) {
       logLine('auth', `delete-account-wrong-pass email=${u ? u.email : '?'} ip=${clientIp(req)}`);
       return res.status(400).json({ ok: false, error: '密码不对，注销没有生效' });
