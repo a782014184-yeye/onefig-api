@@ -124,14 +124,20 @@ module.exports = function registerWx(app, deps) {
     return expect === String(signature);
   }
 
-  // ---- 关注欢迎语（2026-11-27）：开启消息推送后平台自带"被关注回复"失效，由我方服务器在订阅事件中回复 ----
+  // ---- 关注欢迎语 / 扫码提示（2026-11-27）：开启消息推送后平台自带"被关注回复"失效，由我方服务器回复 ----
+  // 文案存 data/wx/welcome.json：{ text: 欢迎语, scanTip: 扫码提示 }；缺省时用内置默认
   const WELCOME_FILE = path.join(WX_DIR, 'welcome.json');
+  function loadWelcomeConf() {
+    try { return JSON.parse(fs.readFileSync(WELCOME_FILE, 'utf8')) || {}; } catch { return {}; }
+  }
+  const clean = s => String(s || '').replace(/\]\]>/g, '').trim();
   function welcomeText() {
-    try {
-      const t = String(JSON.parse(fs.readFileSync(WELCOME_FILE, 'utf8')).text || '').replace(/\]\]>/g, '').trim();
-      if (t) return t.slice(0, 600);
-    } catch { /* 未配置用默认 */ }
-    return '欢迎关注 OneFig无花果 🌱\n微信扫一扫即可登录 onefig.cn，科研素材下载、AI 绘图不迷路～\n回复任意消息还能解锁更多互动哦';
+    return clean(loadWelcomeConf().text).slice(0, 600)
+      || '欢迎关注 OneFig无花果 🌱\n微信扫一扫即可登录 onefig.cn，科研素材下载、AI 绘图不迷路～\n回复任意消息还能解锁更多互动哦';
+  }
+  function scanTipText() {
+    return clean(loadWelcomeConf().scanTip).slice(0, 600)
+      || '已收到你的扫码 ✅ 请回到浏览器页面继续操作～';
   }
   function textXml(toOpenid, fromGh, content) {
     return '<xml>'
@@ -448,7 +454,7 @@ module.exports = function registerWx(app, deps) {
     // 组装被动回复（5 秒内必须应答）：关注回欢迎语；已关注用户扫码回操作提示
     let reply = '';
     if (ev.event === 'subscribe') reply = welcomeText();
-    else if (ev.event === 'SCAN' && scene) reply = '已收到你的扫码 ✅ 请回到浏览器页面继续操作～';
+    else if (ev.event === 'SCAN' && scene) reply = scanTipText();
 
     if ((ev.event === 'subscribe' || ev.event === 'SCAN') && scene) {
       const s = findScene(scene);
