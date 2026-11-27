@@ -8,6 +8,7 @@ import { registerWorkshopRoutes } from './workshop.mjs';
 import { registerSoulRoute } from './soul.mjs';
 import { registerVectorizeRoute } from './vectorize.mjs';
 import { registerPromptRoutes } from './prompt-store.mjs';
+import { registerRecommendRoutes } from './recommend.mjs';
 import { createCharging } from './charging.mjs';
 
 export function registerCanvasAi(app, deps) {
@@ -15,7 +16,7 @@ export function registerCanvasAi(app, deps) {
   const root = path.join(DATA_DIR, 'canvas-ai');
   fs.mkdirSync(root, { recursive: true });
   const upload = multer({
-    storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+    storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 6 },
     fileFilter: (_req, file, cb) => cb(null, ['image/png', 'image/jpeg', 'image/webp'].includes(file.mimetype)),
   });
   const readKey = () => {
@@ -44,6 +45,7 @@ export function registerCanvasAi(app, deps) {
   registerAiIconRoutes(app, { root, readKey, refundReference });
   registerWorkshopRoutes(app, { root, readKey, readGptsKey, upload, charge: charging.charge });
   registerSoulRoute(app, { root, upload, readGptsKey, charge: charging.charge });
+  registerRecommendRoutes(app, { upload, readKey, catalog });
   registerVectorizeRoute(app, root, charging.charge);
   logLine('ai-op', 'canvas-ai routes registered');
 }

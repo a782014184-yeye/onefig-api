@@ -390,10 +390,10 @@ async function sendRegisterCode(email) {
   if (!m) return false;
   try {
     await m.mailer.sendMail({
-      from: 'OneFig 无花有果 <' + m.user + '>',
+      from: 'OneFig 无花果 <' + m.user + '>',
       to: email,
-      subject: '【OneFig 无花有果】注册验证码',
-      text: '欢迎注册 OneFig 无花有果！\n\n你的验证码：' + code + '\n\n10 分钟内有效。如果这不是你本人的操作，说明有人误用了你的邮箱，忽略本邮件即可，该账号将无法使用任何免费额度。\n\n— OneFig 无花有果',
+      subject: '【OneFig 无花果】注册验证码',
+      text: '欢迎注册 OneFig 无花果！\n\n你的验证码：' + code + '\n\n10 分钟内有效。如果这不是你本人的操作，说明有人误用了你的邮箱，忽略本邮件即可，该账号将无法使用任何免费额度。\n\n— OneFig无花果团队',
     });
     logLine('auth', 'register-code-sent email=' + email);
     return true;
@@ -608,10 +608,10 @@ app.post('/api/auth/forgot', forgotRateLimit, async (req, res) => {
   if (!m) return res.status(500).json({ ok: false, error: '邮件服务未配置，请联系客服' });
   try {
     await m.mailer.sendMail({
-      from: 'OneFig 无花有果 <' + m.user + '>',
+      from: 'OneFig 无花果 <' + m.user + '>',
       to: email,
-      subject: '【OneFig 无花有果】重置密码验证码',
-      text: '你正在重置 OneFig 无花有果账号的密码。\n\n验证码：' + code + '\n\n10 分钟内有效。如果这不是你本人的操作，请忽略本邮件，你的密码不会改变。',
+      subject: '【OneFig 无花果】重置密码验证码',
+      text: '你正在重置 OneFig 无花果账号的密码。\n\n验证码：' + code + '\n\n10 分钟内有效。如果这不是你本人的操作，请忽略本邮件，你的密码不会改变。\n\n— OneFig无花果团队',
     });
     logLine('auth', 'reset-code-sent email=' + email + ' ip=' + clientIp(req));
     res.json({ ok: true });
@@ -957,9 +957,9 @@ app.get('/api/clean-preview/:series/:title', (req, res) => {
 });
 
 const BASIC_MONTHLY_LIMIT = 5;
-// 画板导出额度（2026-10-19 定价改版）：青果 5 次/月、红果 10 次/月、金果不限；
+// 画板导出额度（2026-10-19 定价改版；2026-11-27 青果 5→2 按反馈）：青果 2 次/月、红果 10 次/月、金果不限；
 // 普通账户无月度额度，靠单次购买（exportCredits，¥6.9/次，用一次扣一次）
-const EXPORT_MONTHLY = { basic: 5, pro: 10 };
+const EXPORT_MONTHLY = { basic: 2, pro: 10 };
 
 // 导出预检（2026-10-20 修复"打开弹窗就扣额度"）：只查不扣，实际扣减在 /api/export/commit（确认下载时）
 app.post('/api/export/permit', authUser, (req, res) => {
@@ -1279,10 +1279,13 @@ app.get('/api/verify', verifyRateLimit, optionalAuth, (req, res) => {
     const fallbackTitle = hit.materialTitle || idParts[idParts.length - 1] || hit.materialId;
     const fallbackSeries = hit.materialSeries || (idParts.length > 1 ? idParts.slice(0, -1).join('/') : '');
     // 授权归属：仅返回脱敏账号（邮箱形如 o***@163.com），供第三方核对又不泄露完整隐私（2026-10-16）
+    // 2026-11-27：账号被后台标记高风险时，验真页随结果返回标记，前端红色警示
     let licensee = null;
+    let accountHighRisk = false;
     try {
       const acc = (loadUsers() || []).find(x => x.id === hit.userId);
       licensee = maskAccount(acc ? (acc.email || acc.name || '') : '');
+      accountHighRisk = !!(acc && acc.highRisk);
     } catch {}
     // 查询记录：按查询者身份分组统计（作者本人/登录用户[脱敏]/游客），仅记录成功查询。
     // 转卖的码会被大量"非作者"查询，此处公开次数与构成，供编辑/买家判断（2026-10-16）
@@ -1336,12 +1339,27 @@ app.get('/api/verify', verifyRateLimit, optionalAuth, (req, res) => {
       materialStatus,
       image,
       licensee,
+      accountHighRisk,
       qTotal, qBy,
       scope: '学术发表（期刊论文、学术会议、学位论文、学术海报、图文摘要），仅限非商业用途',
       time: hit.time,
       status: '有效',
     });
   } catch { res.status(500).json({ ok: false, error: '查询失败' }); }
+});
+
+// 高风险账号标记（2026-11-27）：后台数据看板手动标记/取消；标记后该账号授权码的验真页显示红色警示
+app.post('/console/api/users/:id/risk', consoleAuth, (req, res) => {
+  try {
+    const flag = !!((req.body || {}).highRisk);
+    const users = loadUsers();
+    const u = users.find(x => x.id === req.params.id);
+    if (!u) return res.status(404).json({ ok: false, error: '账号不存在' });
+    if (flag) u.highRisk = true; else { delete u.highRisk; delete u.riskNote; }
+    saveUsers(users);
+    logLine('ai-op', `risk-flag user=${u.name} highRisk=${flag}`);
+    res.json({ ok: true, highRisk: flag });
+  } catch { res.status(500).json({ ok: false, error: '操作失败' }); }
 });
 
 // 后台：凭授权码反查下载记录与用户全部信息（仅管理员）
@@ -1484,10 +1502,10 @@ app.post('/' + ADMIN_PATH + '/toggle', consoleAuth, (req, res) => {
     if (u && u.email && m) {
       const desc = String(r.desc || '').replace(/\s+/g, ' ').slice(0, 100);
       m.mailer.sendMail({
-        from: 'OneFig 无花有果 <' + m.user + '>',
+        from: 'OneFig 无花果 <' + m.user + '>',
         to: u.email,
-        subject: '【OneFig 无花有果】你求的素材上新啦',
-        text: '你好！\n\n你之前提交的素材需求已制作完成并上新到素材库：\n\n「' + desc + (String(r.desc || '').length > 100 ? '…' : '') + '」\n\n前往查看：https://onefig.cn/materials\n\n感谢你的建议，祝科研顺利！\n— OneFig 无花有果团队',
+        subject: '【OneFig 无花果】你求的素材上新啦',
+        text: '你好！\n\n你之前提交的素材需求已制作完成并上新到素材库：\n\n「' + desc + (String(r.desc || '').length > 100 ? '…' : '') + '」\n\n前往查看：https://onefig.cn/materials\n\n感谢你的建议，祝科研顺利！\n— OneFig无花果团队',
       })
         .then(() => logLine('mail', 'submission-notify-sent id=' + r.id + ' email=' + u.email))
         .catch(e => logLine('error', 'submission-notify-fail id=' + r.id + ' email=' + u.email + ' ' + e.message));
@@ -1516,6 +1534,18 @@ app.use('/files', (req, res, next) => {
   if (!PUBLIC_FILE_RE.test(requestPath)) return res.status(404).json({ ok: false, error: '文件不存在' });
   next();
 }, express.static(FILES_DIR, { fallthrough: false }));
+
+// 画板素材原图（素材子目录文件）：不匿名直出；登录用户带请求头鉴权后加载，前端 loadImageEl 转 Blob（2026-11-27）
+app.get('/api/material-file/*', authUser, (req, res) => {
+  let rel;
+  try { rel = decodeURIComponent(String(req.params[0] || '')); } catch { return res.status(400).json({ ok: false, error: '文件路径无效' }); }
+  const parts = rel.split('/').filter(Boolean);
+  if (!parts.length || parts.some(part => part === '.' || part === '..')) return res.status(404).json({ ok: false, error: '文件不存在' });
+  const full = path.join(FILES_DIR, ...parts);
+  if (!full.startsWith(FILES_DIR + path.sep) || !fs.existsSync(full) || !fs.statSync(full).isFile()) return res.status(404).json({ ok: false, error: '文件不存在' });
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.sendFile(full);
+});
 
 // 后台上传素材图片：multipart（series + title + image），存服务器并登记
 // TinyPNG 压缩：key 存在 data/console/tinify.json（{"key":"..."}），未配置或失败时静默跳过

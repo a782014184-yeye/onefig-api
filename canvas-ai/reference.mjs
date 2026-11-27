@@ -3,21 +3,24 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { jsonrepair } from 'jsonrepair';
 import { generateGptsImage } from './gptsapi.mjs';
-import { readGenerationPrompt } from './prompt-store.mjs';
+import { readGenerationPrompt, FLAT_DIAGRAM_GENERATION_PROMPT } from './prompt-store.mjs';
+import { buildCoverGenerationPrompt } from './cover-prompts.mjs';
 
 const IMAGE_MODEL = process.env.ONEFIG_REFERENCE_IMAGE_MODEL || 'doubao-seedream-5-0-pro-260628';
 const VISION_MODEL = process.env.ONEFIG_DIAGRAM_MODEL || 'doubao-seed-2-1-pro-260915';
 const BASE_URL = (process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/$/, '');
 
-function buildGenerationPrompt(prompt, file, root, visualStyle = 'flat') {
+export function buildGenerationPrompt(prompt, file, root, bigType, visualStyle = 'flat') {
+  if (bigType === 'cover') return `${buildCoverGenerationPrompt(prompt, visualStyle)}${file ? '\n\n同时结合随本次请求上传的参考图，保留其中有用的科研实体和机制关系，但按上述要求重新绘制。' : ''}`;
   const lang = /[\u4e00-\u9fff]/.test(prompt) ? 'Chinese' : 'English';
-  const generationPrompt = readGenerationPrompt(root);
-  const styleRule = visualStyle === 'matte'
+  const flatDiagram = visualStyle === 'flat' && (bigType === 'mechanism' || bigType === 'abstract');
+  const generationPrompt = flatDiagram ? FLAT_DIAGRAM_GENERATION_PROMPT : readGenerationPrompt(root);
+  const styleRule = flatDiagram ? '' : visualStyle === 'matte'
     ? '视觉风格补充：采用柔和哑光的 OneFig 科研插画风，细腻但克制，保持主体与机制关系清晰。'
     : visualStyle === 'threed'
       ? '视觉风格补充：采用精致柔和的 3D 科研立体质感，保持原有布局和实体结构，不改变科研内容。'
       : '视觉风格补充：严格采用扁平矢量插画风，色块清晰、硬边、无渐变、无阴影、无纹理。';
-  return `${generationPrompt.replaceAll('{{lang}}', lang)}\n\n用户提供的文字内容：\n${prompt || '请主要依据随附参考图生成完整科研示意图。'}\n\n${styleRule}\n\n${file ? '同时结合随本次请求上传的参考图，保留其中有用的科研实体和机制关系，但按上述要求重新绘制。' : ''}`;
+  return `${generationPrompt.replaceAll('{{lang}}', lang)}\n\n用户提供的文字内容：\n${prompt || '请主要依据随附参考图生成完整科研示意图。'}${styleRule ? `\n\n${styleRule}` : ''}${file ? '\n\n同时结合随本次请求上传的参考图，保留其中有用的科研实体和机制关系，但按上述要求重新绘制。' : ''}`;
 }
 const clean = (value, max) => String(value ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').trim().slice(0, max);
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -75,7 +78,7 @@ async function generateImage(prompt, key, file, root, bigType, visualStyle) {
     method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: IMAGE_MODEL,
-      prompt: buildGenerationPrompt(prompt, file, root, visualStyle),
+      prompt: buildGenerationPrompt(prompt, file, root, bigType, visualStyle),
       ...(file ? { image: [`data:${file.mimetype};base64,${file.buffer.toString('base64')}`] } : {}),
       size: bigType === 'cover' ? '1728x2304' : '2560x1440', response_format: 'b64_json', watermark: false,
     }),
@@ -128,10 +131,10 @@ export function registerReferenceRoutes(app, { root, catalog, readKey, readGptsK
   app.post('/api/ai/reference', charge('big'), (req, res) => {
     upload.single('image')(req, res, async uploadError => {
       if (uploadError) return res.status(400).json({ ok: false, error: '参考图上传失败，请使用 10 MB 以内的 PNG / JPG / WebP' });
-      const prompt = clean(req.body?.prompt, 12000);
+      const prompt = clean(req.body?.prompt, 1000);
       const provider = ['seedream', 'gpt-image', 'gemini-image'].includes(req.body?.imageProvider) ? req.body.imageProvider : 'seedream';
       const bigType = ['mechanism', 'abstract', 'cover'].includes(req.body?.bigType) ? req.body.bigType : 'mechanism';
-      const visualStyle = ['matte', 'flat', 'threed'].includes(req.body?.visualStyle) ? req.body.visualStyle : 'flat';
+      const visualStyle = ['matte', 'flat', 'threed', 'ink', 'oil', 'watercolor', 'surreal', 'papercut'].includes(req.body?.visualStyle) ? req.body.visualStyle : 'flat';
       if (!prompt && !req.file) return res.status(400).json({ ok: false, error: '请粘贴论文摘要，或上传一张参考图' });
       const key = readKey();
       if (provider === 'seedream' && !key) return res.status(503).json({ ok: false, error: '尚未配置火山方舟 API Key' });
@@ -143,7 +146,7 @@ export function registerReferenceRoutes(app, { root, catalog, readKey, readGptsK
         } else if (provider === 'seedream') {
           buffer = await generateImage(prompt, key, req.file, root, bigType, visualStyle); mime = sniff(buffer) || 'image/png';
         } else {
-          const fullPrompt = buildGenerationPrompt(prompt, req.file, root, visualStyle);
+          const fullPrompt = buildGenerationPrompt(prompt, req.file, root, bigType, visualStyle);
           const result = await generateGptsImage({ provider, prompt: fullPrompt, key: readGptsKey(), size: bigType === 'cover' ? '1024x1536' : '1536x1024', aspectRatio: bigType === 'cover' ? '3:4' : '16:9', quality: 'high', file: req.file });
           buffer = result.buffer; mime = result.mime;
         }
@@ -163,7 +166,7 @@ export function registerReferenceRoutes(app, { root, catalog, readKey, readGptsK
 
   app.post('/api/ai/reconstruct', async (req, res) => {
     const { referenceId } = req.body || {};
-    const prompt = clean(req.body?.prompt, 12000);
+    const prompt = clean(req.body?.prompt, 1000);
     const type = ['mechanism', 'flow', 'compare'].includes(req.body?.diagramType) ? req.body.diagramType : 'mechanism';
     const index = readJson(indexFile, {});
     const record = index[referenceId];

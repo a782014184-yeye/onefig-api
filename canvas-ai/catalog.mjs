@@ -16,6 +16,7 @@ export function createCatalog({ dataDir, webRoot }) {
 
   const retrieve = (prompt, limit = 32) => {
     const query = norm(prompt);
+    if (!query) return [];
     const grams = new Set();
     for (let i = 0; i < query.length - 1; i++) grams.add(query.slice(i, i + 2));
     const scored = [];
@@ -23,7 +24,7 @@ export function createCatalog({ dataDir, webRoot }) {
       const name = norm(item.title);
       if (!name) continue;
       let score = query.includes(name) ? 120 + name.length * 10 : 0;
-      if (name.includes(query) && query.length >= 2) score += 50;
+      if (name.includes(query)) score += 50;
       for (const gram of grams) if (name.includes(gram)) score += 2;
       if (score > 0) scored.push({ title: item.title, folder: series.folder, score });
     }

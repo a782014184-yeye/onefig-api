@@ -38,6 +38,8 @@ const CREDIT_PACKAGES = [
 const MEMBER_GIFT = { basic: 150, pro: 900, team: 3000 }; // 终身制一次性赠送（按素材 30 积分/张约 5/30/100 张图）
 // 平台安全策略会 403 的词，提前拦截并友好提示（不扣积分）
 const BLOCKWORDS = ['肾小球', '肾小囊', '肾单位', '髓袢', '肾小管'];
+// 2026-11-26 生成封面图支持视觉风格（与画板 8 风格一致）：后台基础提示词 + 画板分风格指令（canvas-ai/cover-prompts.mjs）
+const { COVER_STYLE_PROMPTS } = require('./canvas-ai/cover-prompts.mjs');
 
 module.exports = function registerAI(app, deps) {
   const { consoleAuth, DATA_DIR, authUser, loadUsers, saveUsers, injectAigcMeta, logLine } = deps;
@@ -55,10 +57,13 @@ module.exports = function registerAI(app, deps) {
     // 兼容后台已保存的旧模板：生图阶段只画纯白底，避免模型把“透明背景”画成棋盘格。
     return assembled.replace(/透明背景|透明底|transparent\s+background/gi, '纯白背景') + GEN_BACKGROUND_RULE;
   };
-  const buildBigPrompt = (topic, bigType) => {
+  const buildBigPrompt = (topic, bigType, style) => {
     const b = prompts.get().big[bigType];
     if (!b) throw new Error('未知的大图类型');
-    return { prompt: String(b.prompt || '').split('{topic}').join(topic), size: b.size };
+    let prompt = String(b.prompt || '').split('{topic}').join(topic);
+    // 封面 + 选定风格：追加画板同款分风格指令（后台基础提示词仍生效、可改）
+    if (bigType === 'cover' && style && COVER_STYLE_PROMPTS[style]) prompt += `\n\n${COVER_STYLE_PROMPTS[style]}`;
+    return { prompt, size: b.size };
   };
   const AI_DIR = path.join(DATA_DIR, 'ai');
   const JOBS_FILE = path.join(AI_DIR, 'jobs.json');
@@ -405,7 +410,7 @@ module.exports = function registerAI(app, deps) {
     };
     const isBig = !!job.bigType;
     let prompt, size;
-    if (isBig) ({ prompt, size } = buildBigPrompt(job.prompt, job.bigType));
+    if (isBig) ({ prompt, size } = buildBigPrompt(job.prompt, job.bigType, job.style));
     else { prompt = buildGenPrompt(job.prompt, job.style); size = undefined; }
     const results = [];
     for (let i = 0; i < CANDIDATES; i++) {
@@ -602,6 +607,8 @@ module.exports = function registerAI(app, deps) {
       const prompt = String((req.body || {}).prompt || '').trim().slice(0, 500);
       const style = ['flat', 'matte', 'threed'].includes((req.body || {}).style) ? req.body.style : 'matte';
       const bigType = ['cover', 'abstract', 'mechanism'].includes((req.body || {}).bigType) ? req.body.bigType : null;
+      // 2026-11-26 封面支持视觉风格（画板同款 8 风格，非法值回落默认封面提示词）
+      const coverStyle = bigType === 'cover' && COVER_STYLE_PROMPTS[(req.body || {}).style] ? req.body.style : undefined;
       const transparent = !!((req.body || {}).transparent); // 默认不自动移除背景；需要透明底时再显式开启（2026-11-13）
       if (!prompt) return res.status(400).json({ ok: false, error: bigType ? '先描述一下想要什么大图吧' : '先描述一下想要什么素材吧' });
       if (prompt.length < 4) return res.status(400).json({ ok: false, error: '描述再具体一点点，太简短容易画歪' });
@@ -629,7 +636,7 @@ module.exports = function registerAI(app, deps) {
         return res.status(429).json({ ok: false, error: '你已有生成任务在排队或处理中，等它完成后再试～' });
       }
 
-      const job = { id: crypto.randomUUID(), userId: u.id, prompt, style: bigType ? undefined : style, bigType, transparent, kind: bigType ? 'big' : 'gen', status: 'queued', candidates: [], picked: null, paidWith, cost, createdAt: new Date().toISOString() };
+      const job = { id: crypto.randomUUID(), userId: u.id, prompt, style: bigType === 'cover' ? coverStyle : bigType ? undefined : style, bigType, transparent, kind: bigType ? 'big' : 'gen', status: 'queued', candidates: [], picked: null, paidWith, cost, createdAt: new Date().toISOString() };
       saveUsers(users);
       logLine('ai-op', `generate submit user=${u.name} kind=${bigType ? 'big' : 'gen'} bigType=${bigType || '-'} prompt="${prompt.slice(0, 40)}" style=${style} paidWith=${paidWith} cost=${paidWith === 'credit' ? cost : 0}`);
       const queuePosition = enqueueGenJob(job, j => runJob(j));
@@ -667,6 +674,24 @@ module.exports = function registerAI(app, deps) {
     const all = loadJobs();
     const list = all.filter(j => j.userId === req.user.id)
       .map(j => ({ id: j.id, kind: j.kind || 'gen', bigType: j.bigType, transparent: j.transparent, layers: j.layers, prompt: j.prompt, style: j.style, ext: j.ext || 'png', status: j.status, candidates: j.candidates, picked: j.picked, createdAt: j.createdAt, error: j.error, queuePosition: genQueuePosition(all, j) }));
+    // 2026-11-26 生成记录双端同步：并入画板 AI 工坊的生成记录（图片是 /workshop-files 静态地址，无需再带鉴权）
+    try {
+      const workshopIndex = path.join(DATA_DIR, 'canvas-ai', 'data', 'workshop', 'index.json');
+      const wlist = JSON.parse(fs.readFileSync(workshopIndex, 'utf8'));
+      if (Array.isArray(wlist)) {
+        for (const w of wlist) {
+          if (w.userId !== req.user.id || !Array.isArray(w.files) || !w.files.length) continue;
+          const cover = Array.isArray(w.files) && w.files.length > 1 && w.files[0].name === '重绘输入原图' ? w.files.slice(1) : w.files;
+          if (!cover.length) continue;
+          list.push({
+            id: `board-${w.id}`, kind: w.kind === 'cover' ? 'big' : (w.kind || 'gen'), bigType: w.kind === 'cover' ? 'cover' : undefined,
+            from: 'board', boardFiles: cover.map(f => ({ url: f.url, name: f.name, ext: f.ext })),
+            prompt: w.prompt, style: undefined, ext: cover[0].ext || 'png', status: 'done', candidates: [0], picked: 0, createdAt: w.createdAt,
+          });
+        }
+      }
+    } catch { /* 画板记录索引缺失/损坏时忽略，不影响主站记录 */ }
+    list.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     res.json({ ok: true, list, genWorkers: GEN_WORKERS });
   });
 

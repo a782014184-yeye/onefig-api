@@ -5,18 +5,29 @@ import sharp from 'sharp';
 import ImageTracer from 'imagetracerjs';
 import bounds from 'svg-path-bounds';
 import { generateGptsImage } from './gptsapi.mjs';
+import { buildFlatAbstractPrompt, buildFlatDiagramPrompt } from './prompt-store.mjs';
 
 const MODEL = process.env.ONEFIG_REFERENCE_IMAGE_MODEL || 'doubao-seedream-5-0-pro-260628';
 const BASE_URL = (process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/$/, '');
 const readJson = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
 const saveJson = (file, value) => { const temp = `${file}.tmp`; fs.writeFileSync(temp, JSON.stringify(value, null, 1)); fs.renameSync(temp, file); };
-const clean = (value, max = 4000) => String(value || '').trim().slice(0, max);
+const clean = (value, max = 1000) => String(value || '').trim().slice(0, max);
 
 const STYLE_PROMPTS = {
   matte: '柔和的二维科研插画，细腻哑光渐变，低饱和紫粉橙配色，轮廓圆润干净，不要照片感，不要文字',
   flat: '发表级扁平矢量科研插画，封闭清晰轮廓，色块平涂，低饱和配色，少量柔和渐变，不要文字，不要水印',
   threed: '精致柔和的 3D 科研插画，材质细腻，光线柔和，主体结构科学准确，干净背景，不要文字，不要水印',
 };
+// 仅在用户要求透明底时追加：适用于动物、细胞、器材、材料及多实体科研图。
+const TRANSPARENT_GUIDE = `完整保留原图中的科研内容、全部关键实体、细节结构、组成关系和相对位置，不增加、不删除、不替换核心对象。
+所有主体均应完整可见，轮廓清晰、边缘连续，避免裁切、遮挡、碎片化、溶解、雾化、透明化或过曝；细小结构和内部细节不得省略。
+主体外轮廓保持不透明，浅色和高光区域保留纹理与层次，避免主体与背景融为一体。
+使用均匀纯色背景，并根据主体颜色自动选择具有明显亮度和色相反差的中性色背景。浅色主体使用浅灰蓝或浅灰绿背景，其他主体避免使用与其主色、亮度或高光区域接近的背景。
+背景保持简洁，不使用纯白背景、复杂场景、渐变、纹理、装饰、地面或投影。
+避免白描边、发光边缘、光晕、羽化、烟雾和半透明叠影。
+全部主体完整排布，边界不得裁切，四周保留充足空白，不新增无关文字或水印。`;
+const transparentRequested = req => req.body?.transparent === true || req.body?.transparent === '1' || req.body?.transparent === 'true';
+const withTransparentGuide = (req, prompt) => transparentRequested(req) ? `${prompt}\n${TRANSPARENT_GUIDE}` : prompt;
 const BIG = {
   cover: { size: '1728x2304', rule: '竖版期刊封面，构图大气，有明确视觉中心和空间层次' },
   abstract: { size: '2560x1440', rule: '横版论文摘要图，研究逻辑一眼看懂，画面完整精致' },
@@ -37,48 +48,39 @@ async function callArk({ prompt, key, image, size, split = false }) {
   return data.data;
 }
 
-async function fallbackRemoveBackground(buffer) {
-  const { data, info } = await sharp(buffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  const { width: w, height: h } = info;
-  const corners = [0, (w - 1) * 4, w * (h - 1) * 4, (w * h - 1) * 4];
-  const br = corners.reduce((sum, i) => sum + data[i], 0) / 4;
-  const bg = corners.reduce((sum, i) => sum + data[i + 1], 0) / 4;
-  const bb = corners.reduce((sum, i) => sum + data[i + 2], 0) / 4;
-  const tolerance = 42 * 42 * 3;
-  const isBackground = pixel => {
-    const i = pixel * 4;
-    const dr = data[i] - br, dg = data[i + 1] - bg, db = data[i + 2] - bb;
-    return dr * dr + dg * dg + db * db < tolerance;
-  };
-  const visited = new Uint8Array(w * h);
-  const stack = new Int32Array(w * h);
-  let sp = 0;
-  for (let x = 0; x < w; x += 1) { stack[sp++] = x; stack[sp++] = w * (h - 1) + x; }
-  for (let y = 0; y < h; y += 1) { stack[sp++] = w * y; stack[sp++] = w * y + w - 1; }
-  while (sp > 0) {
-    const pixel = stack[--sp];
-    if (visited[pixel] || !isBackground(pixel)) continue;
-    visited[pixel] = 1;
-    data[pixel * 4 + 3] = 0;
-    const x = pixel % w, y = Math.floor(pixel / w);
-    if (x > 0) stack[sp++] = pixel - 1;
-    if (x < w - 1) stack[sp++] = pixel + 1;
-    if (y > 0) stack[sp++] = pixel - w;
-    if (y < h - 1) stack[sp++] = pixel + w;
+async function assertTransparentResult(buffer) {
+  const { data } = await sharp(buffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  let transparent = 0;
+  let visible = 0;
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] === 0) transparent += 1;
+    if (data[i] > 16) visible += 1;
   }
-  return sharp(data, { raw: { width: w, height: h, channels: 4 } }).png().toBuffer();
+  // 拒绝全白底或全透明的异常结果，不再静默返回未抠成功的图片。
+  if (!transparent || !visible) throw new Error('抠图结果异常，请重试');
+  return buffer;
 }
 
 async function removeBackground(buffer, mime) {
-  try {
-    const form = new FormData();
-    form.append('image', new Blob([buffer], { type: mime || 'image/png' }), 'image.png');
-    const response = await fetch('http://127.0.0.1:9000/remove-bg', { method: 'POST', body: form, signal: AbortSignal.timeout(120000) });
-    if (!response.ok) throw new Error('本地抠图服务不可用');
-    return Buffer.from(await response.arrayBuffer());
-  } catch {
-    return fallbackRemoveBackground(buffer);
+  // 本地 BiRefNet 直接抠图效果更干净；生产 ISNet 仍优先使用完整浅色主体救援流水线。
+  const attempts = process.env.ONEFIG_ENV === 'test' ? ['/remove-bg', '/matte-full'] : ['/matte-full', '/remove-bg'];
+  for (const endpoint of attempts) {
+    try {
+      const form = new FormData();
+      form.append('image', new Blob([buffer], { type: mime || 'image/png' }), 'image.png');
+      // general 适合真实照片；matte-full 带浅色主体救援，避免白鼠身体被白底误吞。
+      form.append('model', 'general');
+      const response = await fetch(`http://127.0.0.1:9000${endpoint}`, {
+        method: 'POST', body: form, signal: AbortSignal.timeout(120000),
+      });
+      if (!response.ok) throw new Error(`本地抠图服务 ${response.status}`);
+      const output = Buffer.from(await response.arrayBuffer());
+      return await assertTransparentResult(output);
+    } catch (error) {
+      console.warn(`[workshop] ${endpoint} failed:`, error?.message || error);
+    }
   }
+  throw new Error('本地抠图服务未就绪，暂时无法移除背景，请稍后重试');
 }
 
 async function traceSvg(buffer) {
@@ -137,7 +139,34 @@ export function registerWorkshopRoutes(app, { root, readKey, readGptsKey, upload
   };
   const imageData = file => `data:${file.mimetype || 'image/png'};base64,${file.buffer.toString('base64')}`;
 
-  app.get('/api/ai/workshop/jobs', (req, res) => res.json({ ok: true, jobs: readJson(indexFile, []).filter(job => job.userId === req.user.id) }));
+  // 2026-11-26 生成记录双端同步：合并主站 AI 工坊（/ai 页）的生成记录，画板「生成记录」里也能看到网站生成的结果
+  const webJobsFile = path.join(root, '..', 'ai', 'jobs.json');
+  const WEB_KIND_MAP = { gen: 'gen', big: 'big', edit: 'edit', style: 'style', nobg: 'nobg', vec: 'vec', split: 'split' };
+  const webJobsFor = userId => readJson(webJobsFile, [])
+    .filter(j => j.userId === userId && j.status === 'done' && Array.isArray(j.candidates) && j.candidates.length)
+    .map(j => ({
+      id: j.id, userId, provider: 'web', web: true,
+      kind: j.kind === 'big' && j.bigType === 'cover' ? 'cover' : (WEB_KIND_MAP[j.kind] || 'gen'),
+      prompt: clean(j.prompt, 500),
+      createdAt: j.createdAt || j.finishedAt || '',
+      files: j.candidates.map(n => ({ name: `c${n}`, url: `/api/ai/job/${j.id}/img/${n}`, ext: 'png' })),
+    }));
+
+  app.get('/api/ai/workshop/jobs', (req, res) => {
+    const local = readJson(indexFile, []).filter(job => job.userId === req.user.id);
+    const merged = [...local, ...webJobsFor(req.user.id)].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    res.json({ ok: true, jobs: merged });
+  });
+
+  // 删除单条生成记录（2026-11-27 双端批量删除用）：删索引 + 删结果文件
+  app.delete('/api/ai/workshop/record/:id', (req, res) => {
+    const jobs = readJson(indexFile, []);
+    const job = jobs.find(j => j.id === req.params.id && j.userId === req.user.id);
+    if (!job) return res.status(404).json({ ok: false, error: '记录不存在' });
+    saveJson(indexFile, jobs.filter(j => j.id !== job.id));
+    fs.rmSync(path.join(dir, job.id), { recursive: true, force: true });
+    res.json({ ok: true });
+  });
 
   app.post('/api/ai/workshop/record', (req, res) => {
     const kind = ['gen', 'big', 'edit', 'style', 'nobg', 'vec', 'split', 'soul'].includes(req.body?.kind) ? req.body.kind : 'gen';
@@ -155,26 +184,31 @@ export function registerWorkshopRoutes(app, { root, readKey, readGptsKey, upload
 
   app.post('/api/ai/workshop/generate', charge('gen'), async (req, res) => {
     try {
-      const provider = ['seedream', 'gpt-image', 'gemini-image'].includes(req.body?.provider) ? req.body.provider : 'seedream';
       const kind = BIG[req.body?.bigType] ? 'big' : 'gen';
-      const prompt = clean(req.body?.prompt);
+      const provider = kind === 'big' && req.body?.bigType === 'cover' && ['seedream', 'gpt-image', 'gemini-image'].includes(req.body?.provider) ? req.body.provider : 'seedream';
+      const prompt = clean(req.body?.prompt, 1000);
       if (prompt.length < 4) return res.status(400).json({ ok: false, error: '请至少输入 4 个字的生成描述' });
       const style = STYLE_PROMPTS[req.body?.style] ? req.body.style : 'matte';
       const big = kind === 'big' ? BIG[req.body.bigType] : null;
-      const fullPrompt = big
-        ? `${prompt}。${big.rule}。${STYLE_PROMPTS[style]}，画面中没有水印。`
-        : `${prompt}。单个科研素材，科学形态准确，主体完整居中，四周留白，纯白背景。${STYLE_PROMPTS[style]}`;
+      const isFlatDiagram = Boolean(big && req.body.bigType !== 'cover' && style === 'flat');
+      const basePrompt = isFlatDiagram
+        ? req.body.bigType === 'abstract' ? buildFlatAbstractPrompt(prompt) : buildFlatDiagramPrompt(prompt)
+        : big
+          ? `${prompt}。${big.rule}。${STYLE_PROMPTS[style]}，画面中没有水印。`
+          : `${prompt}。单个科研素材，科学形态准确，主体完整居中，四周留白，${transparentRequested(req) ? '' : '纯白背景。'}${STYLE_PROMPTS[style]}`;
+      // 配图提示词必须原样完整发送，不能再拼接透明底等额外说明。
+      const outputPrompt = isFlatDiagram ? basePrompt : withTransparentGuide(req, basePrompt);
       let buffer;
       if (provider === 'seedream') {
-        const items = await callArk({ prompt: fullPrompt, key: requireKey(), size: big?.size || '1728x1728' });
+        const items = await callArk({ prompt: outputPrompt, key: requireKey(), size: big?.size || '1728x1728' });
         buffer = Buffer.from(items[0].b64_json, 'base64');
       } else {
         const gptSize = bigTypeSize(req.body?.bigType);
         const aspectRatio = req.body?.bigType === 'cover' ? '3:4' : req.body?.bigType === 'mechanism' ? '4:3' : req.body?.bigType === 'abstract' ? '16:9' : '1:1';
-        const result = await generateGptsImage({ provider, prompt: fullPrompt, key: readGptsKey(), size: gptSize, aspectRatio, quality: 'high' });
+        const result = await generateGptsImage({ provider, prompt: outputPrompt, key: readGptsKey(), size: gptSize, aspectRatio, quality: 'high' });
         buffer = result.buffer;
       }
-      if (req.body?.transparent) buffer = await removeBackground(buffer, 'image/png');
+      if (transparentRequested(req)) buffer = await removeBackground(buffer, 'image/png');
       else buffer = await sharp(buffer).png().toBuffer();
       res.json({ ok: true, job: record(kind, prompt, [{ name: 'c0', label: kind === 'big' ? '生成大图' : '生成素材', data: buffer }], provider, req.user.id) });
     } catch (error) { fail(res, error); }
@@ -185,9 +219,9 @@ export function registerWorkshopRoutes(app, { root, readKey, readGptsKey, upload
       if (!req.file) return res.status(400).json({ ok: false, error: '请先上传要修改的图片' });
       const prompt = clean(req.body?.prompt);
       if (!prompt) return res.status(400).json({ ok: false, error: '请填写修改要求' });
-      const items = await callArk({ prompt: `${prompt}。保持科研内容准确和原图主体布局，输出精致完整的科研插画，不要添加文字或水印。`, key: requireKey(), image: imageData(req.file), size: '2560x1440' });
+      const items = await callArk({ prompt: withTransparentGuide(req, `${prompt}。保持科研内容准确和原图主体布局，输出精致完整的科研插画，不要添加文字或水印。`), key: requireKey(), image: imageData(req.file), size: '2560x1440' });
       let buffer = Buffer.from(items[0].b64_json, 'base64');
-      if (req.body?.transparent === '1' || req.body?.transparent === 'true') buffer = await removeBackground(buffer, 'image/png');
+      if (transparentRequested(req)) buffer = await removeBackground(buffer, 'image/png');
       else buffer = await sharp(buffer).png().toBuffer();
       res.json({ ok: true, job: record('edit', prompt, [{ name: 'c0', label: 'AI 改图', data: buffer }], 'seedream', req.user.id) });
     } catch (error) { fail(res, error); }
@@ -197,9 +231,13 @@ export function registerWorkshopRoutes(app, { root, readKey, readGptsKey, upload
     try {
       if (!req.file) return res.status(400).json({ ok: false, error: '请先上传要转换的图片' });
       const style = STYLE_PROMPTS[req.body?.style] ? req.body.style : 'flat';
-      const items = await callArk({ prompt: `保持原图科研主体、组成和相对位置不变，将视觉风格重绘为：${STYLE_PROMPTS[style]}。不要增加或减少关键科研实体，不要文字或水印。`, key: requireKey(), image: imageData(req.file), size: '2560x1440' });
+      const stylePrompt = transparentRequested(req)
+        ? STYLE_PROMPTS[style].replaceAll('不要文字，不要水印', '保留原图必要文字与标注，不新增无关文字或水印').replaceAll('不要文字', '不新增无关文字')
+        : STYLE_PROMPTS[style];
+      const labelRule = transparentRequested(req) ? '保留原图必要文字与标注，不新增无关文字或水印' : '不要文字或水印';
+      const items = await callArk({ prompt: withTransparentGuide(req, `保持原图科研主体、组成和相对位置不变，将视觉风格重绘为：${stylePrompt}。不要增加或减少关键科研实体，${labelRule}。`), key: requireKey(), image: imageData(req.file), size: '2560x1440' });
       let buffer = Buffer.from(items[0].b64_json, 'base64');
-      if (req.body?.transparent === '1' || req.body?.transparent === 'true') buffer = await removeBackground(buffer, 'image/png');
+      if (transparentRequested(req)) buffer = await removeBackground(buffer, 'image/png');
       else buffer = await sharp(buffer).png().toBuffer();
       res.json({ ok: true, job: record('style', `风格转换：${style}`, [{ name: 'c0', label: '风格转换', data: buffer }], 'seedream', req.user.id) });
     } catch (error) { fail(res, error); }
