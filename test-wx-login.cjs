@@ -78,8 +78,10 @@ function ok(name) { passed++; console.log('  ✅', name); }
     const [p, s] = m[1].split('.');
     if (!p || sign(p) !== s) return res.status(401).json({ ok: false, error: '登录已过期' });
     const d = JSON.parse(Buffer.from(p, 'base64url').toString());
+    if (d.exp < Date.now()) return res.status(401).json({ ok: false, error: '登录已过期' });
     const u = loadUsers().find(x => x.id === d.uid);
     if (!u) return res.status(401).json({ ok: false, error: '账号不存在' });
+    if ((d.pv || 0) !== (u.pwdVer || 0)) return res.status(401).json({ ok: false, error: '密码已修改，请重新登录' });
     req.user = u;
     next();
   }
@@ -336,6 +338,27 @@ function ok(name) { passed++; console.log('  ✅', name); }
     const me = await get('/api/auth/wx-status', tok);
     assert.strictEqual(me.bound, false);
     ok('G3 邮箱账号解绑需密码确认，解绑后状态更新');
+  }
+
+  // ====== G4. 无密码账号登录态设置密码（补绑邮箱后完善账号的最后一步） ======
+  {
+    // regToken 对应的账号此前已补绑邮箱 real@test.local，但无密码
+    let st = await get('/api/auth/wx-status', regToken);
+    assert.strictEqual(st.hasPassword, false);
+    const weak = await post('/api/auth/set-password', { password: '123' }, regToken);
+    assert.strictEqual(weak.ok, false);
+    const set = await post('/api/auth/set-password', { password: 'new-pass-789' }, regToken);
+    assert.strictEqual(set.ok, true);
+    assert.ok(set.token);
+    // 旧 token 已失效（pwdVer 递增），新 token 可用
+    const oldMe = await get('/api/auth/wx-status', regToken);
+    assert.strictEqual(oldMe.ok, false, '旧 token 应已失效');
+    const newMe = await get('/api/auth/wx-status', set.token);
+    assert.strictEqual(newMe.hasPassword, true);
+    // 已有密码后拒绝重复设置
+    const again = await post('/api/auth/set-password', { password: 'another-1' }, set.token);
+    assert.strictEqual(again.ok, false);
+    ok('G4 无密码账号登录态设置密码：旧登录态失效、新 token 签发、重复设置被拒');
   }
 
   // ====== H. bind 模式（登录态扫码直接绑） ======

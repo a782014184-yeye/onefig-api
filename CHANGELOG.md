@@ -5,6 +5,8 @@
 ## [Unreleased]
 
 ### Added
+### Added
+- 无密码账号登录态设置密码（2026-11-27）：`POST /api/auth/set-password`（authUser + 限流），仅 passHash 为空的账号可用；设置后 pwdVer 递增使旧 token 全部失效，响应直接签发新 token；`wx-status` 新增 `hasPassword` 字段
 - 关注欢迎语（2026-11-27）：开启消息推送后平台自带"被关注回复"失效，改由我方服务器在订阅事件中被动回复——新关注用户收到欢迎语（文案可配，存 `data/wx/welcome.json`，默认文案内置）；已关注用户扫码（SCAN 事件）收到"已收到你的扫码 ✅ 请回到浏览器页面继续操作"提示；普通消息与非扫码事件仍回 `success`
 - 微信扫码登录（2026-11-27，默认关闭，需配置 `ONEFIG_WX_APPID/SECRET/TOKEN`）：新增 `wx.js` 模块——带参数临时二维码（5 分钟有效、一次性）/ 服务号事件回调（sha1 验签，关注与已关注扫码两路 EventKey 兼容，昵称异步补齐）/ 状态轮询（pending→followed→bound 状态机）/ 邮箱密码绑定（复用登录校验与未验证邮箱硬闸门）/ 一键注册（占位邮箱 `wx_xxx@wx.onefig.cn`，无密码，补绑邮箱前禁止解绑微信防账号丢失）/ 账号中心 wx-status、wx-unbind（密码确认）、wx-set-email 验证码补绑；bindCode 为 HMAC 签名短令牌（10 分钟、jti 一次性防重放）；一个微信只绑一个账号、一个账号只绑一个微信；服务号凭据未配置时全部接口明确报错且功能关闭
 - 服务器配置回调 `GET/POST /api/wx/callback`（raw 报文验签，与微信支付回调同一挂载模式）

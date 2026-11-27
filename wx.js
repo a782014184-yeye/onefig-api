@@ -341,7 +341,25 @@ module.exports = function registerWx(app, deps) {
       wxName: u.wxName || '',
       wxBoundAt: u.wxBoundAt || null,
       isWxCreated: /@wx\.onefig\.cn$/.test(u.email || ''),
+      hasPassword: !!u.passHash,
     });
+  });
+
+  const setPwLimit = makeRateLimiter(10, 10 * 60e3, '尝试太频繁啦，请 10 分钟后再试');
+  // 无密码账号（微信扫码创建/补绑邮箱后）在登录态直接设置密码；成功后旧登录态全部失效并签发新 token
+  app.post('/api/auth/set-password', authUser, setPwLimit, (req, res) => {
+    const u = req.user;
+    if (u.passHash) return res.status(400).json({ ok: false, error: '该账号已有密码，修改密码请用登录页的「忘记密码」' });
+    const password = String((req.body || {}).password || '');
+    if (password.length < 6) return res.status(400).json({ ok: false, error: '密码至少 6 位' });
+    const users = loadUsers();
+    const t = users.find(x => x.id === u.id);
+    t.salt = crypto.randomBytes(16).toString('hex');
+    t.passHash = crypto.scryptSync(password, t.salt, 32).toString('hex');
+    t.pwdVer = (t.pwdVer || 0) + 1; // 使旧 token 全部失效（本响应签发的新 token 除外）
+    saveUsers(users);
+    logLine(`set-password user=${t.email}`);
+    res.json({ ok: true, token: makeToken(t.id, t.pwdVer), user: publicUser(t) });
   });
 
   // 账号中心：解绑微信（需密码确认；微信创建的无密码账号不允许解绑——必须先补绑邮箱）
