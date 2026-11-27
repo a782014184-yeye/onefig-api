@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- 一键绑定引导（2026-11-27）：`POST /api/auth/wx-prompt-dismiss` 持久化「暂时不用」（`wxPromptDismissedAt` 入用户表）；`wx-status` 新增 `promptDismissed`
 ### Added
 - 无密码账号登录态设置密码（2026-11-27）：`POST /api/auth/set-password`（authUser + 限流），仅 passHash 为空的账号可用；设置后 pwdVer 递增使旧 token 全部失效，响应直接签发新 token；`wx-status` 新增 `hasPassword` 字段
 - 关注欢迎语（2026-11-27）：开启消息推送后平台自带"被关注回复"失效，改由我方服务器在订阅事件中被动回复——新关注用户收到欢迎语（文案可配，存 `data/wx/welcome.json`，默认文案内置）；已关注用户扫码（SCAN 事件）收到"已收到你的扫码 ✅ 请回到浏览器页面继续操作"提示；普通消息与非扫码事件仍回 `success`

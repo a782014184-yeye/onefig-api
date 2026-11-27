@@ -342,7 +342,17 @@ module.exports = function registerWx(app, deps) {
       wxBoundAt: u.wxBoundAt || null,
       isWxCreated: /@wx\.onefig\.cn$/.test(u.email || ''),
       hasPassword: !!u.passHash,
+      promptDismissed: !!u.wxPromptDismissedAt,
     });
+  });
+
+  // 一键绑定引导弹窗「暂时不用」：永久不再提示（换设备/浏览器也不烦）
+  app.post('/api/auth/wx-prompt-dismiss', authUser, (req, res) => {
+    const users = loadUsers();
+    const t = users.find(x => x.id === req.user.id);
+    t.wxPromptDismissedAt = new Date().toISOString();
+    saveUsers(users);
+    res.json({ ok: true });
   });
 
   const setPwLimit = makeRateLimiter(10, 10 * 60e3, '尝试太频繁啦，请 10 分钟后再试');

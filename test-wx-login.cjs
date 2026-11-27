@@ -376,6 +376,18 @@ function ok(name) { passed++; console.log('  ✅', name); }
     ok('H1 登录态 bind 二维码：关注后直接绑定当前账号');
   }
 
+  // ====== I. 一键绑定引导弹窗的「不再提示」持久化 ======
+  {
+    const tok = makeToken('u-email-1', 0);
+    let st = await get('/api/auth/wx-status', tok);
+    assert.strictEqual(st.promptDismissed, false);
+    const d = await post('/api/auth/wx-prompt-dismiss', {}, tok);
+    assert.strictEqual(d.ok, true);
+    st = await get('/api/auth/wx-status', tok);
+    assert.strictEqual(st.promptDismissed, true);
+    ok('I1 「暂时不用」后 promptDismissed 持久化为 true');
+  }
+
   server.close();
   console.log(`\n全部通过（${passed} 项）`);
   process.exit(0);
