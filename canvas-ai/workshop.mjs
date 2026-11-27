@@ -142,15 +142,27 @@ export function registerWorkshopRoutes(app, { root, readKey, readGptsKey, upload
   // 2026-11-26 生成记录双端同步：合并主站 AI 工坊（/ai 页）的生成记录，画板「生成记录」里也能看到网站生成的结果
   const webJobsFile = path.join(root, '..', 'ai', 'jobs.json');
   const WEB_KIND_MAP = { gen: 'gen', big: 'big', edit: 'edit', style: 'style', nobg: 'nobg', vec: 'vec', split: 'split' };
+  // 2026-11-27：文件显示名改为可读文案（原 `c${n}` 内部编号直接外露，用户看不懂" c1c4 是啥"）
+  const WEB_KIND_NAME = { gen: '生成素材', big: '生成大图', cover: '生成封面图', edit: 'AI 改图', style: '风格转换', nobg: '移除背景', vec: '位图转矢量', split: '拆分图层' };
   const webJobsFor = userId => readJson(webJobsFile, [])
     .filter(j => j.userId === userId && j.status === 'done' && Array.isArray(j.candidates) && j.candidates.length)
-    .map(j => ({
-      id: j.id, userId, provider: 'web', web: true,
-      kind: j.kind === 'big' && j.bigType === 'cover' ? 'cover' : (WEB_KIND_MAP[j.kind] || 'gen'),
-      prompt: clean(j.prompt, 500),
-      createdAt: j.createdAt || j.finishedAt || '',
-      files: j.candidates.map(n => ({ name: `c${n}`, url: `/api/ai/job/${j.id}/img/${n}`, ext: 'png' })),
-    }));
+    .map(j => {
+      const kind = j.kind === 'big' && j.bigType === 'cover' ? 'cover' : (WEB_KIND_MAP[j.kind] || 'gen');
+      const multi = j.candidates.length > 1;
+      return {
+        id: j.id, userId, provider: 'web', web: true,
+        kind,
+        prompt: clean(j.prompt, 500),
+        createdAt: j.createdAt || j.finishedAt || '',
+        files: j.candidates.map((n, i) => ({
+          name: kind === 'split'
+            ? (n === 0 ? '底图' : `图层 ${n}`)
+            : (multi ? `候选 ${i + 1}` : (WEB_KIND_NAME[kind] || '生成结果')),
+          url: `/api/ai/job/${j.id}/img/${n}`,
+          ext: 'png',
+        })),
+      };
+    });
 
   app.get('/api/ai/workshop/jobs', (req, res) => {
     const local = readJson(indexFile, []).filter(job => job.userId === req.user.id);

@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- 生成记录文件显示名可读化（2026-11-27）：画板「生成记录」中来自主站的记录不再显示 `c0/c1…` 内部编号——拆分图层显示「底图/图层 N」，多候选显示「候选 N」，单结果直接显示功能名（生成素材/AI 改图/…）；名称在读取时生成，历史记录同步生效
 - 一键绑定引导（2026-11-27）：`POST /api/auth/wx-prompt-dismiss` 持久化「暂时不用」（`wxPromptDismissedAt` 入用户表）；`wx-status` 新增 `promptDismissed`
 - 扫码提示（SCAN 事件回复）可配置：与欢迎语同存 `data/wx/welcome.json`（`scanTip` 字段），默认「已收到你的扫码 ✅ 请回到浏览器页面继续操作～」
 ### Added
