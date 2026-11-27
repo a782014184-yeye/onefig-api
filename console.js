@@ -1690,7 +1690,7 @@ H.dashboard=async()=>{
       ? '<div style="max-height:260px;overflow:auto"><table><tr><th>账号</th><th>会员</th><th>近 24h</th><th>近 7 天</th><th>状态 / 操作</th></tr>'
         +exAlert.list.map(r=>'<tr><td style="font-size:12px"><b>'+esc(r.name)+'</b><br><span style="color:#b0aac4">'+esc(r.email)+'</span></td><td style="font-size:12px">'+esc(r.level)+'</td><td style="font-size:12px;font-weight:700;color:'+(r.count24h>=exAlert.threshold*2?'#d6336c':'#b8860b')+'">'+r.count24h+' 次</td><td style="font-size:12px">'+r.count7d+' 次</td><td style="font-size:12px;white-space:nowrap">'
           +(r.highRisk?'<span style="color:#d6336c;font-weight:700">⚠️ 已标记高风险</span> ':'')
-          +'<button class="btn btn-xs '+(r.highRisk?'btn-g':'btn-p')+'" onclick="toggleRisk(\''+r.userId+'\','+(r.highRisk?'false':'true')+')">'+(r.highRisk?'取消标记':'标记高风险')+'</button></td></tr>').join('')
+          +'<button class="btn btn-xs '+(r.highRisk?'btn-g':'btn-p')+'" onclick="toggleRisk(\\''+r.userId+'\\','+(r.highRisk?'false':'true')+')">'+(r.highRisk?'取消标记':'标记高风险')+'</button></td></tr>').join('')
         +'</table></div>'
       : '<div class="sub" style="padding:14px;text-align:center">✅ 暂无高频导出账号</div>')+'</div>'):'';
   // 验真异常：非作者查询明显多于作者的授权码，疑似泄露/转卖
@@ -1731,7 +1731,7 @@ window.setRange=r=>{window._range=r;route()};
 window.setCRange=r=>{window._crange=r;route()};
 // 高风险账号标记/取消（2026-11-27）：标记后该账号授权码的验真页红色警示
 window.toggleRisk=async(id,flag)=>{
-  if(flag && !confirm('确认把该账号标记为高风险？\n标记后，该账号授权码的验真页将显示「账号异常高风险」红色警示。')) return;
+  if(flag && !confirm('确认把该账号标记为高风险？标记后，该账号授权码的验真页将显示「账号异常高风险」红色警示。')) return;
   try{
     await api('/console/api/users/'+id+'/risk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({highRisk:flag})});
     toast(flag?'已标记为高风险 ✅':'已取消高风险标记 ✅');
