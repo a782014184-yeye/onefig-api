@@ -25,12 +25,16 @@ async function readModelAnswer(response) {
   if (!(response.headers.get('content-type') || '').includes('text/event-stream')) {
     const data = await response.json().catch(() => ({}));
     const answer = data?.choices?.[0]?.message?.content;
-    return { content: Array.isArray(answer) ? answer.map(part => part?.text || '').join('') : String(answer || ''), usage: data?.usage };
+    return {
+      content: Array.isArray(answer) ? answer.map(part => part?.text || '').join('') : String(answer || ''),
+      usage: data?.usage,
+      finishReason: data?.choices?.[0]?.finish_reason || '',
+    };
   }
-  if (!response.body) return { content: '', usage: undefined };
+  if (!response.body) return { content: '', usage: undefined, finishReason: '' };
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let pending = '', content = '', usage;
+  let pending = '', content = '', usage, finishReason = '';
   const consume = line => {
     const trimmed = line.trim();
     if (!trimmed.startsWith('data:')) return;
@@ -38,8 +42,10 @@ async function readModelAnswer(response) {
     if (!payload || payload === '[DONE]') return;
     try {
       const chunk = JSON.parse(payload);
-      const delta = chunk?.choices?.[0]?.delta?.content ?? chunk?.choices?.[0]?.message?.content;
+      const choice = chunk?.choices?.[0];
+      const delta = choice?.delta?.content ?? choice?.message?.content;
       content += Array.isArray(delta) ? delta.map(part => part?.text || '').join('') : String(delta || '');
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
       if (chunk?.usage) usage = chunk.usage;
     } catch { /* 忽略不完整的 SSE 心跳行 */ }
   };
@@ -52,7 +58,7 @@ async function readModelAnswer(response) {
     if (done) break;
   }
   if (pending.trim()) consume(pending);
-  return { content, usage };
+  return { content, usage, finishReason };
 }
 
 export function registerSoulRoute(app, { root, upload, readGptsKey, charge }) {
@@ -74,7 +80,8 @@ export function registerSoulRoute(app, { root, upload, readGptsKey, charge }) {
     const key = readGptsKey();
     if (!key) return res.status(503).json({ ok: false, error: '尚未配置 gptsapi API Key' });
     const model = process.env.GPTSAPI_SOUL_MODEL || 'gpt-6.2-sol';
-    try {
+    // 2026-11-27：模型对复杂图可能输出截断/不完整 SVG——自动重试一次；仍失败退积分并给出可操作建议
+    const callModel = async () => {
       const response = await fetch('https://api.gptsapi.net/v1/chat/completions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -93,26 +100,41 @@ export function registerSoulRoute(app, { root, upload, readGptsKey, charge }) {
         const data = await response.json().catch(() => ({}));
         throw Object.assign(new Error(data?.error?.message || data?.message || `大图转可编辑失败（${response.status}）`), { status: 502 });
       }
-      const answer = await readModelAnswer(response);
-      const content = answer.content;
-      const start = content.indexOf('<svg');
-      const end = content.lastIndexOf('</svg>');
-      if (start < 0 || end <= start) throw new Error('模型没有返回完整 SVG，请重试');
-      const svg = content.slice(start, end + 6).replace(/<\?xml[^>]*>/g, '').trim();
-      if (/<script|foreignObject|<image\b|javascript:|on[a-z]+\s*=/i.test(svg)) throw new Error('返回的 SVG 包含不支持的内容');
-      if (!/<(?:path|rect|circle|ellipse|polygon|polyline|line|text)\b/i.test(svg)) throw new Error('返回的 SVG 没有可编辑图形');
+      return readModelAnswer(response);
+    };
+    try {
+      let answer, content = '', lastDiag = '';
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        answer = await callModel();
+        content = answer.content;
+        const start = content.indexOf('<svg');
+        const end = content.lastIndexOf('</svg>');
+        if (start >= 0 && end > start) {
+          const svg = content.slice(start, end + 6).replace(/<\?xml[^>]*>/g, '').trim();
+          if (/<script|foreignObject|<image\b|javascript:|on[a-z]+\s*=/i.test(svg)) throw new Error('返回的 SVG 包含不支持的内容');
+          if (!/<(?:path|rect|circle|ellipse|polygon|polyline|line|text)\b/i.test(svg)) throw new Error('返回的 SVG 没有可编辑图形');
 
-      const referenceId = crypto.randomUUID();
-      const ext = req.file.mimetype === 'image/jpeg' ? 'jpg' : req.file.mimetype === 'image/webp' ? 'webp' : 'png';
-      const referenceFile = `${referenceId}.${ext}`;
-      fs.writeFileSync(path.join(referenceDir, referenceFile), req.file.buffer);
-      const references = readJson(referenceIndex, {});
-      references[referenceId] = { file: referenceFile, mime: req.file.mimetype, generated: false, provider: model, userId: req.user.id };
-      saveJson(referenceIndex, references);
+          const referenceId = crypto.randomUUID();
+          const ext = req.file.mimetype === 'image/jpeg' ? 'jpg' : req.file.mimetype === 'image/webp' ? 'webp' : 'png';
+          const referenceFile = `${referenceId}.${ext}`;
+          fs.writeFileSync(path.join(referenceDir, referenceFile), req.file.buffer);
+          const references = readJson(referenceIndex, {});
+          references[referenceId] = { file: referenceFile, mime: req.file.mimetype, generated: false, provider: model, userId: req.user.id };
+          saveJson(referenceIndex, references);
 
-      const id = crypto.randomUUID();
-      fs.writeFileSync(path.join(dir, `${id}.svg`), svg);
-      res.json({ ok: true, model, svg, url: `/soul-svg/${id}.svg`, referenceId, referenceUrl: `/references/${referenceFile}`, usage: answer.usage });
+          const id = crypto.randomUUID();
+          fs.writeFileSync(path.join(dir, `${id}.svg`), svg);
+          return res.json({ ok: true, model, svg, url: `/soul-svg/${id}.svg`, referenceId, referenceUrl: `/references/${referenceFile}`, usage: answer.usage });
+        }
+        lastDiag = `attempt=${attempt} finish=${answer.finishReason || '?'} usage=${JSON.stringify(answer.usage || null)} len=${content.length} head=${JSON.stringify(content.slice(0, 100))} tail=${JSON.stringify(content.slice(-100))}`;
+        console.error('[soul-redraw] 模型未返回完整 SVG', lastDiag);
+      }
+      // 两次都失败：退积分 + 按截断与否给可操作建议
+      res.locals.canvasAiRefund?.();
+      const truncated = answer?.finishReason === 'length';
+      throw Object.assign(new Error(truncated
+        ? '这张图细节较多，模型输出超出长度被截断。建议换一张元素更简单的图，或稍后重试（积分已退回）'
+        : '模型没有返回完整的 SVG，已自动重试一次仍失败，请稍后重试（积分已退回）'), { status: 502 });
     } catch (error) {
       console.error('[soul-redraw]', error);
       res.status(error?.status || 502).json({ ok: false, error: String(error?.message || '大图转可编辑失败，请重试').slice(0, 300) });

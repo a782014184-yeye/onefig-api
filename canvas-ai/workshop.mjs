@@ -135,6 +135,8 @@ export function registerWorkshopRoutes(app, { root, readKey, readGptsKey, upload
   };
   const fail = (res, error) => {
     console.error('[workshop]', error);
+    // 2026-11-27：处理失败不再白扣积分（与主站生成失败退款逻辑同口径）
+    res.locals.canvasAiRefund?.();
     res.status(error?.status || 502).json({ ok: false, error: clean(error?.message || 'AI 处理失败，请重试', 300) });
   };
   const imageData = file => `data:${file.mimetype || 'image/png'};base64,${file.buffer.toString('base64')}`;
